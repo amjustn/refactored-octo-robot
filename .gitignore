@@ -6,3 +6,4 @@ logs/
 data/*.db
 .pytest_cache/
 _archive/
+eval/runs/

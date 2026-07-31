@@ -1,0 +1,13 @@
+skill: daily-briefing
+arguments: ""
+mock_date: "2026-07-31"
+expect:
+  sections: ["指数", "板块", "资金", "要闻"]
+  min_chars: 200
+  max_duration_s: 600
+  must_cite: ["指数"]
+  rubric_focus:
+    - 结构完整性
+    - 时效性
+  data_points:
+    上证指数: 3500

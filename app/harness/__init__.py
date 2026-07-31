@@ -134,10 +134,16 @@ async def run(spec: TaskSpec, bus: Optional[EventBus] = None) -> RunResult:
 
         report = await _execute(spec, bus)
 
+        # OutputGuard: four quality gates before persistence
+        from .guards import OutputGuard
+        guard = OutputGuard(bus=bus, task_id=spec.task_id)
+        report, guard_warnings = guard.check(report, spec.skill_name, spec.strategy)
+
         duration = time() - start_ts
         tokens = get_usage(spec.task_id)
         billing = repo.save_billing(
-            spec.task_id, tokens, duration, model=spec.llm.model,
+            spec.task_id, tokens, duration,
+            guard_warnings=guard_warnings, model=spec.llm.model,
         )
         usage = {
             "prompt_tokens": billing["tokens_prompt"],
@@ -162,6 +168,7 @@ async def run(spec: TaskSpec, bus: Optional[EventBus] = None) -> RunResult:
             duration_seconds=round(duration, 1),
             tokens=tokens,
             usage=usage,
+            guard_warnings=len(guard_warnings),
         )
         return RunResult(
             task_id=spec.task_id, status="completed", report=report,

@@ -1,0 +1,14 @@
+skill: investment-team
+arguments: "腾讯"
+mock_date: "2026-07-31"
+expect:
+  sections: ["一句话结论", "四维评分", "投资论点", "最终投资建议"]
+  min_chars: 400
+  max_duration_s: 600
+  must_cite: ["营收", "净利润"]
+  rubric_focus:
+    - 估值三情景完整性
+    - Bull/Bear 平衡度
+  data_points:
+    营收: 6600
+    净利润: 1900
