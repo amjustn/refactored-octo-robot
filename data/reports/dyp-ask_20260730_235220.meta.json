@@ -1,0 +1,11 @@
+{
+  "skill_name": "dyp-ask",
+  "arguments": "x",
+  "duration_seconds": 68.3,
+  "tokens": {
+    "prompt_tokens": 3858,
+    "completion_tokens": 1092,
+    "total_tokens": 4950
+  },
+  "created_at": "2026-07-30T23:52:20.461461"
+}

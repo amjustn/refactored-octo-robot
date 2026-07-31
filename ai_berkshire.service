@@ -1,0 +1,17 @@
+[Unit]
+Description=AI Berkshire Web - Investment Research Workstation
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/home/q/ai_berkshire_web/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8001 --log-level info
+WorkingDirectory=/home/q/ai_berkshire_web
+Environment="PATH=/home/q/ai_berkshire_web/venv/bin:/usr/local/bin:/usr/bin:/bin"
+EnvironmentFile=/home/q/ai_berkshire_web/.env
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=10
+
+[Install]
+WantedBy=default.target

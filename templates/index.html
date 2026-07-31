@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Berkshire Web - 价值投资研究工作站</title>
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+<link rel="stylesheet" href="/static/css/style.css?v=20260731a">
+</head>
+<body>
+<div id="toast-container"></div>
+<button id="sidebar-toggle" onclick="toggleSidebar()" aria-label="菜单">☰</button>
+<div id="app">
+  <aside id="sidebar">
+    <div class="logo">
+      <h1>AI Berkshire</h1>
+      <p class="subtitle">价值投资研究工作站</p>
+    </div>
+    <div class="skill-search-box">
+      <input type="text" id="skill-search" placeholder="搜索技能..." oninput="filterSkills()" autocomplete="off">
+    </div>
+    <nav id="skill-nav">
+      <div id="nav-loading">
+        <div class="skeleton-line skeleton"></div>
+        <div class="skeleton-line short skeleton"></div>
+        <div class="skeleton-line skeleton"></div>
+        <div class="skeleton-line long skeleton"></div>
+        <div class="skeleton-line skeleton"></div>
+        <div class="skeleton-line short skeleton"></div>
+      </div>
+      <div id="nav-categories"></div>
+    </nav>
+    <div class="sidebar-footer">
+      <button class="btn-history" onclick="showHistory()">历史报告</button>
+      <button class="btn-history btn-llm-settings" onclick="openLlmModal()">⚙ 模型设置</button>
+      <p class="powered" id="powered-by">Powered by DeepSeek</p>
+    </div>
+  </aside>
+  <div id="sidebar-mask" onclick="toggleSidebar()"></div>
+
+  <main id="main">
+    <div id="input-area">
+      <div class="input-card">
+        <div class="skill-selector">
+          <label>当前技能</label>
+          <div class="skill-pill" id="current-skill">
+            <span id="skill-icon">K</span>
+            <span id="skill-name">investment-team</span>
+            <span id="skill-label">多Agent投研团队</span>
+          </div>
+          <p class="skill-desc" id="skill-desc"></p>
+        </div>
+        <div class="arg-input">
+          <label for="arg-field">分析目标</label>
+          <input type="text" id="arg-field" list="arg-history" placeholder="输入公司名或股票代码，如：腾讯 / PDD / 贵州茅台" autocomplete="off">
+          <datalist id="arg-history"></datalist>
+          <span class="hint" id="input-hint"></span>
+        </div>
+        <div id="llm-notice" class="llm-notice" style="display:none" onclick="openLlmModal()">
+          ⚠ 你还没有配置大模型供应商和 API Key，当前使用服务器默认模型。点击此处填写你自己的 Key →
+        </div>
+        <div class="actions">
+          <button id="btn-research" class="btn-primary" onclick="startResearch()">开始研究</button>
+          <button id="btn-cancel" class="btn-cancel" style="display:none" onclick="cancelResearch()">✕ 取消</button>
+          <label class="stream-toggle"><input type="checkbox" id="stream-mode" checked><span>流式输出</span></label>
+        </div>
+        <span class="char-count" id="charCount"></span>
+      </div>
+    </div>
+
+    <div id="progress-area" style="display:none">
+      <div class="progress-card">
+        <div class="progress-header">
+          <span id="progress-title">研究中...</span>
+          <span class="progress-header-right">
+            <span id="progress-timer" class="progress-timer"></span>
+            <span id="progress-status" class="status-badge running">运行中</span>
+          </span>
+        </div>
+        <div id="agent-progress"></div>
+        <div class="progress-count" id="progressCount"></div>
+      </div>
+    </div>
+
+    <div id="result-area" style="display:none">
+      <div class="result-toolbar">
+        <button onclick="showHistory()" class="btn-back">← 返回</button>
+        <button onclick="copyReport()">复制报告</button>
+        <button onclick="downloadReport()">下载MD</button>
+        <button onclick="exportHtml()">导出HTML</button>
+        <button onclick="printReport()">打印/PDF</button>
+        <button onclick="toggleToc()" id="btn-toc">目录</button>
+        <button onclick="clearResult()">清除</button>
+      </div>
+      <div id="restore-banner" class="restore-banner" style="display:none">
+        <span id="restore-banner-text"></span>
+        <button onclick="dismissRestoreBanner()">知道了</button>
+      </div>
+      <div id="report-meta" class="report-meta" style="display:none"></div>
+      <div class="result-body">
+        <div id="report-content" class="markdown-body"></div>
+        <nav id="report-toc" class="report-toc" style="display:none"></nav>
+      </div>
+    </div>
+
+    <div id="history-area" style="display:none">
+      <div class="history-card">
+        <h2>历史报告</h2>
+        <div class="history-toolbar">
+          <input type="text" class="history-search" id="historySearch" placeholder="搜索报告（文件名/分析目标/技能）..." oninput="filterHistory()">
+          <button id="btn-compare" class="btn-compare" onclick="compareSelected()" disabled>对比所选</button>
+        </div>
+        <div id="history-list"></div>
+      </div>
+    </div>
+
+    <div id="compare-area" style="display:none">
+      <div class="result-toolbar">
+        <button onclick="closeCompare()">← 返回列表</button>
+        <span id="compare-title" class="compare-title"></span>
+      </div>
+      <div class="compare-panes">
+        <div class="compare-pane"><div id="compare-left" class="markdown-body"></div></div>
+        <div class="compare-pane"><div id="compare-right" class="markdown-body"></div></div>
+      </div>
+    </div>
+
+    <div id="empty-state">
+      <div class="welcome">
+        <h2>一个人 + AI = 一个投研团队</h2>
+        <p>选择左侧技能，输入分析目标，开始AI驱动的价值投资研究</p>
+        <div class="quick-actions">
+          <div class="quick-card manual-card" onclick="window.open('/manual','_blank')"><span>→</span><span>点击查看使用手册</span></div>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+<div id="llm-modal" class="modal-mask" style="display:none" onclick="if(event.target===this)closeLlmModal()">
+  <div class="modal-card">
+    <h3>模型设置</h3>
+    <p class="modal-tip">配置保存在你的浏览器 localStorage，随请求发送，服务器不落盘。留空全部用服务器默认。</p>
+
+    <label>服务商</label>
+    <select id="llm-preset" onchange="onProviderChange()">
+      <option value="">服务器默认</option>
+      <option value="deepseek">DeepSeek</option>
+      <option value="zhipu">智谱（GLM）</option>
+      <option value="hunyuan">腾讯混元</option>
+      <option value="kimi">Kimi（Moonshot）</option>
+      <option value="openai">OpenAI</option>
+      <option value="openrouter">OpenRouter</option>
+      <option value="ollama">Ollama（本地）</option>
+      <option value="custom">自定义</option>
+    </select>
+
+    <label>模型</label>
+    <select id="llm-model-select" onchange="onModelSelectChange()" style="display:none">
+      <option value="">请选择模型</option>
+    </select>
+    <input type="text" id="llm-model" placeholder="deepseek-v4-flash" autocomplete="off">
+
+    <div id="llm-custom-fields" style="display:none">
+      <label>Base URL</label>
+      <input type="text" id="llm-base-url" placeholder="https://api.deepseek.com" autocomplete="off">
+      <label>API Key</label>
+      <input type="password" id="llm-api-key" placeholder="sk-..." autocomplete="off">
+    </div>
+
+    <div class="modal-actions">
+      <button id="btn-llm-test" onclick="testLlmConfig()">测试连接</button>
+      <button class="btn-primary" onclick="saveLlmConfig()">保存</button>
+      <button onclick="resetLlmConfig()">恢复默认</button>
+      <button onclick="closeLlmModal()">关闭</button>
+    </div>
+    <p id="llm-test-result" class="llm-test-result"></p>
+  </div>
+</div>
+<script src="/static/js/marked.min.js"></script>
+<script src="/static/js/echarts.min.js"></script>
+<script src="https://cdn.bootcdn.net/ajax/libs/dompurify/3.0.6/purify.min.js"></script>
+<script src="/static/js/app.js?v=20260731b"></script>
+</body>
+</html>

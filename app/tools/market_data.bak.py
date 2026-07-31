@@ -1,0 +1,863 @@
+"""Market Data Fetcher — Real-time external data acquisition.
+
+Automatically detects market type (A-share / HK / US) based on symbol,
+fetches real-time stock prices, financial statements, company info,
+and market indices using free data sources (akshare / yfinance).
+
+All data is cached in SQLite with configurable TTL.
+Falls back to stale cache when network is unavailable.
+
+v3.1 fixes:
+- Chinese company name resolution (腾讯 → 0700.HK, 茅台 → 600519.SH)
+- Case-insensitive market detection (aapl → US)
+- Correct akshare API usage for A-share prices
+- No infinite recursion in get_stock_price
+- Meaningful fallbacks instead of empty lists
+- Proper timezone detection
+"""
+import asyncio
+import json
+import logging
+import re
+from datetime import datetime, timedelta
+from typing import Optional
+
+from ..core.data_cache import DataCache
+
+logger = logging.getLogger("ai_berkshire.market_data")
+
+# Cache TTLs (seconds)
+CACHE_TTL_REALTIME = 300       # 5 minutes for real-time prices
+CACHE_TTL_FINANCIAL = 86400    # 24 hours for financial statements
+CACHE_TTL_NEWS = 3600          # 1 hour for news
+CACHE_TTL_INDICES = 600        # 10 minutes for market indices
+CACHE_TTL_COMPANY = 86400      # 24 hours for company info
+
+_cache = DataCache()
+
+# ==================== Chinese Company Name Mapping ====================
+# Common Chinese company names → stock code
+# This allows users to type "腾讯" instead of "0700.HK"
+COMPANY_NAME_MAP = {
+    # HK stocks
+    "腾讯": "0700.HK", "腾讯控股": "0700.HK",
+    "阿里巴巴": "9988.HK", "阿里": "9988.HK",
+    "美团": "3690.HK", "美团点评": "3690.HK",
+    "小米": "1810.HK", "小米集团": "1810.HK",
+    "京东": "9618.HK",
+    "网易": "9999.HK",
+    "快手": "1024.HK",
+    "百度": "9888.HK",
+    "哔哩哔哩": "9626.HK", "B站": "9626.HK", "哔哩": "9626.HK",
+    "蔚来": "9866.HK", "蔚来汽车": "9866.HK",
+    "理想汽车": "2015.HK", "理想": "2015.HK",
+    "小鹏汽车": "9868.HK", "小鹏": "9868.HK",
+    "比亚迪": "1211.HK",
+    "吉利汽车": "0175.HK", "吉利": "0175.HK",
+    "长城汽车": "2333.HK",
+    "华虹半导体": "1347.HK", "华虹": "1347.HK",
+    "中芯国际": "0981.HK",
+    "药明生物": "2269.HK",
+    "舜宇光学": "2382.HK",
+    "海底捞": "6862.HK",
+    "农夫山泉": "9633.HK",
+    "安踏体育": "2020.HK", "安踏": "2020.HK",
+    "微盟": "2013.HK",
+    "有赞": "8083.HK",
+    "泡泡玛特": "9992.HK",
+    "商汤": "0020.HK", "商汤科技": "0020.HK",
+    "联想": "0992.HK", "联想集团": "0992.HK",
+    # A-share stocks
+    "贵州茅台": "600519.SH", "茅台": "600519.SH",
+    "五粮液": "000858.SZ",
+    "宁德时代": "300750.SZ",
+    "比亚迪A股": "002594.SZ",
+    "中国平安": "601318.SH", "平安": "601318.SH",
+    "招商银行": "600036.SH", "招行": "600036.SH",
+    "工商银行": "601398.SH", "工行": "601398.SH",
+    "建设银行": "601939.SH", "建行": "601939.SH",
+    "中国石油": "601857.SH", "中石油": "601857.SH",
+    "中国石化": "600028.SH", "中石化": "600028.SH",
+    "长江电力": "600900.SH",
+    "隆基绿能": "601012.SH", "隆基": "601012.SH",
+    "万华化学": "600309.SH",
+    "恒瑞医药": "600276.SH", "恒瑞": "600276.SH",
+    "迈瑞医疗": "300760.SZ", "迈瑞": "300760.SZ",
+    "药明康德": "603259.SH",
+    "海康威视": "002415.SZ", "海康": "002415.SZ",
+    "美的集团": "000333.SZ", "美的": "000333.SZ",
+    "格力电器": "000651.SZ", "格力": "000651.SZ",
+    "海尔智家": "600690.SH", "海尔": "600690.SH",
+    "伊利股份": "600887.SH", "伊利": "600887.SH",
+    "泸州老窖": "000568.SZ",
+    "洋河股份": "002304.SZ", "洋河": "002304.SZ",
+    "顺丰控股": "002352.SZ", "顺丰": "002352.SZ",
+    "三一重工": "600031.SH", "三一": "600031.SH",
+    "东方财富": "300059.SZ",
+    "同花顺": "300033.SZ",
+    "爱尔眼科": "300015.SZ",
+    "片仔癀": "600436.SH",
+    "云南白药": "000538.SZ",
+    # US stocks (include both Chinese and English names)
+    "苹果": "AAPL", "Apple": "AAPL",
+    "谷歌": "GOOGL", "Google": "GOOGL",
+    "微软": "MSFT", "Microsoft": "MSFT",
+    "亚马逊": "AMZN", "Amazon": "AMZN",
+    "脸书": "META", "Meta": "META", "Facebook": "META",
+    "特斯拉": "TSLA", "Tesla": "TSLA",
+    "英伟达": "NVDA", "Nvidia": "NVDA", "辉达": "NVDA",
+    "拼多多": "PDD",
+    "好未来": "TAL",
+    "新东方": "EDU",
+    "京东美股": "JD",
+    "网易美股": "NTES",
+    "哔哩哔哩美股": "BILI",
+    "理想美股": "LI",
+    "小鹏美股": "XPEV",
+    "蔚来美股": "NIO",
+    "台积电": "TSM", "TSMC": "TSM",
+    "超微": "AMD", "AMD": "AMD",
+    "高通": "QCOM",
+    "博通": "AVGO",
+}
+
+
+def _resolve_company_name(query: str) -> Optional[str]:
+    """Resolve a Chinese company name to stock code.
+
+    Returns the stock code if found, None otherwise.
+    Supports: exact match, case-insensitive match, and substring match.
+    """
+    query = query.strip()
+    # Direct match
+    if query in COMPANY_NAME_MAP:
+        return COMPANY_NAME_MAP[query]
+    # Try case-insensitive exact match for English names
+    query_lower = query.lower()
+    for name, code in COMPANY_NAME_MAP.items():
+        if name.lower() == query_lower:
+            return code
+    # Substring match: find company name within a longer string (e.g., "分析腾讯的财报")
+    # Try longer names first to avoid partial matches (e.g., "腾讯控股" before "腾讯")
+    query_lower_for_sub = query.lower()
+    for name in sorted(COMPANY_NAME_MAP.keys(), key=len, reverse=True):
+        # Case-insensitive substring match for English names
+        if name.lower() in query_lower_for_sub:
+            return COMPANY_NAME_MAP[name]
+    return None
+
+
+def _detect_market(symbol: str) -> str:
+    """Detect market type from symbol format.
+
+    Returns: 'A_SHARE', 'HK', 'US', or 'UNKNOWN'
+    """
+    symbol = symbol.strip().upper()
+
+    # A-share: 6-digit code (e.g., 002555, 600519)
+    if re.match(r'^\d{6}$', symbol):
+        return 'A_SHARE'
+
+    # HK: ends with .HK (e.g., 0700.HK)
+    if symbol.endswith('.HK') or symbol.endswith('.SH') or symbol.endswith('.SZ'):
+        suffix = symbol.split('.')[-1]
+        if suffix == 'HK':
+            return 'HK'
+        return 'A_SHARE'
+
+    # US: alphabetic ticker (e.g., AAPL, PDD, NVDA) — case-insensitive
+    if re.match(r'^[A-Z]{1,6}$', symbol):
+        return 'US'
+
+    return 'UNKNOWN'
+
+
+def _normalize_a_share_code(code: str) -> str:
+    """Normalize A-share code with proper suffix."""
+    code = code.replace('.SH', '').replace('.SZ', '')
+    if code.startswith('6'):
+        return f"{code}.SH"
+    elif code.startswith('8') or code.startswith('4'):
+        # Beijing Stock Exchange
+        return f"{code}.BJ"
+    else:
+        return f"{code}.SZ"
+
+
+async def _run_sync(func, *args, **kwargs):
+    """Run a synchronous function in a thread pool."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, lambda: func(*args, **kwargs))
+
+
+# ==================== A-Share Data (via akshare) ====================
+
+async def _fetch_a_share_price(symbol: str) -> dict:
+    """Fetch A-share real-time price via akshare.
+
+    Uses stock_zh_a_spot_em() (returns all A-share stocks) and filters
+    by code, since the function does not accept a single-symbol parameter.
+    """
+    code = _normalize_a_share_code(symbol)
+    bare_code = code.split('.')[0]
+
+    def _fetch():
+        import akshare as ak
+        # stock_zh_a_spot_em returns ALL A-share stocks; filter by code
+        df = ak.stock_zh_a_spot_em()
+        if df is None or len(df) == 0:
+            return None
+
+        # Find the column containing stock codes
+        code_col = None
+        for col in df.columns:
+            if '代码' in str(col) or col == 'symbol':
+                code_col = col
+                break
+        if code_col is None:
+            code_col = df.columns[1] if len(df.columns) > 1 else df.columns[0]
+
+        # Filter by code
+        mask = df[code_col].astype(str).str.contains(bare_code, na=False)
+        matched = df[mask]
+        if len(matched) == 0:
+            return None
+
+        row = matched.iloc[0]
+        return {
+            "symbol": code,
+            "market": "A_SHARE",
+            "name": str(row.get('名称', '')),
+            "price": float(row.get('最新价', 0) or 0),
+            "change_pct": float(row.get('涨跌幅', 0) or 0),
+            "change_amount": float(row.get('涨跌额', 0) or 0),
+            "volume": float(row.get('成交量', 0) or 0),
+            "turnover": float(row.get('成交额', 0) or 0),
+            "high": float(row.get('最高', 0) or 0),
+            "low": float(row.get('最低', 0) or 0),
+            "open": float(row.get('今开', 0) or 0),
+            "prev_close": float(row.get('昨收', 0) or 0),
+            "pe": float(row.get('市盈率-动态', 0) or 0),
+            "pb": float(row.get('市净率', 0) or 0),
+            "total_market_cap": float(row.get('总市值', 0) or 0),
+            "circulating_market_cap": float(row.get('流通市值', 0) or 0),
+            "timestamp": datetime.now().isoformat(),
+        }
+
+    return await _run_sync(_fetch)
+
+
+async def _fetch_a_share_financials(symbol: str) -> dict:
+    """Fetch A-share financial statements via akshare."""
+    code = symbol.split('.')[0]
+    stock_prefix = f"sh{code}" if code.startswith('6') else f"sz{code}"
+
+    def _fetch():
+        import akshare as ak
+        result = {}
+
+        # Income statement
+        try:
+            df = ak.stock_financial_report_sina(stock=stock_prefix, symbol="利润表")
+            if df is not None and len(df) > 0:
+                latest = df.head(3)
+                result["income_statement"] = latest.to_dict('records')
+        except Exception as e:
+            logger.debug(f"A-share income statement failed for {symbol}: {e}")
+
+        # Balance sheet
+        try:
+            df = ak.stock_financial_report_sina(stock=stock_prefix, symbol="资产负债表")
+            if df is not None and len(df) > 0:
+                latest = df.head(3)
+                result["balance_sheet"] = latest.to_dict('records')
+        except Exception as e:
+            logger.debug(f"A-share balance sheet failed for {symbol}: {e}")
+
+        # Cash flow
+        try:
+            df = ak.stock_financial_report_sina(stock=stock_prefix, symbol="现金流量表")
+            if df is not None and len(df) > 0:
+                latest = df.head(3)
+                result["cash_flow"] = latest.to_dict('records')
+        except Exception as e:
+            logger.debug(f"A-share cash flow failed for {symbol}: {e}")
+
+        return result if result else None
+
+    return await _run_sync(_fetch)
+
+
+# ==================== US/HK Data (via yfinance) ====================
+
+async def _fetch_yf_price(symbol: str, market: str) -> dict:
+    """Fetch US/HK stock price via yfinance."""
+    # yfinance uses the same format for HK stocks (0700.HK)
+    # For US stocks, symbol is already correct
+    yf_symbol = symbol
+
+    def _fetch():
+        import yfinance as yf
+        ticker = yf.Ticker(yf_symbol)
+        info = ticker.info or {}
+
+        hist = ticker.history(period="5d")
+        current_price = float(hist['Close'].iloc[-1]) if hist is not None and len(hist) > 0 else 0.0
+        prev_close = float(hist['Close'].iloc[-2]) if hist is not None and len(hist) > 1 else current_price
+
+        currency = info.get('currency', 'USD')
+        if market == 'HK':
+            currency = info.get('currency', 'HKD')
+
+        return {
+            "symbol": yf_symbol,
+            "market": market,
+            "name": info.get('longName', info.get('shortName', yf_symbol)),
+            "price": current_price,
+            "change_pct": round((current_price - prev_close) / prev_close * 100, 2) if prev_close else 0,
+            "change_amount": round(current_price - prev_close, 2) if prev_close else 0,
+            "volume": int(hist['Volume'].iloc[-1]) if hist is not None and len(hist) > 0 else 0,
+            "high": float(hist['High'].iloc[-1]) if hist is not None and len(hist) > 0 else 0,
+            "low": float(hist['Low'].iloc[-1]) if hist is not None and len(hist) > 0 else 0,
+            "open": float(hist['Open'].iloc[-1]) if hist is not None and len(hist) > 0 else 0,
+            "prev_close": prev_close,
+            "pe": info.get('trailingPE', 0) or 0,
+            "pb": info.get('priceToBook', 0) or 0,
+            "total_market_cap": info.get('marketCap', 0) or 0,
+            "currency": currency,
+            "timestamp": datetime.now().isoformat(),
+        }
+
+    return await _run_sync(_fetch)
+
+
+async def _fetch_yf_financials(symbol: str, market: str) -> dict:
+    """Fetch US/HK financial statements via yfinance."""
+    yf_symbol = symbol
+
+    def _fetch():
+        import yfinance as yf
+        ticker = yf.Ticker(yf_symbol)
+        result = {}
+
+        try:
+            inc = ticker.quarterly_income_stmt
+            if inc is not None and not inc.empty:
+                result["quarterly_income"] = inc.to_dict()
+        except Exception as e:
+            logger.debug(f"yfinance income stmt failed for {symbol}: {e}")
+
+        try:
+            bs = ticker.quarterly_balance_sheet
+            if bs is not None and not bs.empty:
+                result["quarterly_balance"] = bs.to_dict()
+        except Exception as e:
+            logger.debug(f"yfinance balance sheet failed for {symbol}: {e}")
+
+        try:
+            cf = ticker.quarterly_cashflow
+            if cf is not None and not cf.empty:
+                result["quarterly_cashflow"] = cf.to_dict()
+        except Exception as e:
+            logger.debug(f"yfinance cashflow failed for {symbol}: {e}")
+
+        return result if result else None
+
+    return await _run_sync(_fetch)
+
+
+# ==================== Market Indices ====================
+
+async def fetch_market_indices() -> dict:
+    """Fetch major market indices (SSE, SZSE, HS, S&P500, NASDAQ).
+
+    Returns a dict with partial data if some sources fail.
+    Never returns empty — always includes timestamp.
+    """
+    cached = _cache.get("indices", "global", CACHE_TTL_INDICES)
+    if cached:
+        return cached
+
+    def _fetch():
+        result = {}
+        errors = []
+
+        # A-share indices via akshare
+        try:
+            import akshare as ak
+            df = ak.stock_zh_index_spot_em()
+            if df is not None and len(df) > 0:
+                for _, row in df.iterrows():
+                    name = str(row.get('名称', ''))
+                    code = str(row.get('代码', ''))
+                    if '上证指数' in name or code == '000001':
+                        result["SSE"] = {
+                            "name": name, "code": code,
+                            "price": float(row.get('最新价', 0) or 0),
+                            "change_pct": float(row.get('涨跌幅', 0) or 0),
+                        }
+                    elif '深证成指' in name or code == '399001':
+                        result["SZSE"] = {
+                            "name": name, "code": code,
+                            "price": float(row.get('最新价', 0) or 0),
+                            "change_pct": float(row.get('涨跌幅', 0) or 0),
+                        }
+                    elif '创业板指' in name or code == '399006':
+                        result["CHINEXT"] = {
+                            "name": name, "code": code,
+                            "price": float(row.get('最新价', 0) or 0),
+                            "change_pct": float(row.get('涨跌幅', 0) or 0),
+                        }
+            else:
+                errors.append("akshare returned empty index data")
+        except Exception as e:
+            errors.append(f"akshare indices: {e}")
+            logger.warning(f"akshare indices failed: {e}")
+
+        # US/HK indices via yfinance
+        try:
+            import yfinance as yf
+            for sym, key in [("^GSPC", "S&P500"), ("^IXIC", "NASDAQ"), ("^HSI", "HSI"), ("^DJI", "DOW")]:
+                try:
+                    t = yf.Ticker(sym)
+                    hist = t.history(period="2d")
+                    if hist is not None and len(hist) > 0:
+                        price = float(hist['Close'].iloc[-1])
+                        prev = float(hist['Close'].iloc[-2]) if len(hist) > 1 else price
+                        result[key] = {
+                            "symbol": sym,
+                            "price": price,
+                            "change_pct": round((price - prev) / prev * 100, 2) if prev else 0,
+                        }
+                except Exception as e:
+                    errors.append(f"yfinance {sym}: {e}")
+        except Exception as e:
+            errors.append(f"yfinance indices: {e}")
+            logger.warning(f"yfinance indices failed: {e}")
+
+        result["timestamp"] = datetime.now().isoformat()
+        if errors:
+            result["_partial"] = True
+            result["_errors"] = errors
+        return result
+
+    try:
+        data = await _run_sync(_fetch)
+        if data and len(data) > 1:  # More than just timestamp
+            _cache.set("indices", "global", data)
+        return data
+    except Exception as e:
+        logger.error(f"Failed to fetch market indices: {e}")
+        # Try stale cache
+        stale = _cache.get_stale("indices", "global")
+        if stale:
+            stale["data"]["_stale"] = True
+            return stale["data"]
+        # Return minimal valid structure instead of just error
+        return {
+            "timestamp": datetime.now().isoformat(),
+            "error": str(e),
+            "_stale": True,
+        }
+
+
+# ==================== News ====================
+
+async def fetch_company_news(symbol: str, days: int = 14) -> list:
+    """Fetch recent news about a company.
+
+    Returns a list of news items. Never returns empty without explanation —
+    if no news is found, returns a list with a single info item.
+    """
+    cache_key = f"{symbol}_{days}d"
+    cached = _cache.get("news", cache_key, CACHE_TTL_NEWS)
+    if cached:
+        return cached
+
+    market = _detect_market(symbol)
+
+    def _fetch():
+        news_list = []
+
+        if market == 'A_SHARE':
+            try:
+                import akshare as ak
+                code = symbol.split('.')[0]
+                df = ak.stock_news_em(symbol=code)
+                if df is not None and len(df) > 0:
+                    for _, row in df.head(30).iterrows():
+                        news_list.append({
+                            "title": str(row.get('新闻标题', '')),
+                            "content": str(row.get('新闻内容', ''))[:500],
+                            "date": str(row.get('发布时间', '')),
+                            "source": str(row.get('文章来源', '')),
+                        })
+            except Exception as e:
+                logger.warning(f"akshare news failed: {e}")
+
+        elif market in ('US', 'HK'):
+            try:
+                import yfinance as yf
+                ticker = yf.Ticker(symbol)
+                news = ticker.news
+                if news:
+                    for item in news[:20]:
+                        # yfinance news format varies by version
+                        title = item.get('title', '')
+                        content = item.get('summary', item.get('description', ''))
+                        pub_time = item.get('providerPublishTime', item.get('publishTime', 0))
+                        news_list.append({
+                            "title": title,
+                            "content": str(content)[:500] if content else '',
+                            "date": datetime.fromtimestamp(pub_time).isoformat() if pub_time else '',
+                            "source": item.get('publisher', ''),
+                        })
+            except Exception as e:
+                logger.warning(f"yfinance news failed: {e}")
+
+        return news_list
+
+    try:
+        data = await _run_sync(_fetch)
+        if data:
+            _cache.set("news", cache_key, data)
+            return data
+
+        # No news found — check stale cache
+        stale = _cache.get_stale("news", cache_key)
+        if stale and stale.get("data"):
+            return stale["data"]
+
+        # Return informative placeholder instead of empty list
+        return [{
+            "title": f"暂无{symbol}的近期新闻",
+            "content": f"未能获取到 {symbol} 的近期新闻数据。可能原因：数据源暂时不可用或该股票无近期新闻。",
+            "date": datetime.now().strftime("%Y-%m-%d"),
+            "source": "system",
+            "_placeholder": True,
+        }]
+    except Exception as e:
+        logger.error(f"Failed to fetch news for {symbol}: {e}")
+        stale = _cache.get_stale("news", cache_key)
+        if stale and stale.get("data"):
+            return stale["data"]
+        return [{
+            "title": f"新闻获取失败: {symbol}",
+            "content": f"获取新闻时发生错误: {e}",
+            "date": datetime.now().strftime("%Y-%m-%d"),
+            "source": "system",
+            "_error": True,
+        }]
+
+
+# ==================== Company Search ====================
+
+async def search_company(query: str) -> list:
+    """Search for companies by name or code.
+
+    Supports Chinese company names (腾讯, 茅台), stock codes (600519),
+    and US tickers (AAPL). Never returns empty without trying all sources.
+    """
+    cache_key = query.lower().strip()
+    cached = _cache.get("search", cache_key, CACHE_TTL_COMPANY)
+    if cached:
+        return cached
+
+    # First, check the built-in name map
+    resolved = _resolve_company_name(query)
+    if resolved:
+        name_display = query
+        market = _detect_market(resolved)
+        results = [{
+            "symbol": resolved,
+            "name": name_display,
+            "market": market,
+        }]
+        _cache.set("search", cache_key, results)
+        return results
+
+    def _search():
+        results = []
+
+        # Try akshare for A-shares
+        try:
+            import akshare as ak
+            df = ak.stock_zh_a_spot_em()
+            if df is not None and len(df) > 0:
+                # Find relevant columns
+                code_col = None
+                name_col = None
+                for col in df.columns:
+                    col_str = str(col)
+                    if '代码' in col_str:
+                        code_col = col
+                    elif '名称' in col_str:
+                        name_col = col
+                if code_col is None:
+                    code_col = df.columns[1] if len(df.columns) > 1 else df.columns[0]
+                if name_col is None:
+                    name_col = df.columns[2] if len(df.columns) > 2 else df.columns[1]
+
+                query_upper = query.upper()
+                matched = df[
+                    df[name_col].astype(str).str.contains(query, na=False, case=False) |
+                    df[code_col].astype(str).str.contains(query_upper, na=False, case=False)
+                ]
+                for _, row in matched.head(10).iterrows():
+                    results.append({
+                        "symbol": str(row[code_col]),
+                        "name": str(row[name_col]),
+                        "market": "A_SHARE",
+                        "price": float(row.get('最新价', 0) or 0),
+                    })
+        except Exception as e:
+            logger.warning(f"akshare search failed: {e}")
+
+        # If query looks like a US ticker, add it
+        query_upper = query.strip().upper()
+        if re.match(r'^[A-Z]{1,6}$', query_upper):
+            results.append({
+                "symbol": query_upper,
+                "name": query_upper,
+                "market": "US",
+            })
+
+        # If query looks like an HK code (5 digits), add with .HK
+        if re.match(r'^\d{4,5}$', query):
+            results.append({
+                "symbol": f"{query.zfill(5)}.HK",
+                "name": query,
+                "market": "HK",
+            })
+
+        return results
+
+    try:
+        data = await _run_sync(_search)
+        _cache.set("search", cache_key, data)
+        return data
+    except Exception as e:
+        logger.error(f"Company search failed: {e}")
+        # Return resolved result from name map if available
+        if resolved:
+            return [{"symbol": resolved, "name": query, "market": _detect_market(resolved)}]
+        return []
+
+
+# ==================== Public API ====================
+
+async def get_stock_price(symbol: str) -> dict:
+    """Get real-time stock price for any market.
+
+    Auto-detects market type (A-share/HK/US) and uses appropriate data source.
+    Resolves Chinese company names to stock codes automatically.
+    Falls back to stale cache when network is unavailable.
+    Never returns empty — always includes meaningful error info.
+    """
+    # Resolve Chinese company name to stock code
+    resolved = _resolve_company_name(symbol)
+    if resolved:
+        symbol = resolved
+
+    market = _detect_market(symbol)
+
+    # Check cache first
+    cached = _cache.get("price", symbol, CACHE_TTL_REALTIME)
+    if cached:
+        return cached
+
+    try:
+        if market == 'A_SHARE':
+            data = await _fetch_a_share_price(symbol)
+        elif market in ('US', 'HK'):
+            data = await _fetch_yf_price(symbol, market)
+        else:
+            # Try to search first
+            results = await search_company(symbol)
+            if results:
+                first = results[0]
+                resolved_symbol = first["symbol"]
+                # Prevent infinite recursion: only recurse if the resolved symbol is different
+                if resolved_symbol.upper() != symbol.upper():
+                    return await get_stock_price(resolved_symbol)
+                # Same symbol — try as US stock as last resort
+                market = 'US'
+                data = await _fetch_yf_price(resolved_symbol, market)
+            else:
+                return {
+                    "symbol": symbol,
+                    "error": f"无法识别股票代码: {symbol}",
+                    "hint": "请使用股票代码（如 600519 / 0700.HK / AAPL）或中文公司名（如 腾讯 / 茅台 / 拼多多）",
+                    "timestamp": datetime.now().isoformat(),
+                }
+
+        if data:
+            _cache.set("price", symbol, data)
+            return data
+
+        # Try stale cache
+        stale = _cache.get_stale("price", symbol)
+        if stale:
+            stale["data"]["_stale"] = True
+            return stale["data"]
+
+        return {
+            "symbol": symbol,
+            "error": f"未获取到 {symbol} 的行情数据",
+            "hint": "可能是数据源暂时不可用或股票代码有误",
+            "timestamp": datetime.now().isoformat(),
+        }
+
+    except ImportError:
+        logger.warning("Data libraries not installed, trying stale cache")
+        stale = _cache.get_stale("price", symbol)
+        if stale:
+            stale["data"]["_stale"] = True
+            return stale["data"]
+        return {
+            "symbol": symbol,
+            "error": "数据源库未安装 (akshare/yfinance)",
+            "hint": "请运行: pip install akshare yfinance",
+            "timestamp": datetime.now().isoformat(),
+        }
+    except Exception as e:
+        logger.error(f"Failed to fetch price for {symbol}: {e}")
+        stale = _cache.get_stale("price", symbol)
+        if stale:
+            stale["data"]["_stale"] = True
+            return stale["data"]
+        return {
+            "symbol": symbol,
+            "error": str(e),
+            "timestamp": datetime.now().isoformat(),
+        }
+
+
+async def get_financial_data(symbol: str) -> dict:
+    """Get financial statements for a company.
+
+    Resolves Chinese company names automatically.
+    Falls back to stale cache when network is unavailable.
+    """
+    # Resolve Chinese company name
+    resolved = _resolve_company_name(symbol)
+    if resolved:
+        symbol = resolved
+
+    cached = _cache.get("financials", symbol, CACHE_TTL_FINANCIAL)
+    if cached:
+        return cached
+
+    market = _detect_market(symbol)
+
+    try:
+        if market == 'A_SHARE':
+            data = await _fetch_a_share_financials(symbol)
+        elif market in ('US', 'HK'):
+            data = await _fetch_yf_financials(symbol, market)
+        else:
+            # Try search
+            results = await search_company(symbol)
+            if results:
+                resolved_symbol = results[0]["symbol"]
+                if resolved_symbol.upper() != symbol.upper():
+                    return await get_financial_data(resolved_symbol)
+            return {
+                "symbol": symbol,
+                "error": f"无法识别股票代码: {symbol}",
+                "hint": "请使用股票代码或中文公司名",
+                "timestamp": datetime.now().isoformat(),
+            }
+
+        if data:
+            _cache.set("financials", symbol, data)
+            return data
+
+        stale = _cache.get_stale("financials", symbol)
+        if stale:
+            stale["data"]["_stale"] = True
+            return stale["data"]
+
+        return {
+            "symbol": symbol,
+            "error": f"未获取到 {symbol} 的财务数据",
+            "hint": "可能是数据源暂时不可用",
+            "timestamp": datetime.now().isoformat(),
+        }
+
+    except ImportError:
+        stale = _cache.get_stale("financials", symbol)
+        if stale:
+            stale["data"]["_stale"] = True
+            return stale["data"]
+        return {
+            "symbol": symbol,
+            "error": "数据源库未安装",
+            "hint": "请运行: pip install akshare yfinance",
+            "timestamp": datetime.now().isoformat(),
+        }
+    except Exception as e:
+        logger.error(f"Failed to fetch financials for {symbol}: {e}")
+        stale = _cache.get_stale("financials", symbol)
+        if stale:
+            stale["data"]["_stale"] = True
+            return stale["data"]
+        return {
+            "symbol": symbol,
+            "error": str(e),
+            "timestamp": datetime.now().isoformat(),
+        }
+
+
+def get_current_date_context() -> dict:
+    """Get current date and market status (no network needed)."""
+    now = datetime.now()
+
+    # Determine if markets are likely open (simplified)
+    hour = now.hour
+    weekday = now.weekday()
+
+    is_weekday = weekday < 5
+
+    market_status = {
+        "A_SHARE": "closed",
+        "HK": "closed",
+        "US": "closed",
+    }
+
+    if is_weekday:
+        if 9 <= hour < 15:
+            market_status["A_SHARE"] = "open"
+        if 9 <= hour < 16:
+            market_status["HK"] = "open"
+        if 21 <= hour or hour < 5:
+            market_status["US"] = "open"
+
+    # Use system timezone info, fallback to Asia/Shanghai for Chinese deployments
+    import time as _time
+    tz_name = _time.tzname[0] if _time.tzname[0] else "Asia/Shanghai"
+    # Normalize common Chinese timezone names
+    tz_display = "Asia/Shanghai (UTC+8)"  # Default for Chinese deployments
+    try:
+        utc_offset = -_time.timezone if not _time.daylight else -_time.altzone
+        if utc_offset == 0:
+            tz_display = "UTC"
+        elif utc_offset == 28800:
+            tz_display = "Asia/Shanghai (UTC+8)"
+        else:
+            hours = utc_offset // 3600
+            tz_display = f"UTC{'+' if hours >= 0 else ''}{hours}"
+    except Exception:
+        pass
+
+    weekday_cn = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][weekday]
+
+    return {
+        "current_date": now.strftime("%Y-%m-%d"),
+        "current_time": now.strftime("%H:%M:%S"),
+        "weekday": now.strftime("%A"),
+        "weekday_cn": weekday_cn,
+        "timezone": tz_display,
+        "market_status": market_status,
+        "timestamp": now.isoformat(),
+    }
