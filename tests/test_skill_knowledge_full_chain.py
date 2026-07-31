@@ -225,7 +225,7 @@ with patch("app.harness.runner.chat_complete", new_callable=AsyncMock) as mock_c
     mock_complete.return_value = mock_response
     mock_tools.return_value = mock_response
 
-    async def mock_stream_fn(system, user):
+    async def mock_stream_fn(system, user, **kwargs):
         yield mock_response
     mock_stream.side_effect = mock_stream_fn
 

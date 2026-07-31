@@ -1,0 +1,11 @@
+{
+  "skill_name": "dyp-ask",
+  "arguments": "用三句话说明为什么茅台是好生意",
+  "duration_seconds": 42.8,
+  "tokens": {
+    "prompt_tokens": 5476,
+    "completion_tokens": 2319,
+    "total_tokens": 7795
+  },
+  "created_at": "2026-07-31T22:13:27.918342"
+}
