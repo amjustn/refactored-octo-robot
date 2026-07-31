@@ -120,8 +120,15 @@ class ContextBuilder:
 
         bundle = self._trim_and_grade(raw)
 
+        # Grade A: 信息充裕 → 提示对核心论点做反面检验
+        if bundle.grade == "A":
+            bundle.context += (
+                "\n\n## 信息丰富度：A（信息充裕）\n"
+                "检索数据充足，请充分引用；同时对核心投资论点做反面检验："
+                "列出可能推翻结论的证据与做空逻辑，给出 Bull/Bear 对称分析。"
+            )
         # Grade C: scarce information → first-principles hint
-        if bundle.grade == "C":
+        elif bundle.grade == "C":
             bundle.context += (
                 "\n\n## 信息丰富度：C（信息稀缺）\n"
                 "公开检索信息有限，请切换到第一性原理分析模式：从商业本质出发推演，"

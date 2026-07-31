@@ -1037,6 +1037,17 @@ async def _auto_update_skill_knowledge():
         await asyncio.sleep(7 * 86400)
 
 
+async def _seed_circuit_breakers():
+    """启动健康检查 → ToolGateway 熔断器初始态（东财中断/雅虎 403 → 初始摘除）。"""
+    try:
+        from .harness.tools import get_gateway
+        seeded = await get_gateway().seed_from_bootstrap()
+        if seeded:
+            logger.info(f"Circuit breakers seeded from startup health check: {seeded}")
+    except Exception as e:
+        logger.warning(f"Circuit breaker seeding failed: {e}")
+
+
 @app.on_event("startup")
 async def _startup():
     task_store.mark_running_as_interrupted()
@@ -1054,6 +1065,7 @@ async def _startup():
         _ensure_all_default_knowledge()
     except Exception as e:
         logger.warning(f"Could not initialize skill knowledge: {e}")
+    asyncio.create_task(_seed_circuit_breakers())
     asyncio.create_task(_cleanup_old_reports())
     asyncio.create_task(_cleanup_old_tasks())
     asyncio.create_task(_cleanup_expired_cache())

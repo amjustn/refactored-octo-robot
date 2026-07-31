@@ -335,14 +335,21 @@ TOOL_ENABLED_AGENTS = {
 
 import asyncio
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from datetime import datetime
 from typing import Any, Awaitable, Callable, Optional
 
 
 @dataclass
 class ToolDef:
-    """A registered tool with execution policy."""
+    """A registered tool with execution policy.
+
+    ``fn`` 为可选的自定义执行函数（签名 async fn(args: dict) -> str）；
+    为空时走底层 ``_execute_tool`` 分发表。行情价格工具注册了源级
+    fallback 链实现（akshare->腾讯->新浪 / yfinance->腾讯->雅虎）。
+    """
     name: str
+    fn: Optional[Callable[[dict], Awaitable[str]]] = None
     timeout: float = 20.0
     retries: int = 1
     cache_ttl: Optional[int] = None      # seconds; None = no gateway-level cache
@@ -451,7 +458,15 @@ class ToolGateway:
     """
 
     def __init__(self, tools: Optional[dict[str, ToolDef]] = None):
-        self.tools = tools or TOOL_DEFS
+        # 复制注册表，避免跨实例共享可变的 ToolDef
+        self.tools = dict(tools or TOOL_DEFS)
+        # 行情价格走源级 fallback 链（收编 market_data*.py 现有抓取函数）
+        if "get_stock_price" in self.tools and self.tools["get_stock_price"].fn is None:
+            self.tools["get_stock_price"] = replace(
+                self.tools["get_stock_price"], fn=self._stock_price_chain,
+            )
+        # 熔断器：工具级 + 数据源级（akshare/yfinance/tencent/sina/yahoo/eastmoney）
+        # 共用一个字典，名称互不冲突；源级在首次使用时惰性创建
         self.breakers: dict[str, CircuitBreaker] = {
             name: CircuitBreaker(name) for name in self.tools
         }
@@ -493,6 +508,126 @@ class ToolGateway:
             b.state = "open"
             b.opened_at = time.monotonic()
             b.consecutive_failures = max(failures, b.fail_threshold)
+
+    # ----- 数据源级熔断（fallback 链用） -----
+
+    def _source_breaker(self, source: str) -> CircuitBreaker:
+        """取数据源级熔断器（惰性创建，与工具级共存于 self.breakers）。"""
+        return self.breakers.setdefault(source, CircuitBreaker(source))
+
+    def seed_from_health(self, health: dict) -> list:
+        """把 bootstrap.health_check_data_sources() 的结果喂给熔断器初始态。
+
+        库缺失或 HTTP 探活失败的源初始即摘除（如东财连接中断、雅虎 403），
+        300 秒后由熔断器半开探活自动恢复。返回被初始摘除的源名列表。
+        """
+        seeded = []
+        libs = (health or {}).get("libraries", {})
+        for lib, source in (("akshare", "akshare"), ("yfinance", "yfinance")):
+            if libs.get(lib, {}).get("status") == "missing":
+                self.seed_breaker(source, "open")
+                seeded.append(source)
+        http = (health or {}).get("http_sources", {})
+        for key, source in (
+            ("tencent_http", "tencent"), ("sina_http", "sina"),
+            ("yahoo_http", "yahoo"), ("eastmoney_http", "eastmoney"),
+        ):
+            status = http.get(key, {}).get("status")
+            if status is not None and status != "ok":
+                self.seed_breaker(source, "open")
+                seeded.append(source)
+        if seeded:
+            logger.info(f"数据源熔断器初始摘除: {seeded}")
+        return seeded
+
+    async def seed_from_bootstrap(self) -> list:
+        """跑一次启动健康检查并喂给熔断器（服务启动时调用一次）。"""
+        from ..core.bootstrap import health_check_data_sources
+        health = await health_check_data_sources()
+        return self.seed_from_health(health)
+
+    # ----- 行情价格源级 fallback 链 -----
+
+    async def _stock_price_chain(self, args: dict) -> str:
+        """行情价格 fallback 链，收编 market_data*.py 的现有抓取函数：
+
+        A股:  akshare -> 腾讯 -> 新浪
+        US/HK: yfinance -> 腾讯 -> 雅虎
+        （与 get_stock_price 的现有优先级一致；每源独立熔断，超时摘除）
+
+        返回 JSON 字符串（与 _execute_tool 契约一致），成功时含 _source
+        字段标明实际命中的数据源。缓存与 market_data 共享（SQLite），
+        全部失败时回退过期缓存，行为与旧链路尾部一致。
+        """
+        from ..tools import market_data as md
+        from ..tools import market_data_http as mdh
+
+        symbol = str((args or {}).get("symbol", ""))
+        resolved = md._resolve_company_name(symbol) or symbol
+        market = md._detect_market(resolved)
+
+        # 市场无法识别：回退 legacy 全链路（含搜索兜底），不改变怪异入参行为
+        if market not in ("A_SHARE", "US", "HK"):
+            legacy = await md.get_stock_price(symbol)
+            return json.dumps(legacy, ensure_ascii=False, default=str)
+
+        # 与 market_data 共享缓存：build_full_context 等直接调用方也能命中
+        cached = md._cache.get("price", resolved, md.CACHE_TTL_REALTIME)
+        if cached:
+            return json.dumps({**cached, "_source": "cache"}, ensure_ascii=False, default=str)
+
+        if market == "A_SHARE":
+            providers = [
+                ("akshare", lambda: md._fetch_a_share_price(resolved), 30.0),
+                ("tencent", lambda: mdh.fetch_a_share_price_tencent(resolved), 8.0),
+                ("sina", lambda: mdh.fetch_a_share_price_sina(resolved), 8.0),
+            ]
+        else:
+            providers = [
+                ("yfinance", lambda: md._fetch_yf_price(resolved, market), 25.0),
+                ("tencent", lambda: mdh.fetch_us_hk_price_tencent(resolved), 8.0),
+                ("yahoo", lambda: mdh.fetch_us_hk_price_yahoo(resolved), 10.0),
+            ]
+
+        errors = []
+        for source, fetch, timeout_s in providers:
+            br = self._source_breaker(source)
+            if not br.allow_call():
+                errors.append(f"{source}: circuit open")
+                logger.info(f"行情源 {source} 熔断中，跳过（{resolved}）")
+                continue
+            try:
+                data = await asyncio.wait_for(fetch(), timeout=timeout_s)
+            except Exception as e:
+                br.record_failure(str(e)[:120])
+                errors.append(f"{source}: {str(e)[:80]}")
+                logger.warning(f"行情源 {source} 失败（{resolved}）: {e}")
+                continue
+            if data and not data.get("error"):
+                br.record_success()
+                data["_source"] = source
+                try:
+                    md._cache.set("price", resolved, data)
+                except Exception:
+                    pass
+                return json.dumps(data, ensure_ascii=False, default=str)
+            br.record_failure("empty result")
+            errors.append(f"{source}: empty")
+
+        # 全部源失败 -> 过期缓存兜底（与旧 get_stock_price 尾部一致）
+        stale = md._cache.get_stale("price", resolved)
+        if stale:
+            payload = dict(stale["data"])
+            payload["_stale"] = True
+            payload["_source"] = "stale_cache"
+            return json.dumps(payload, ensure_ascii=False, default=str)
+        return json.dumps({
+            "symbol": resolved,
+            "error": f"未获取到 {resolved} 的行情数据（所有数据源均失败）",
+            "hint": "可能是数据源不可用且未安装 akshare/yfinance",
+            "errors": errors,
+            "timestamp": datetime.now().isoformat(),
+        }, ensure_ascii=False, default=str)
 
     # ----- execution -----
 
@@ -566,14 +701,17 @@ class ToolGateway:
         last_error = ""
         for attempt in range(1 + tdef.retries):
             try:
-                content = await asyncio.wait_for(_execute_tool(tool, args), timeout=tdef.timeout)
+                if tdef.fn is not None:
+                    content = await asyncio.wait_for(tdef.fn(args), timeout=tdef.timeout)
+                else:
+                    content = await asyncio.wait_for(_execute_tool(tool, args), timeout=tdef.timeout)
                 latency = (time.monotonic() - start) * 1000
                 ok = True
                 source = ""
                 try:
                     parsed = json.loads(content)
                     if isinstance(parsed, dict):
-                        if "error" in parsed and len(parsed) <= 2:
+                        if "error" in parsed:
                             ok = False
                             last_error = str(parsed.get("error"))[:200]
                         source = str(parsed.get("_source", ""))[:40]
