@@ -99,7 +99,7 @@ async def run_tests():
     print("-" * 50)
     from app.core.llm import chat_complete_with_tools
     from app.core.config import LLM_API_KEY, LLM_MODEL
-    from app.agents.orchestrator import ALL_TOOL_SCHEMAS, _execute_tool
+    from app.harness.tools import ALL_TOOL_SCHEMAS, _execute_tool
 
     print(f"  LLM: {LLM_MODEL}")
     print(f"  可用工具: {[t['function']['name'] for t in ALL_TOOL_SCHEMAS]}")

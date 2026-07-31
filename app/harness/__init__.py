@@ -88,64 +88,14 @@ def cancel(task_id: str) -> dict:
     return {"cancelled": True, "task_id": task_id}
 
 
-# ==================== execution (PR-1: delegates to orchestrator) ====================
+# ==================== execution ====================
 
 async def _execute(spec: TaskSpec, bus: EventBus) -> str:
-    """PR-1 executor — delegates to the existing orchestrator functions.
+    """Dispatch to AgentRunner (single / multi / series unified)."""
+    from .runner import AgentRunner
 
-    PR-2 replaces this with harness.runner.AgentRunner; the event contract
-    stays identical.
-    """
-    from ..agents.orchestrator import (
-        run_single_agent, run_multi_agent, run_series,
-    )
-
-    llm_config = spec.llm.to_llm_config_dict()
-
-    async def _progress(p: AgentProgress):
-        bus.emit(
-            spec.task_id, EventType.PROGRESS,
-            agent=p.agent_name, status=p.status, message=p.message,
-            progress=p.progress,
-        )
-
-    if spec.strategy == "series":
-        return await run_series(
-            spec.skill_name, spec.arguments,
-            progress_callback=_progress, llm_config=llm_config,
-        )
-    if spec.strategy == "multi":
-        return await run_multi_agent(
-            spec.skill_name, spec.arguments,
-            progress_callback=_progress, llm_config=llm_config,
-        )
-
-    # single strategy
-    if not spec.stream:
-        return await run_single_agent(
-            spec.skill_name, spec.arguments, llm_config=llm_config,
-        )
-
-    # Streaming single-agent branch (moved verbatim from main.py WS handler)
-    from ..skills import build_user_prompt
-    from ..core.llm import chat_stream
-    from ..core.context import build_full_context
-
-    try:
-        context = await build_full_context(spec.arguments, skill_name=spec.skill_name)
-    except Exception:
-        context = ""
-
-    user_msg = build_user_prompt(spec.skill_name, spec.arguments)
-    system_msg = "你是一位精通价值投资的分析师，遵循巴菲特、芒格、段永平、李录四位大师的方法论。"
-    if context:
-        system_msg += f"\n\n{context}"
-
-    full_report = ""
-    async for chunk in chat_stream(system_msg, user_msg, llm_config=llm_config):
-        full_report += chunk
-        bus.emit(spec.task_id, EventType.CHUNK, content=chunk)
-    return full_report
+    runner = AgentRunner(bus=bus, task_id=spec.task_id)
+    return await runner.run(spec)
 
 
 # ==================== public run() ====================

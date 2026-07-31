@@ -11,6 +11,7 @@ const _WS_MAX_RECONNECT = 3;
 const _WS_RECONNECT_DELAYS = [2000, 5000, 10000]; // ms
 
 let currentTaskId = null;    // task_id reported by server (for real cancel)
+let _agentStreamBuffers = {}; // per-agent stream buffers (event protocol v2)
 let _userCancelled = false;  // distinguish user cancel from timeout abort
 let _progressTimer = null;   // elapsed-time ticker
 let _progressStartTs = 0;
@@ -834,13 +835,37 @@ function _streamResearchImpl(args) {
       var data = JSON.parse(event.data);
       if (data.type === 'started') {
         currentTaskId = data.task_id;
+        _agentStreamBuffers = {};
       } else if (data.type === 'chunk') {
-        currentReport += data.content;
-        document.getElementById('progress-area').style.display = 'none';
-        document.getElementById('result-area').style.display = 'block';
-        scheduleRender();
+        if (data.agent) {
+          // Event protocol v2: multi/series per-agent token stream.
+          // Accumulate per agent; the assembled report still arrives in
+          // 'complete', so the main report view is not disturbed.
+          _agentStreamBuffers[data.agent] = (_agentStreamBuffers[data.agent] || '') + data.content;
+          if (agentRowNames().indexOf(data.agent) >= 0) {
+            updateAgentProgress(data.agent, 'running', '撰写中… ' + _agentStreamBuffers[data.agent].length + ' 字');
+          }
+        } else {
+          currentReport += data.content;
+          document.getElementById('progress-area').style.display = 'none';
+          document.getElementById('result-area').style.display = 'block';
+          scheduleRender();
+        }
       } else if (data.type === 'progress') {
         updateAgentProgress(data.agent, data.status, data.message);
+      } else if (data.type === 'context_ready') {
+        // Event protocol v2: context assembly summary (info only)
+        console.info('context_ready', data);
+      } else if (data.type === 'tool_call') {
+        // Event protocol v2: tool call observability (debug only)
+        console.debug('tool_call', data);
+      } else if (data.type === 'guard_warning') {
+        // Event protocol v2: output gate warning (light notice)
+        console.warn('guard_warning', data);
+      } else if (data.type === 'cancelled') {
+        // Event protocol v2: explicit cancel frame (legacy error cancelled still handled below)
+        _wsShouldReconnect = false;
+        finishResearch(false, data.message || '已被用户取消');
       } else if (data.type === 'complete') {
         _wsShouldReconnect = false;
         if (data.report) currentReport = data.report;
@@ -849,6 +874,7 @@ function _streamResearchImpl(args) {
         _wsShouldReconnect = false;
         finishResearch(false, data.message);
       }
+      // Unknown event types are ignored for forward compatibility.
     };
 
     ws.onerror = function() {

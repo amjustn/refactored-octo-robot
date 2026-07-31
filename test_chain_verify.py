@@ -48,13 +48,13 @@ news = asyncio.run(fetch_company_news("UNKNOWN.SYMBOL", 7))
 test("News returns placeholder not empty", len(news) > 0)
 
 # Test 6: Orchestrator tool execution
-from app.agents.orchestrator import _execute_tool
+from app.harness.tools import _execute_tool
 result = asyncio.run(_execute_tool("calc", {"expression": "100*2"}))
 data = json.loads(result)
 test("Tool calc 100*2=200", abs(data["result"] - 200) < 0.01)
 
 # Test 7: Series length limit
-from app.agents.orchestrator import MAX_SERIES_REPORT_LENGTH
+from app.harness.runner import MAX_SERIES_REPORT_LENGTH
 from app.core.config import MAX_REPORT_LENGTH
 test("Series length > normal length", MAX_SERIES_REPORT_LENGTH > MAX_REPORT_LENGTH)
 

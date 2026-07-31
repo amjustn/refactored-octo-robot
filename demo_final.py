@@ -9,7 +9,7 @@ async def demo():
     print("=" * 70)
 
     from app.core.context import build_full_context
-    from app.agents.orchestrator import run_single_agent
+    from app.harness.runner import run_single_agent
     from app.core.config import LLM_API_KEY
 
     target = "比亚迪"

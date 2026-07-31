@@ -41,7 +41,7 @@ print("=" * 70)
 # ==================== Bug #1: run_single_agent builds context automatically ====================
 print("\n🐛 [Bug #1] run_single_agent builds context when none is provided")
 
-from app.agents.orchestrator import run_single_agent
+from app.harness.runner import run_single_agent
 
 # Mock the LLM to capture the system prompt
 captured_system_prompt = {"value": ""}
@@ -50,7 +50,7 @@ async def mock_chat_complete(system, user):
     captured_system_prompt["value"] = system
     return "Mock analysis report"
 
-with patch("app.agents.orchestrator.chat_complete", new_callable=AsyncMock) as mock_cc:
+with patch("app.harness.runner.chat_complete", new_callable=AsyncMock) as mock_cc:
     mock_cc.side_effect = mock_chat_complete
 
     try:
@@ -88,7 +88,7 @@ async def mock_chat_complete2(system, user):
     captured_system_prompt2["value"] = system
     return "Mock report 2"
 
-with patch("app.agents.orchestrator.chat_complete", new_callable=AsyncMock) as mock_cc2:
+with patch("app.harness.runner.chat_complete", new_callable=AsyncMock) as mock_cc2:
     mock_cc2.side_effect = mock_chat_complete2
 
     try:

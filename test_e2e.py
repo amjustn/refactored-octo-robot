@@ -131,7 +131,7 @@ async def run_e2e_tests():
 
         # Test 3b: LLM with tools (function calling)
         print("\n  [3b] LLM工具调用 chat_complete_with_tools():")
-        from app.agents.orchestrator import ALL_TOOL_SCHEMAS, _execute_tool
+        from app.harness.tools import ALL_TOOL_SCHEMAS, _execute_tool
         try:
             resp = await asyncio.wait_for(
                 chat_complete_with_tools(
@@ -162,7 +162,7 @@ async def run_e2e_tests():
 
     if LLM_API_KEY:
         print("\n  [4a] 单Agent研究 (investment-research, 茅台):")
-        from app.agents.orchestrator import run_single_agent
+        from app.harness.runner import run_single_agent
         try:
             report = await asyncio.wait_for(
                 run_single_agent("investment-research", "茅台"),

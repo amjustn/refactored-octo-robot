@@ -28,7 +28,7 @@ async def main():
     print("开始生成今日金融日报...")
     print(f"{'─'*70}")
 
-    from app.agents.orchestrator import run_single_agent
+    from app.harness.runner import run_single_agent
     from app.core.config import LLM_API_KEY
 
     if not LLM_API_KEY:

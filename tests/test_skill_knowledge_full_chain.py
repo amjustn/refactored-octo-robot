@@ -213,14 +213,14 @@ except Exception as e:
 # ==================== 4. Orchestrator Integration ====================
 print("\n🎭 [4] Orchestrator — skill_name Passed Through All Paths")
 
-from app.agents.orchestrator import run_single_agent, run_multi_agent, run_series
+from app.harness.runner import run_single_agent, run_multi_agent, run_series
 
 # Mock LLM to avoid real API calls
 mock_response = "这是一份模拟的投资分析报告。"
 
-with patch("app.agents.orchestrator.chat_complete", new_callable=AsyncMock) as mock_complete, \
-     patch("app.agents.orchestrator.chat_stream") as mock_stream, \
-     patch("app.agents.orchestrator.chat_complete_with_tools", new_callable=AsyncMock) as mock_tools:
+with patch("app.harness.runner.chat_complete", new_callable=AsyncMock) as mock_complete, \
+     patch("app.harness.runner.chat_stream") as mock_stream, \
+     patch("app.harness.runner.chat_complete_with_tools", new_callable=AsyncMock) as mock_tools:
 
     mock_complete.return_value = mock_response
     mock_tools.return_value = mock_response

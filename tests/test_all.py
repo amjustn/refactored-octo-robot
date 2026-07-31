@@ -305,15 +305,15 @@ class TestContextInjector:
 
 class TestOrchestrator:
     def test_agent_role_prompts_count(self):
-        from app.agents.orchestrator import AGENT_ROLE_PROMPTS
+        from app.harness.prompts import AGENT_ROLE_PROMPTS
         assert len(AGENT_ROLE_PROMPTS) >= 15
 
     def test_financial_tool_schemas(self):
-        from app.agents.orchestrator import FINANCIAL_TOOL_SCHEMAS
+        from app.harness.tools import FINANCIAL_TOOL_SCHEMAS
         assert len(FINANCIAL_TOOL_SCHEMAS) >= 6
 
     def test_data_tool_schemas(self):
-        from app.agents.orchestrator import DATA_TOOL_SCHEMAS
+        from app.harness.tools import DATA_TOOL_SCHEMAS
         assert len(DATA_TOOL_SCHEMAS) >= 5
         names = [t["function"]["name"] for t in DATA_TOOL_SCHEMAS]
         assert "get_stock_price" in names
@@ -323,11 +323,11 @@ class TestOrchestrator:
         assert "search_company" in names
 
     def test_all_tool_schemas(self):
-        from app.agents.orchestrator import ALL_TOOL_SCHEMAS
+        from app.harness.tools import ALL_TOOL_SCHEMAS
         assert len(ALL_TOOL_SCHEMAS) >= 11  # 6 financial + 5 data
 
     def test_tool_enabled_agents_expanded(self):
-        from app.agents.orchestrator import TOOL_ENABLED_AGENTS
+        from app.harness.tools import TOOL_ENABLED_AGENTS
         # Should include more agents than just financial ones
         assert "business-analyst" in TOOL_ENABLED_AGENTS
         assert "financial-analyst" in TOOL_ENABLED_AGENTS
@@ -339,27 +339,27 @@ class TestOrchestrator:
         assert "reader-reviewer" not in TOOL_ENABLED_AGENTS
 
     def test_execute_tool_calc(self):
-        from app.agents.orchestrator import _execute_tool
+        from app.harness.tools import _execute_tool
         import asyncio
         result = asyncio.run(_execute_tool("calc", {"expression": "100 * 2"}))
         data = json.loads(result)
         assert abs(data["result"] - 200) < 0.01
 
     def test_execute_tool_unknown(self):
-        from app.agents.orchestrator import _execute_tool
+        from app.harness.tools import _execute_tool
         import asyncio
         result = asyncio.run(_execute_tool("nonexistent", {}))
         data = json.loads(result)
         assert "error" in data
 
     def test_series_prompt_has_tool_hint(self):
-        from app.agents.orchestrator import SERIES_SYSTEM_PROMPT
+        from app.harness.prompts import SERIES_SYSTEM_PROMPT
         assert "get_stock_price" in SERIES_SYSTEM_PROMPT
 
     def test_run_single_agent_accepts_context(self):
         """Verify run_single_agent has a context parameter."""
         import inspect
-        from app.agents.orchestrator import run_single_agent
+        from app.harness.runner import run_single_agent
         sig = inspect.signature(run_single_agent)
         assert "context" in sig.parameters
 
@@ -467,12 +467,9 @@ class TestModuleImports:
         assert "/api/data/context" in routes
 
     def test_orchestrator_imports(self):
-        from app.agents.orchestrator import (
-            run_single_agent, run_multi_agent, run_series,
-            AGENT_ROLE_PROMPTS, FINANCIAL_TOOL_SCHEMAS,
-            DATA_TOOL_SCHEMAS, ALL_TOOL_SCHEMAS,
-            TOOL_ENABLED_AGENTS, _execute_tool,
-        )
+        from app.harness.runner import run_single_agent, run_multi_agent, run_series
+        from app.harness.prompts import AGENT_ROLE_PROMPTS
+        from app.harness.tools import FINANCIAL_TOOL_SCHEMAS, DATA_TOOL_SCHEMAS, ALL_TOOL_SCHEMAS, TOOL_ENABLED_AGENTS, _execute_tool
 
     def test_context_import(self):
         from app.core.context import (

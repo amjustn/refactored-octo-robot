@@ -571,14 +571,14 @@ class TestContextInjector(unittest.TestCase):
 
 class TestOrchestrator(unittest.TestCase):
     def test_agent_role_prompts(self):
-        from app.agents.orchestrator import AGENT_ROLE_PROMPTS
+        from app.harness.prompts import AGENT_ROLE_PROMPTS
         self.assertGreaterEqual(len(AGENT_ROLE_PROMPTS), 15)
         for key in ["business-analyst", "financial-analyst", "industry-researcher",
                      "risk-assessor", "editor", "reader-reviewer"]:
             self.assertIn(key, AGENT_ROLE_PROMPTS)
 
     def test_tool_schemas(self):
-        from app.agents.orchestrator import ALL_TOOL_SCHEMAS
+        from app.harness.tools import ALL_TOOL_SCHEMAS
         self.assertGreaterEqual(len(ALL_TOOL_SCHEMAS), 11)
         names = [t["function"]["name"] for t in ALL_TOOL_SCHEMAS]
         for expected in ["get_stock_price", "get_financial_data", "fetch_company_news",
@@ -587,19 +587,19 @@ class TestOrchestrator(unittest.TestCase):
 
     def test_series_max_length_exists(self):
         """Bug fix: MAX_SERIES_REPORT_LENGTH should exist and be > MAX_REPORT_LENGTH."""
-        from app.agents.orchestrator import MAX_SERIES_REPORT_LENGTH
+        from app.harness.runner import MAX_SERIES_REPORT_LENGTH
         from app.core.config import MAX_REPORT_LENGTH
         self.assertGreater(MAX_SERIES_REPORT_LENGTH, MAX_REPORT_LENGTH)
         self.assertGreaterEqual(MAX_SERIES_REPORT_LENGTH, 100000)
 
     def test_execute_tool_calc(self):
-        from app.agents.orchestrator import _execute_tool
+        from app.harness.tools import _execute_tool
         result = run_async(_execute_tool("calc", {"expression": "100 * 2"}))
         data = json.loads(result)
         self.assertAlmostEqual(data["result"], 200, delta=0.01)
 
     def test_execute_tool_verify_market_cap(self):
-        from app.agents.orchestrator import _execute_tool
+        from app.harness.tools import _execute_tool
         result = run_async(_execute_tool("verify_market_cap", {
             "price": 100, "shares": 10e8, "reported": 1000e8
         }))
@@ -607,13 +607,13 @@ class TestOrchestrator(unittest.TestCase):
         self.assertTrue(data["passed"])
 
     def test_execute_tool_benford(self):
-        from app.agents.orchestrator import _execute_tool
+        from app.harness.tools import _execute_tool
         result = run_async(_execute_tool("benford", {"numbers": [100, 200, 300, 45]}))
         data = json.loads(result)
         self.assertIn("sample_size", data)
 
     def test_execute_tool_cross_validate(self):
-        from app.agents.orchestrator import _execute_tool
+        from app.harness.tools import _execute_tool
         result = run_async(_execute_tool("cross_validate", {
             "field": "Revenue", "values": {"A": 100, "B": 105, "C": 102}
         }))
@@ -621,18 +621,18 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual(data["source_count"], 3)
 
     def test_execute_tool_unknown(self):
-        from app.agents.orchestrator import _execute_tool
+        from app.harness.tools import _execute_tool
         result = run_async(_execute_tool("nonexistent_tool", {}))
         data = json.loads(result)
         self.assertIn("error", data)
 
     def test_tool_enabled_agents(self):
-        from app.agents.orchestrator import TOOL_ENABLED_AGENTS
+        from app.harness.tools import TOOL_ENABLED_AGENTS
         self.assertIn("business-analyst", TOOL_ENABLED_AGENTS)
         self.assertNotIn("editor", TOOL_ENABLED_AGENTS)
 
     def test_series_prompt_mentions_tools(self):
-        from app.agents.orchestrator import SERIES_SYSTEM_PROMPT
+        from app.harness.prompts import SERIES_SYSTEM_PROMPT
         self.assertIn("get_stock_price", SERIES_SYSTEM_PROMPT)
 
 
@@ -754,13 +754,9 @@ class TestModuleImports(unittest.TestCase):
         self.assertEqual(app.title, "AI Berkshire Web")
 
     def test_orchestrator_imports(self):
-        from app.agents.orchestrator import (
-            run_single_agent, run_multi_agent, run_series,
-            AGENT_ROLE_PROMPTS, FINANCIAL_TOOL_SCHEMAS,
-            DATA_TOOL_SCHEMAS, ALL_TOOL_SCHEMAS,
-            TOOL_ENABLED_AGENTS, _execute_tool,
-            MAX_SERIES_REPORT_LENGTH,
-        )
+        from app.harness.runner import run_single_agent, run_multi_agent, run_series, MAX_SERIES_REPORT_LENGTH
+        from app.harness.prompts import AGENT_ROLE_PROMPTS
+        from app.harness.tools import FINANCIAL_TOOL_SCHEMAS, DATA_TOOL_SCHEMAS, ALL_TOOL_SCHEMAS, TOOL_ENABLED_AGENTS, _execute_tool
 
     def test_market_data_imports(self):
         from app.tools.market_data import (

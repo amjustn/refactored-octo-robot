@@ -66,7 +66,7 @@ async def run_test():
     from app.core.config import LLM_API_KEY
 
     if LLM_API_KEY:
-        from app.agents.orchestrator import run_single_agent
+        from app.harness.runner import run_single_agent
         import time
 
         start = time.time()
