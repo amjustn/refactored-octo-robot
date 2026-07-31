@@ -492,9 +492,20 @@ async def api_get_skill(skill_name: str):
 
 @app.get("/api/health/data-sources")
 async def api_data_source_health():
-    """Check all data source availability (libraries + HTTP endpoints)."""
+    """Check all data source availability (libraries + HTTP endpoints),
+    plus ToolGateway circuit-breaker states."""
     from .core.bootstrap import health_check_data_sources
-    return await health_check_data_sources()
+    from .harness.tools import get_gateway
+    result = await health_check_data_sources()
+    result["circuit_breakers"] = get_gateway().breaker_states()
+    return result
+
+
+@app.post("/api/health/data-sources/reset")
+async def api_data_source_reset(tool: str = None):
+    """Manually reset circuit breakers (one tool, or all when omitted)."""
+    from .harness.tools import get_gateway
+    return get_gateway().reset_breaker(tool)
 
 
 

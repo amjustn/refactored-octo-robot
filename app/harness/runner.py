@@ -23,7 +23,7 @@ import logging
 from typing import Optional
 
 from ..core.llm import chat_stream, chat_complete, chat_complete_with_tools
-from ..core.context import build_full_context
+from .context import ContextBuilder
 from ..core.config import MAX_PARALLEL_AGENTS, MAX_REPORT_LENGTH, AGENT_TIMEOUT
 from ..models.schemas import AgentProgress
 from ..skills import get_skill, build_user_prompt
@@ -33,7 +33,7 @@ from .prompts import (
     get_default_system_prompt, get_role_label,
 )
 from .spec import TaskSpec
-from .tools import ALL_TOOL_SCHEMAS, TOOL_ENABLED_AGENTS, _execute_tool
+from .tools import ALL_TOOL_SCHEMAS, TOOL_ENABLED_AGENTS, get_gateway
 
 logger = logging.getLogger("ai_berkshire.harness.runner")
 
@@ -78,6 +78,19 @@ class AgentRunner:
             llm_config=llm_config, stream=spec.stream,
         )
 
+    # ---------- tool execution ----------
+
+    def _tool_executor(self, agent: Optional[str] = None):
+        """Function-calling tool executor routed through the ToolGateway
+        (circuit breaking, caching, timeout/retry, TOOL_CALL events)."""
+        gateway = get_gateway()
+        bus, task_id = self.bus, self.task_id
+
+        async def _exec(name: str, args: dict) -> str:
+            return await gateway.execute(name, args, task_id=task_id, agent=agent, bus=bus)
+
+        return _exec
+
     # ---------- single ----------
 
     async def run_single(
@@ -103,11 +116,10 @@ class AgentRunner:
             user_msg = build_user_prompt(skill_name, arguments)
 
         if not context:
-            try:
-                context = await build_full_context(arguments, skill_name=skill_name)
-            except Exception as e:
-                logger.warning(f"Context building failed in run_single: {e}")
-                context = ""
+            bundle = await ContextBuilder(bus=self.bus, task_id=self.task_id).build(
+                arguments, skill_name=skill_name,
+            )
+            context = bundle.context
 
         if context:
             system_prompt = f"{system_prompt}\n\n{context}"
@@ -117,7 +129,7 @@ class AgentRunner:
             result = await chat_complete_with_tools(
                 system_prompt, user_msg,
                 tools=ALL_TOOL_SCHEMAS,
-                tool_executor=_execute_tool,
+                tool_executor=self._tool_executor(agent_role),
                 llm_config=llm_config,
             )
             if stream:
@@ -155,11 +167,10 @@ class AgentRunner:
 
         self._progress("system", "running", "正在获取实时市场数据...")
 
-        try:
-            context = await build_full_context(arguments, skill_name=skill_name)
-        except Exception as e:
-            logger.warning(f"Context building failed, continuing without: {e}")
-            context = ""
+        bundle = await ContextBuilder(bus=self.bus, task_id=self.task_id).build(
+            arguments, skill_name=skill_name,
+        )
+        context = bundle.context
 
         self._progress("system", "completed", "市场数据获取完成", 1.0)
 
@@ -287,11 +298,10 @@ class AgentRunner:
         if not topics:
             return await self.run_single(skill_name, arguments, llm_config=llm_config)
 
-        try:
-            context = await build_full_context(arguments, skill_name=skill_name)
-        except Exception as e:
-            logger.warning(f"Context building failed: {e}")
-            context = ""
+        bundle = await ContextBuilder(bus=self.bus, task_id=self.task_id).build(
+            arguments, skill_name=skill_name,
+        )
+        context = bundle.context
 
         total = len(topics)
         articles = []
@@ -332,7 +342,7 @@ class AgentRunner:
                     chat_complete_with_tools(
                         system_prompt, user_msg,
                         tools=ALL_TOOL_SCHEMAS,
-                        tool_executor=_execute_tool,
+                        tool_executor=self._tool_executor(f"article-{i + 1}"),
                         llm_config=llm_config,
                     ),
                     timeout=AGENT_TIMEOUT,

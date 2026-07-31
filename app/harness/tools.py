@@ -329,3 +329,304 @@ TOOL_ENABLED_AGENTS = {
     "business-interpreter", "financial-auditor", "competition-analyst", "risk-hunter",
     "researcher",
 }
+
+
+# ==================== ToolGateway (PR-3) ====================
+
+import asyncio
+import time
+from dataclasses import dataclass, field
+from typing import Any, Awaitable, Callable, Optional
+
+
+@dataclass
+class ToolDef:
+    """A registered tool with execution policy."""
+    name: str
+    timeout: float = 20.0
+    retries: int = 1
+    cache_ttl: Optional[int] = None      # seconds; None = no gateway-level cache
+    fallback: list = field(default_factory=list)  # alternative tool names
+
+
+@dataclass
+class ToolResult:
+    tool: str
+    ok: bool
+    content: str                          # JSON string (same shape as _execute_tool)
+    source: str = ""
+    latency_ms: float = 0.0
+    cache_hit: bool = False
+    fallback_depth: int = 0
+    circuit: str = "closed"
+    error: str = ""
+
+
+class CircuitBreaker:
+    """Per-tool circuit breaker.
+
+    - closed: normal; consecutive failures increment a counter
+    - open (after ``fail_threshold`` consecutive failures): calls are
+      rejected immediately for ``recovery_probe_after`` seconds
+    - half-open: after the cooldown a single probe call is allowed;
+      success closes the breaker, failure re-opens it
+    """
+
+    def __init__(self, name: str, fail_threshold: int = 3, recovery_probe_after: float = 300):
+        self.name = name
+        self.fail_threshold = fail_threshold
+        self.recovery_probe_after = recovery_probe_after
+        self.state = "closed"
+        self.consecutive_failures = 0
+        self.opened_at: Optional[float] = None
+        self.last_error: str = ""
+
+    def allow_call(self) -> bool:
+        if self.state == "closed":
+            return True
+        if self.state == "open":
+            if self.opened_at is not None and (time.monotonic() - self.opened_at) >= self.recovery_probe_after:
+                self.state = "half_open"   # allow one probe
+                return True
+            return False
+        # half_open: a probe is already in flight conceptually; allow it
+        return True
+
+    def record_success(self):
+        self.state = "closed"
+        self.consecutive_failures = 0
+        self.opened_at = None
+        self.last_error = ""
+
+    def record_failure(self, error: str = ""):
+        self.consecutive_failures += 1
+        self.last_error = error[:200]
+        if self.state == "half_open" or self.consecutive_failures >= self.fail_threshold:
+            self.state = "open"
+            self.opened_at = time.monotonic()
+
+    def reset(self):
+        self.record_success()
+
+    def snapshot(self) -> dict:
+        return {
+            "state": self.state,
+            "consecutive_failures": self.consecutive_failures,
+            "last_error": self.last_error,
+            "open_since_s": round(time.monotonic() - self.opened_at, 1) if self.opened_at else None,
+        }
+
+
+# Tool registry with per-tool execution policy. cache_ttl mirrors the
+# DATA_CACHE_TTL_* tiers in core.config (market_data also caches
+# internally; the gateway cache short-circuits repeat calls within a run).
+TOOL_DEFS: dict[str, ToolDef] = {
+    # financial calculators — fast, deterministic, no cache needed
+    "verify_market_cap": ToolDef("verify_market_cap", timeout=5),
+    "verify_valuation": ToolDef("verify_valuation", timeout=5),
+    "cross_validate": ToolDef("cross_validate", timeout=5),
+    "three_scenario": ToolDef("three_scenario", timeout=5),
+    "calc": ToolDef("calc", timeout=5),
+    "benford": ToolDef("benford", timeout=5),
+    # market data — network-bound, cached, own internal fallback chains
+    "get_stock_price": ToolDef("get_stock_price", timeout=25, cache_ttl=300),
+    "get_financial_data": ToolDef("get_financial_data", timeout=30, cache_ttl=86400),
+    "fetch_company_news": ToolDef("fetch_company_news", timeout=25, cache_ttl=3600),
+    "fetch_market_indices": ToolDef("fetch_market_indices", timeout=20, cache_ttl=600),
+    "search_company": ToolDef("search_company", timeout=20, cache_ttl=86400),
+    # web / industry
+    "web_search": ToolDef("web_search", timeout=20),
+    "read_webpage": ToolDef("read_webpage", timeout=20),
+    "search_industry_chain": ToolDef("search_industry_chain", timeout=25),
+    "list_industry_sources": ToolDef("list_industry_sources", timeout=10, cache_ttl=86400),
+}
+
+
+class ToolGateway:
+    """Unified tool entry: circuit check → cache → timeout/retry →
+    fallback chain → TOOL_CALL event.
+
+    Playback mode (eval replay): when ``playback`` is set, matching
+    cassette entries are returned instead of executing real tools.
+    """
+
+    def __init__(self, tools: Optional[dict[str, ToolDef]] = None):
+        self.tools = tools or TOOL_DEFS
+        self.breakers: dict[str, CircuitBreaker] = {
+            name: CircuitBreaker(name) for name in self.tools
+        }
+        self.playback: Optional[dict[str, str]] = None  # cassette key -> content
+        self._cache = None
+
+    # ----- cache -----
+
+    def _get_cache(self):
+        if self._cache is None:
+            from ..core.data_cache import DataCache
+            self._cache = DataCache()
+        return self._cache
+
+    @staticmethod
+    def _cache_key(tool: str, args: dict) -> str:
+        return f"{tool}:{json.dumps(args, sort_keys=True, ensure_ascii=False)}"
+
+    # ----- circuit breakers -----
+
+    def breaker_states(self) -> dict:
+        return {name: b.snapshot() for name, b in self.breakers.items()}
+
+    def reset_breaker(self, name: Optional[str] = None) -> dict:
+        if name:
+            b = self.breakers.get(name)
+            if b:
+                b.reset()
+                return {"reset": name, "state": b.state}
+            return {"reset": name, "error": "unknown tool"}
+        for b in self.breakers.values():
+            b.reset()
+        return {"reset": "all", "count": len(self.breakers)}
+
+    def seed_breaker(self, name: str, state: str, failures: int = 0):
+        """Seed a breaker from external health info (e.g. bootstrap check)."""
+        b = self.breakers.setdefault(name, CircuitBreaker(name))
+        if state == "open":
+            b.state = "open"
+            b.opened_at = time.monotonic()
+            b.consecutive_failures = max(failures, b.fail_threshold)
+
+    # ----- execution -----
+
+    async def call(
+        self,
+        tool: str,
+        args: dict,
+        task_id: Optional[str] = None,
+        agent: Optional[str] = None,
+        bus=None,
+    ) -> ToolResult:
+        result = await self._call_chain(tool, args, depth=0, seen=set())
+        if bus is not None and task_id:
+            from .events import EventType
+            payload = {
+                "tool": tool,
+                "args": {k: (str(v)[:80]) for k, v in (args or {}).items()},
+                "agent": agent or "",
+                "source": result.source,
+                "latency_ms": round(result.latency_ms, 1),
+                "cache_hit": result.cache_hit,
+                "fallback_depth": result.fallback_depth,
+                "circuit": result.circuit,
+                "ok": result.ok,
+            }
+            bus.emit(task_id, EventType.TOOL_CALL, **payload)
+        return result
+
+    async def _call_chain(self, tool: str, args: dict, depth: int, seen: set) -> ToolResult:
+        if tool in seen:
+            return ToolResult(tool, False, json.dumps({"error": f"fallback loop at {tool}"}, ensure_ascii=False), error="fallback loop")
+        seen.add(tool)
+
+        tdef = self.tools.get(tool)
+        if tdef is None:
+            return ToolResult(tool, False, json.dumps({"error": f"Unknown tool: {tool}"}, ensure_ascii=False), error="unknown tool")
+
+        breaker = self.breakers.setdefault(tool, CircuitBreaker(tool))
+
+        # Playback (eval replay) short-circuits everything
+        if self.playback is not None:
+            key = self._cache_key(tool, args)
+            if key in self.playback:
+                return ToolResult(tool, True, self.playback[key], source="cassette", cache_hit=True, fallback_depth=depth)
+            return ToolResult(tool, False, json.dumps({"error": f"no cassette for {key}"}, ensure_ascii=False), error="no cassette", fallback_depth=depth)
+
+        # Circuit check → fallback or reject
+        if not breaker.allow_call():
+            fb = await self._try_fallbacks(tdef, args, depth, seen)
+            if fb is not None:
+                return fb
+            return ToolResult(
+                tool, False,
+                json.dumps({"error": f"circuit open for {tool}", "circuit": "open"}, ensure_ascii=False),
+                circuit="open", error="circuit open", fallback_depth=depth,
+            )
+
+        # Cache
+        cache_key = self._cache_key(tool, args)
+        if tdef.cache_ttl:
+            try:
+                cached = self._get_cache().get("gateway", cache_key, max_age_seconds=tdef.cache_ttl)
+                if cached is not None:
+                    return ToolResult(tool, True, cached if isinstance(cached, str) else json.dumps(cached, ensure_ascii=False),
+                                      source="cache", cache_hit=True, fallback_depth=depth)
+            except Exception:
+                pass
+
+        # Execute with timeout/retry
+        start = time.monotonic()
+        last_error = ""
+        for attempt in range(1 + tdef.retries):
+            try:
+                content = await asyncio.wait_for(_execute_tool(tool, args), timeout=tdef.timeout)
+                latency = (time.monotonic() - start) * 1000
+                ok = True
+                source = ""
+                try:
+                    parsed = json.loads(content)
+                    if isinstance(parsed, dict):
+                        if "error" in parsed and len(parsed) <= 2:
+                            ok = False
+                            last_error = str(parsed.get("error"))[:200]
+                        source = str(parsed.get("_source", ""))[:40]
+                except Exception:
+                    pass
+                if ok:
+                    breaker.record_success()
+                    if tdef.cache_ttl:
+                        try:
+                            self._get_cache().set("gateway", cache_key, content)
+                        except Exception:
+                            pass
+                    return ToolResult(tool, True, content, source=source, latency_ms=latency, fallback_depth=depth)
+                breaker.record_failure(last_error)
+            except asyncio.TimeoutError:
+                last_error = f"timeout after {tdef.timeout}s"
+                breaker.record_failure(last_error)
+            except Exception as e:
+                last_error = str(e)[:200]
+                breaker.record_failure(last_error)
+            if attempt < tdef.retries:
+                await asyncio.sleep(0.5)
+
+        latency = (time.monotonic() - start) * 1000
+        fb = await self._try_fallbacks(tdef, args, depth, seen)
+        if fb is not None:
+            return fb
+        return ToolResult(
+            tool, False,
+            json.dumps({"error": last_error or "tool failed"}, ensure_ascii=False),
+            latency_ms=latency, circuit=breaker.state, error=last_error, fallback_depth=depth,
+        )
+
+    async def _try_fallbacks(self, tdef: ToolDef, args: dict, depth: int, seen: set) -> Optional[ToolResult]:
+        for fb_name in tdef.fallback:
+            fb = await self._call_chain(fb_name, args, depth + 1, seen)
+            if fb.ok:
+                return fb
+        return None
+
+    async def execute(self, tool_name: str, arguments: dict,
+                      task_id: Optional[str] = None, agent: Optional[str] = None, bus=None) -> str:
+        """Drop-in replacement for _execute_tool (returns JSON string)."""
+        result = await self.call(tool_name, arguments, task_id=task_id, agent=agent, bus=bus)
+        return result.content
+
+
+_gateway: Optional[ToolGateway] = None
+
+
+def get_gateway() -> ToolGateway:
+    global _gateway
+    if _gateway is None:
+        _gateway = ToolGateway()
+    return _gateway
+
