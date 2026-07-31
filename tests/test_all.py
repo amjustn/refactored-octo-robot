@@ -506,8 +506,8 @@ class TestSecurity:
 
     def test_api_token_uses_compare_digest(self):
         import inspect
-        from app.main import _verify_token
-        source = inspect.getsource(_verify_token)
+        from app.main import api_auth_login
+        source = inspect.getsource(api_auth_login)
         assert "compare_digest" in source
 
     def test_cors_not_wildcard(self):

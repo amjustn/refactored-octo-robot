@@ -46,7 +46,7 @@ from app.harness.runner import run_single_agent
 # Mock the LLM to capture the system prompt
 captured_system_prompt = {"value": ""}
 
-async def mock_chat_complete(system, user):
+async def mock_chat_complete(system, user, llm_config=None):
     captured_system_prompt["value"] = system
     return "Mock analysis report"
 
@@ -84,7 +84,7 @@ with patch("app.harness.runner.chat_complete", new_callable=AsyncMock) as mock_c
 # Test: when context IS provided, it's used (not rebuilt)
 captured_system_prompt2 = {"value": ""}
 
-async def mock_chat_complete2(system, user):
+async def mock_chat_complete2(system, user, llm_config=None):
     captured_system_prompt2["value"] = system
     return "Mock report 2"
 

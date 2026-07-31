@@ -193,6 +193,15 @@ DEFAULT_SKILL_KNOWLEDGE = {
         "update_notes": "关注公众号内容监管新规和读者偏好变化",
         "last_updated": "default_bootstrap",
     },
+    "daily-briefing": {
+        "skill_name": "daily-briefing",
+        "display_name": "金融日报",
+        "latest_frameworks": "A股盘后综述四段式：1)指数表现与量能 2)板块涨跌与轮动 3)资金流向(北向/主力) 4)要闻与次日关注",
+        "key_criteria": "数据标注来源与时间，指数涨跌精确到小数点后两位，要闻注明出处，文末附AI免责声明",
+        "data_sources": "指数行情via get_indices工具，板块与资金流via web_search，要闻via fetch_company_news/web_search",
+        "update_notes": "关注交易制度变化(如涨跌幅限制调整)与北向资金披露口径变化",
+        "last_updated": "default_bootstrap",
+    },
 }
 
 
