@@ -22,7 +22,12 @@ from hmac import compare_digest
 from pydantic import BaseModel
 
 from .skills import list_skills, get_skill, load_skill_prompt
-from .agents.orchestrator import run_single_agent, run_multi_agent, run_series
+from .harness import (
+    TaskSpec, run as harness_run, cancel as harness_cancel,
+    get_status as harness_get_status, active_count as harness_active_count,
+)
+from .harness.events import get_bus
+from .harness.persist import get_repository
 from .models.schemas import (
     SkillInfo, ResearchRequest, ResearchStatus,
     AgentProgress,
@@ -354,47 +359,8 @@ templates_dir.mkdir(parents=True, exist_ok=True)
 
 app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
-active_tasks: dict[str, ResearchStatus] = {}
-_MAX_TASKS = 100
-
-# Running asyncio jobs, keyed by task_id — enables real server-side cancellation
-running_jobs: dict[str, asyncio.Task] = {}
-
-
-def _add_task(task_id: str, status: ResearchStatus, arguments: str = ""):
-    if len(active_tasks) >= _MAX_TASKS:
-        oldest_id = next(iter(active_tasks))
-        active_tasks.pop(oldest_id, None)
-    active_tasks[task_id] = status
-    task_store.save_task(status, arguments)
-
-
-def _update_task(task_id: str, arguments: str = ""):
-    if task_id in active_tasks:
-        task_store.save_task(active_tasks[task_id], arguments)
-
-
-def _save_report(skill_name: str, arguments: str, report: str,
-                 duration_seconds: float = 0, tokens: dict = None) -> Path:
-    """Save report markdown + a metadata sidecar (.meta.json)."""
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    safe_skill = _sanitize_filename(skill_name)
-    report_path = REPORTS_DIR / f"{safe_skill}_{timestamp}.md"
-    report_path.write_text(report, encoding="utf-8")
-    meta = {
-        "skill_name": skill_name,
-        "arguments": arguments,
-        "duration_seconds": round(duration_seconds, 1),
-        "tokens": tokens or {},
-        "created_at": datetime.now().isoformat(),
-    }
-    try:
-        report_path.with_suffix(".meta.json").write_text(
-            json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-    except Exception as e:
-        logger.warning(f"Failed to write report meta: {e}")
-    return report_path
+# Task lifecycle (active registry, running jobs, reports, billing) is owned
+# by the harness — see app/harness/. Endpoints below are thin translations.
 
 
 # ==================== Routes ====================
@@ -445,7 +411,7 @@ async def health():
         "llm_model": LLM_MODEL,
         "skills_count": len(list_skills()),
         "reports_count": len(list(REPORTS_DIR.glob("*.md"))) if REPORTS_DIR.exists() else 0,
-        "active_tasks": len(active_tasks),
+        "active_tasks": harness_active_count(),
         "db_size": task_store.db_path.stat().st_size if task_store.db_path.exists() else 0,
         "data_cache": data_cache.get_stats(),
         "knowledge_status": get_knowledge_status(),
@@ -699,92 +665,38 @@ async def api_update_skill_knowledge(skill_name: str = None):
 
 @app.post("/api/research")
 async def api_start_research(request: "Request", req: ResearchRequest):
-    task_id = str(uuid.uuid4())[:8]
     if not _check_rate_limit(request.client.host if request.client else "unknown"):
         raise HTTPException(status_code=429, detail="请求过于频繁，请稍后再试")
     skill = get_skill(req.skill_name)
     if not skill:
         return {"error": f"Unknown skill: {req.skill_name}"}
 
-    is_multi = skill.get("is_multi_agent", False)
-    is_series = skill.get("series_mode", False)
-
-    if is_series:
-        agent_names = [f"article-{i+1}" for i in range(len(skill.get("series_topics", [])))]
-    elif is_multi:
-        agent_names = skill.get("agents", [])
-    else:
-        agent_names = ["default"]
-
-    status = ResearchStatus(
-        task_id=task_id,
-        skill_name=req.skill_name,
-        status="running",
-        agents=[AgentProgress(agent_name=name, status="pending") for name in agent_names],
-    )
-    _add_task(task_id, status, req.arguments)
-    running_jobs[task_id] = asyncio.current_task()
-    from .core.llm import set_usage_context, get_usage, clear_usage
-    set_usage_context(task_id)
-    start_ts = time()
     llm_config = _validate_llm_config(req.llm_config)
+    spec = TaskSpec.build(
+        skill, req.arguments, llm_override=llm_config,
+        caller="http", stream=False,
+    )
+    result = await harness_run(spec)
 
-    try:
-        if is_series:
-            report = await run_series(req.skill_name, req.arguments, progress_callback=None, llm_config=llm_config)
-        elif is_multi:
-            report = await run_multi_agent(req.skill_name, req.arguments, progress_callback=None, llm_config=llm_config)
-        else:
-            report = await run_single_agent(req.skill_name, req.arguments, llm_config=llm_config)
-
-        duration = time() - start_ts
-        tokens = get_usage(task_id)
-        report_path = _save_report(req.skill_name, req.arguments, report, duration, tokens)
-
-        status.status = "completed"
-        status.report = report
-        for a in status.agents:
-            a.status = "completed"
-            a.progress = 1.0
-        _update_task(task_id, req.arguments)
-
+    if result.status == "completed":
         return {
-            "task_id": task_id,
+            "task_id": result.task_id,
             "status": "completed",
-            "report": report,
-            "report_path": str(report_path),
-            "duration_seconds": round(duration, 1),
-            "tokens": tokens,
+            "report": result.report,
+            "report_path": result.report_path,
+            "duration_seconds": result.duration_seconds,
+            "tokens": result.tokens,
+            "usage": result.usage,
         }
-    except asyncio.CancelledError:
-        status.status = "cancelled"
-        status.error = "已被用户取消"
-        _update_task(task_id, req.arguments)
-        return {"task_id": task_id, "status": "cancelled", "error": "已被用户取消"}
-    except Exception as e:
-        status.status = "failed"
-        status.error = str(e)
-        _update_task(task_id, req.arguments)
-        return {"task_id": task_id, "status": "failed", "error": str(e)}
-    finally:
-        running_jobs.pop(task_id, None)
-        clear_usage(task_id)
-        asyncio.create_task(_cleanup_task(task_id, 3600))
+    if result.status == "cancelled":
+        return {"task_id": result.task_id, "status": "cancelled", "error": result.error}
+    return {"task_id": result.task_id, "status": "failed", "error": result.error}
 
 
 @app.post("/api/cancel/{task_id}")
 async def api_cancel_research(task_id: str):
     """Cancel a running research task on the server side (stops LLM calls)."""
-    job = running_jobs.get(task_id)
-    if not job:
-        return {"cancelled": False, "reason": "task not running or not found"}
-    job.cancel()
-    status = active_tasks.get(task_id)
-    if status:
-        status.status = "cancelled"
-        status.error = "已被用户取消"
-        _update_task(task_id)
-    return {"cancelled": True, "task_id": task_id}
+    return harness_cancel(task_id)
 
 
 @app.websocket("/ws/research/{skill_name}")
@@ -818,7 +730,6 @@ async def ws_research(websocket: WebSocket, skill_name: str):
             pass
         return
 
-    task_id = str(uuid.uuid4())[:8]
     skill = get_skill(skill_name)
     if not skill:
         await websocket.send_json({"type": "error", "message": f"Unknown skill: {skill_name}"})
@@ -828,112 +739,44 @@ async def ws_research(websocket: WebSocket, skill_name: str):
             pass
         return
 
-    is_multi = skill.get("is_multi_agent", False)
-    is_series = skill.get("series_mode", False)
-
-    if is_series:
-        agent_names = [f"article-{i+1}" for i in range(len(skill.get("series_topics", [])))]
-    elif is_multi:
-        agent_names = skill.get("agents", [])
-    else:
-        agent_names = ["default"]
-
-    status = ResearchStatus(
-        task_id=task_id, skill_name=skill_name, status="running",
-        agents=[AgentProgress(agent_name=name, status="pending") for name in agent_names],
+    spec = TaskSpec.build(
+        skill, arguments, llm_override=llm_config, caller="ws", stream=True,
     )
-    _add_task(task_id, status, arguments)
-    running_jobs[task_id] = asyncio.current_task()
-    from .core.llm import set_usage_context, get_usage, clear_usage
-    set_usage_context(task_id)
-    start_ts = time()
 
-    # Tell the client its task_id so it can call /api/cancel/{task_id}
-    await websocket.send_json({"type": "started", "task_id": task_id})
+    # Subscribe BEFORE run() so no events are lost; forward bus → websocket.
+    bus = get_bus()
+    queue = bus.subscribe(spec.task_id)
+    _STOP = object()
 
-    try:
-        for a in status.agents:
-            a.status = "running"
-        _update_task(task_id, arguments)
-
-        if is_series or is_multi:
-            async def _ws_progress(p):
-                try:
-                    await websocket.send_json({
-                        "type": "progress",
-                        "agent": p.agent_name,
-                        "status": p.status,
-                        "message": p.message,
-                    })
-                except Exception:
-                    pass
-
-            if is_series:
-                report = await run_series(skill_name, arguments, progress_callback=_ws_progress, llm_config=llm_config)
-            else:
-                report = await run_multi_agent(skill_name, arguments, progress_callback=_ws_progress, llm_config=llm_config)
-        else:
-            from .skills import build_user_prompt
-            from .core.llm import chat_stream
-
-            # Inject context for single-agent streaming too
-            from .core.context import build_full_context
+    async def _forward():
+        while True:
+            event = await queue.get()
+            if event is _STOP:
+                break
             try:
-                context = await build_full_context(arguments, skill_name=skill_name)
+                await websocket.send_json(event.to_ws_dict())
             except Exception:
-                context = ""
+                break
 
-            user_msg = build_user_prompt(skill_name, arguments)
-            system_msg = "你是一位精通价值投资的分析师，遵循巴菲特、芒格、段永平、李录四位大师的方法论。"
-            if context:
-                system_msg += f"\n\n{context}"
-
-            full_report = ""
-            async for chunk in chat_stream(system_msg, user_msg, llm_config=llm_config):
-                full_report += chunk
-                await websocket.send_json({"type": "chunk", "content": chunk})
-
-            report = full_report
-
-        duration = time() - start_ts
-        tokens = get_usage(task_id)
-        report_path = _save_report(skill_name, arguments, report, duration, tokens)
-
-        status.status = "completed"
-        status.report = report
-        for a in status.agents:
-            a.status = "completed"
-            a.progress = 1.0
-        _update_task(task_id, arguments)
-
-        await websocket.send_json({
-            "type": "complete",
-            "report": report,
-            "report_path": str(report_path),
-            "duration_seconds": round(duration, 1),
-            "tokens": tokens,
-        })
-
-    except asyncio.CancelledError:
-        status.status = "cancelled"
-        status.error = "已被用户取消"
-        _update_task(task_id, arguments)
-        try:
-            await websocket.send_json({"type": "error", "message": "已被用户取消", "cancelled": True})
-        except Exception:
-            pass
-    except Exception as e:
-        status.status = "failed"
-        status.error = str(e)
-        _update_task(task_id, arguments)
-        try:
-            await websocket.send_json({"type": "error", "message": str(e)})
-        except Exception:
-            pass
+    forwarder = asyncio.create_task(_forward())
+    try:
+        await harness_run(spec, bus=bus)
     finally:
-        running_jobs.pop(task_id, None)
-        clear_usage(task_id)
-        asyncio.create_task(_cleanup_task(task_id, 3600))
+        bus.unsubscribe(spec.task_id, queue)
+        # Flush remaining events (e.g. complete/error) before closing.
+        while True:
+            try:
+                queue.put_nowait(_STOP)
+                break
+            except asyncio.QueueFull:
+                try:
+                    queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+        try:
+            await asyncio.wait_for(forwarder, timeout=10.0)
+        except Exception:
+            forwarder.cancel()
         try:
             await websocket.close()
         except Exception:
@@ -1061,18 +904,22 @@ async def api_delete_report(filename: str):
 
 @app.get("/api/task/{task_id}")
 async def api_task_status(task_id: str):
-    if task_id in active_tasks:
-        return active_tasks[task_id]
-    task = task_store.get_task(task_id)
-    if task:
-        return task
+    status = harness_get_status(task_id)
+    if status:
+        return status
     return {"error": "Task not found"}
 
 
 @app.get("/api/tasks")
 async def api_list_tasks(status_filter: str = None, limit: int = 50):
-    tasks = task_store.list_tasks(limit=limit, status_filter=status_filter)
-    return {"tasks": [t.model_dump() for t in tasks]}
+    repo = get_repository()
+    tasks = repo.list_tasks(limit=limit, status_filter=status_filter)
+    out = []
+    for t in tasks:
+        item = t.model_dump()
+        item["billing"] = repo.get_billing(t.task_id)
+        out.append(item)
+    return {"tasks": out}
 
 
 @app.post("/api/tools/{tool_name}")
@@ -1100,11 +947,6 @@ async def api_run_tool(tool_name: str, params: dict = None):
 
 
 # ==================== Background Tasks ====================
-
-async def _cleanup_task(task_id: str, delay: int):
-    await asyncio.sleep(delay)
-    active_tasks.pop(task_id, None)
-
 
 async def _cleanup_old_reports():
     while True:
@@ -1187,6 +1029,8 @@ async def _auto_update_skill_knowledge():
 @app.on_event("startup")
 async def _startup():
     task_store.mark_running_as_interrupted()
+    # Harness repository: idempotent billing-column migration at startup
+    get_repository()
     # Ensure default knowledge base exists on first run
     try:
         from .tools.knowledge_updater import _ensure_default_knowledge
