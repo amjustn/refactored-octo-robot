@@ -28,7 +28,7 @@ class ResearchRequest(BaseModel):
     skill_name: str = Field(..., description="Skill name (e.g. investment-team)")
     arguments: str = Field(..., max_length=2000, description="Target company/topic/parameters")
     stream: bool = Field(default=False, description="Stream the response")
-    llm_config: Optional[dict] = Field(default=None, description="Per-request LLM override: {api_key, base_url, model}")
+    llm_config: Optional[dict] = Field(default=None, description="Per-request LLM override: {api_key, base_url, model, synthesis_model}（synthesis_model 为 Team Lead 综合环节可选的独立模型）")
 
 
 class AgentProgress(BaseModel):

@@ -79,7 +79,7 @@ MANUAL_HTML = """<!DOCTYPE html>
 <tr><td><code>investment-team</code></td><td>多Agent投研团队<span class="tag">4A</span></td><td>公司名/代码</td><td>★推荐★ 商业模式/财务/护城河/估值 4Agent并行</td></tr>
 <tr><td><code>investment-research</code></td><td>四大师综合分析</td><td>公司名/代码</td><td>巴菲特+芒格+段永平+李录 四大视角</td></tr>
 <tr><td><code>investment-checklist</code></td><td>巴菲特Checklist</td><td>多公司</td><td>六关快速筛选，支持多公司对比</td></tr>
-<tr><td><code>management-deep-dive</code></td><td>管理层深研</td><td>管理层名 公司</td><td>履历/能力圈/诚信/资本配置 全景评估</td></tr>
+<tr><td><code>management-deep-dive</code></td><td>管理层深研</td><td>管理层名 公司</td><td>履历/能力圈/诚信/资本配置 全景评估（输入公司名即可）</td></tr>
 <tr><td><code>private-company-research</code></td><td>未上市公司研究</td><td>公司名</td><td>侦探式公开信息挖掘</td></tr>
 <tr><td><code>deep-company-series</code></td><td>深度系列长文</td><td>公司名</td><td>8篇系列专题（~12万字），逐篇生成</td></tr>
 </table>
@@ -101,8 +101,8 @@ MANUAL_HTML = """<!DOCTYPE html>
 <h3>持仓管理</h3>
 <table>
 <tr><td><code>portfolio-review</code></td><td>组合审视</td><td>持仓清单</td><td>仓位体检 + 调仓建议</td></tr>
-<tr><td><code>thesis-tracker</code></td><td>论文追踪</td><td>公司名</td><td>买入后纪律系统：定期复查投资逻辑</td></tr>
-<tr><td><code>news-pulse</code></td><td>新闻脉搏<span class="tag">3A</span></td><td>公司名 [涨跌]</td><td>3Agent并行，10分钟新闻归因分析</td></tr>
+<tr><td><code>thesis-tracker</code></td><td>持仓评估</td><td>公司名</td><td>持仓健康度评估：假设检查+红线触发+买卖信号</td></tr>
+<tr><td><code>news-pulse</code></td><td>股价异动归因<span class="tag">4A</span></td><td>公司名 [涨跌]</td><td>4Agent并行归因，信息不实时立即报错</td></tr>
 </table>
 
 <h3>思维工具</h3>
@@ -318,37 +318,92 @@ def _sanitize_filename(name: str) -> str:
 def _validate_llm_config(cfg) -> Optional[dict]:
     """Sanitize a user-supplied per-request LLM override.
 
-    Accepts {api_key, base_url, model}; returns None when nothing usable
-    was provided (caller then falls back to the server default).
+    Accepts {api_key, base_url, model, synthesis_model, per_agent_enabled,
+    agent_models}; returns None when nothing usable was provided (caller then
+    falls back to the server default).
+
+    synthesis_model：多Agent任务 Team Lead 综合环节可选的独立模型。
+
+    per_agent_enabled / agent_models：按Agent分配独立LLM配置（可选）。
+    agent_models 值可以是 string（仅 model 名，旧版兼容）或 dict
+    {model, base_url?, api_key?}（新版，可独立指定 provider/URL/key）。
+    仅在 per_agent_enabled=True 时生效。
 
     When the user passes ONLY a model name (no custom key/URL), validate
-    it against the server's known good list so they get a clear error
+    against the server's known good list so they get a clear error
     instead of a cryptic provider rejection.
     """
     if not isinstance(cfg, dict):
         return None
     out = {}
-    for key in ("api_key", "base_url", "model"):
+    for key in ("api_key", "base_url", "model", "synthesis_model"):
         val = cfg.get(key)
         if isinstance(val, str):
             val = val.strip()[:300]
             if val:
                 out[key] = val
+    # per_agent_enabled: bool field
+    per_agent_enabled = bool(cfg.get("per_agent_enabled", False))
+    if per_agent_enabled:
+        out["per_agent_enabled"] = True
+    # agent_models: sanitize agent_name → string|{model,base_url?,api_key?}
+    raw_agent_models = cfg.get("agent_models")
+    if isinstance(raw_agent_models, dict) and raw_agent_models:
+        agent_models = {}
+        for agent_name, agent_val in raw_agent_models.items():
+            if not isinstance(agent_name, str):
+                continue
+            clean_name = str(agent_name).strip()[:80]
+            if not clean_name:
+                continue
+            if isinstance(agent_val, str):
+                # Legacy: plain model name
+                clean_model = str(agent_val).strip()[:300]
+                if clean_model:
+                    agent_models[clean_name] = clean_model
+            elif isinstance(agent_val, dict):
+                # New: {model, base_url?, api_key?}
+                sub = {}
+                m = (agent_val.get("model") or "").strip()[:300]
+                if m:
+                    sub["model"] = m
+                for key in ("base_url", "api_key"):
+                    val = (agent_val.get(key) or "").strip()[:500]
+                    if val:
+                        sub[key] = val
+                if sub:
+                    agent_models[clean_name] = sub
+        if agent_models:
+            out["agent_models"] = agent_models
     if not out:
         return None
     base_url = out.get("base_url", "")
     if base_url and not re.match(r'^https?://', base_url):
         return None
-    # When only model is overridden (server key + server URL), validate
-    # against the provider's supported models so the user gets a clear
-    # error message instead of a raw 400 from the gateway.
-    if "model" in out and "api_key" not in out and "base_url" not in out:
+    # When only model names are overridden (server key + server URL),
+    # validate against the provider's supported models.
+    # Per-agent models with their own api_key bypass this check
+    # (they use the agent's own provider).
+    if "api_key" not in out and "base_url" not in out:
         from .core.config import LLM_SUPPORTED_MODELS
-        if LLM_SUPPORTED_MODELS and out["model"] not in LLM_SUPPORTED_MODELS:
-            raise HTTPException(
-                status_code=400,
-                detail=f"模型 '{out['model']}' 不被服务器支持。可用: {', '.join(LLM_SUPPORTED_MODELS)}"
-            )
+        if LLM_SUPPORTED_MODELS:
+            for model_key in ("model", "synthesis_model"):
+                if model_key in out and out[model_key] not in LLM_SUPPORTED_MODELS:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"模型 '{out[model_key]}' 不被服务器支持。可用: {', '.join(LLM_SUPPORTED_MODELS)}"
+                    )
+            # Per-agent models: validate only those without their own api_key
+            for agent_name, agent_val in out.get("agent_models", {}).items():
+                model_name = agent_val if isinstance(agent_val, str) else agent_val.get("model", "")
+                has_own_key = isinstance(agent_val, dict) and agent_val.get("api_key")
+                if has_own_key:
+                    continue  # agent has its own provider — skip whitelist
+                if model_name and model_name not in LLM_SUPPORTED_MODELS:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Agent '{agent_name}' 的模型 '{model_name}' 不被服务器支持。可用: {', '.join(LLM_SUPPORTED_MODELS)}"
+                    )
     return out
 
 
@@ -545,16 +600,41 @@ async def api_industry_sources(category: str = ""):
 async def api_get_price(symbol: str):
     """Get real-time stock price for any market."""
     from .tools.market_data import get_stock_price
-    data = await get_stock_price(symbol)
-    return {"symbol": symbol, "data": data}
+    import math
+    try:
+        data = await get_stock_price(symbol)
+        # Sanitize NaN values
+        if isinstance(data, dict):
+            for k, v in list(data.items()):
+                if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+                    data[k] = None
+        return {"symbol": symbol, "data": data}
+    except Exception as e:
+        logger.error(f"Price API error for {symbol}: {e}", exc_info=True)
+        return {"symbol": symbol, "data": {"error": str(e)}}
 
 
 @app.get("/api/data/financials/{symbol}")
 async def api_get_financials(symbol: str):
     """Get financial statements for a company."""
     from .tools.market_data import get_financial_data
-    data = await get_financial_data(symbol)
-    return {"symbol": symbol, "data": data}
+    import math
+    try:
+        data = await get_financial_data(symbol)
+        # Sanitize NaN values (akshare returns pandas NaN, not JSON-serializable)
+        def _sanitize(obj):
+            if isinstance(obj, dict):
+                return {k: _sanitize(v) for k, v in obj.items()}
+            if isinstance(obj, list):
+                return [_sanitize(v) for v in obj]
+            if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
+                return None
+            return obj
+        data = _sanitize(data)
+        return {"symbol": symbol, "data": data}
+    except Exception as e:
+        logger.error(f"Financial data API error for {symbol}: {e}", exc_info=True)
+        return {"symbol": symbol, "data": {"error": str(e), "timestamp": datetime.now().isoformat()}}
 
 
 @app.get("/api/data/news/{symbol}")
@@ -710,6 +790,62 @@ async def api_cancel_research(task_id: str):
     return harness_cancel(task_id)
 
 
+# ==================== Follow-up Q&A API ====================
+
+class FollowUpRequest(BaseModel):
+    report: str
+    question: str
+    skill_name: str = ""
+    llm_config: Optional[dict] = None
+
+
+@app.post("/api/follow-up")
+async def api_follow_up(request: "Request", req: FollowUpRequest):
+    """Answer a follow-up question about a generated report.
+
+    Uses the report as context, sends the question to the LLM,
+    and returns a concise answer. Uses the same LLM config as the
+    original research if provided.
+    """
+    if not req.report or not req.question:
+        raise HTTPException(status_code=400, detail="report and question are required")
+
+    if not _check_rate_limit(request.client.host if request.client else "unknown"):
+        raise HTTPException(status_code=429, detail="请求过于频繁，请稍后再试")
+
+    # Trim report to last 8000 chars to stay within context limits
+    report_ctx = req.report[-8000:] if len(req.report) > 8000 else req.report
+
+    prompt = f"""你是一位专业的投资研究分析师。用户正在阅读你的报告并提出了追问。
+
+## 报告内容（最后8000字）
+{report_ctx}
+
+## 用户追问
+{req.question}
+
+## ⚠️ 核心规则（违反即不合格）
+1. **永远不要只说"报告未涉及"就结束。** 这是最低标准。即使报告没有，你也必须用你的专业知识给出有价值的回答。
+2. **报告有的→引用+展开。报告没有的→用你的知识回答，开头标注"📝 以下基于通用知识补充："。**
+3. **给出实质内容**：具体数据、案例对比、逻辑推理。不要"可能""或许"打太极。
+4. **回答你的用户真正想问的**：不要复述报告，不要回避问题。如果用户质疑某个观点，正面回应这个质疑。
+5. 300-1000字，中文。"""
+
+    try:
+        from .core.llm import chat_complete
+        llm_cfg = _validate_llm_config(req.llm_config) if req.llm_config else None
+        answer = await chat_complete(
+            system_prompt="你是专业的投资研究分析师。面对追问：永远不要只说'报告未涉及'。报告不够时，用你的专业知识补充并标注来源。正面回应用户的质疑，给出实质内容。",
+            user_message=prompt,
+            temperature=0.8,
+            llm_config=llm_cfg,
+        )
+        return {"answer": answer}
+    except Exception as e:
+        logger.error(f"Follow-up failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"追问失败: {str(e)}")
+
+
 @app.websocket("/ws/research/{skill_name}")
 async def ws_research(websocket: WebSocket, skill_name: str):
     await websocket.accept()
@@ -825,22 +961,167 @@ async def api_llm_test(request: "Request"):
     llm_config = _validate_llm_config(body.get("llm_config") if isinstance(body, dict) else None)
     if not llm_config:
         return {"ok": False, "error": "配置为空或格式不正确（需要 api_key / base_url / model）"}
+    if not llm_config.get("model"):
+        return {"ok": False, "error": "请填写模型名称"}
     from .core.llm import chat_complete
     try:
         reply = await asyncio.wait_for(
             chat_complete(
-                "你是一个连接测试助手。",
-                "请只回复两个字：正常",
+                "你是一个连接测试助手。只回复一个词：pong",
+                "ping",
                 llm_config=llm_config,
                 temperature=0,
             ),
             timeout=30.0,
         )
-        return {"ok": True, "model": llm_config.get("model", ""), "reply": (reply or "")[:50]}
+        # Validate: must return non-empty and not be the default server reply
+        reply_text = (reply or "").strip()
+        if not reply_text or len(reply_text) > 100:
+            return {"ok": False, "error": f"收到异常回复: {reply_text[:50]}"}
+        return {"ok": True, "model": llm_config.get("model", ""), "reply": reply_text[:50], "using_server_key": not llm_config.get("api_key")}
     except asyncio.TimeoutError:
         return {"ok": False, "error": "连接超时（30秒），请检查 base_url 是否可达"}
     except Exception as e:
         return {"ok": False, "error": str(e)[:300]}
+
+
+# ==================== File Upload & Multimodal ====================
+
+@app.post("/api/upload")
+async def api_upload_file(request: "Request"):
+    """Upload image/PDF/Excel, extract text content for research injection."""
+    import base64, io
+    
+    try:
+        form = await request.form()
+    except Exception:
+        raise HTTPException(status_code=400, detail="需要 multipart/form-data")
+
+    files = form.getlist("files")
+    if not files:
+        raise HTTPException(status_code=400, detail="未选择文件")
+
+    results = []
+    for f in files:
+        filename = getattr(f, "filename", "unknown")
+        content_type = getattr(f, "content_type", "") or ""
+        data = await f.read()
+        item = {"filename": filename, "type": content_type}
+        
+        try:
+            if content_type.startswith("image/"):
+                b64 = base64.b64encode(data).decode()
+                vision_model = form.get("vision_model", "") or None
+                vision_base_url = form.get("vision_base_url", "") or None
+                vision_api_key = form.get("vision_api_key", "") or None
+                text = await _extract_image_text(b64, content_type, vision_model, vision_base_url, vision_api_key)
+                item["text"] = text
+                item["method"] = "vision"
+            
+            elif filename.lower().endswith(".pdf") or content_type == "application/pdf":
+                import fitz
+                doc = fitz.open(stream=data, filetype="pdf")
+                parts = []
+                for page in doc:
+                    parts.append(page.get_text())
+                doc.close()
+                item["text"] = "\n".join(parts)[:50000]
+                item["method"] = "pdf-extract"
+                if len(item["text"]) > 500:
+                    try:
+                        item["summary"] = await _summarize_data(item["text"], filename, form)
+                    except Exception as se:
+                        logger.warning(f"Summarization failed for {filename}: {se}")
+            
+            elif filename.lower().endswith((".xlsx", ".xls")):
+                import openpyxl
+                wb = openpyxl.load_workbook(io.BytesIO(data), data_only=True)
+                parts = []
+                for sn in wb.sheetnames:
+                    ws = wb[sn]
+                    parts.append(f"## Sheet: {sn}")
+                    rows = []
+                    for row in ws.iter_rows(values_only=True):
+                        rows.append("\t".join(str(c) if c is not None else "" for c in row))
+                    parts.append("\n".join(rows[:500]))
+                wb.close()
+                item["text"] = "\n".join(parts)[:50000]
+                item["method"] = "excel-extract"
+            
+            elif filename.lower().endswith((".csv", ".txt", ".md", ".json")):
+                raw_text = data.decode("utf-8", errors="replace")[:50000]
+                item["text"] = raw_text
+                item["method"] = "text-extract"
+                if len(raw_text) > 500:
+                    try:
+                        item["summary"] = await _summarize_data(raw_text, filename, form)
+                    except Exception as se:
+                        logger.warning(f"Summarization failed for {filename}: {se}")
+            else:
+                item["error"] = f"不支持的文件类型: {content_type}"
+
+        except Exception as e:
+            item["error"] = str(e)[:300]
+            logger.error(f"File upload error ({filename}): {e}", exc_info=True)
+        
+        results.append(item)
+
+    return {"files": results}
+
+
+
+async def _summarize_data(raw_text: str, filename: str, form) -> str:
+    """Use LLM to summarize extracted file data into key insights."""
+    try:
+        from .core.llm import chat_complete
+        # Trim to avoid token overflow
+        sample = raw_text[:6000]
+        summary = await chat_complete(
+            system_prompt="你是一位数据分析师。对上传的文件数据提取关键洞察，用中文简洁输出。",
+            user_message=f"文件名: {filename}\n\n数据样本:\n{sample}\n\n请分析并输出:\n1. 数据概况（行数/列数/时间范围）\n2. 关键趋势或异常\n3. 3-5条核心洞察\n控制在300字以内",
+            temperature=0.3,
+        )
+        return (summary or "")[:600]
+    except Exception as e:
+        return f"[摘要生成失败: {str(e)[:80]}]"
+
+async def _extract_image_text(b64_data: str, content_type: str, vision_model: str = None, vision_base_url: str = None, vision_api_key: str = None) -> str:
+    """Use vision-capable LLM to describe image content."""
+    try:
+        from .core.llm import get_client, resolve_llm_config
+        if vision_model:
+            # Use user's vision config if provided
+            base_url = vision_base_url or resolve_llm_config(None)[0]
+            api_key = vision_api_key or resolve_llm_config(None)[1]
+            model = vision_model
+        else:
+            base_url, api_key, model = resolve_llm_config(None)
+        # Detect: non-vision models (DeepSeek, etc.) cannot process images
+        _NON_VISION = {'deepseek', 'kimi', 'hunyuan'}
+        _model_lower = (model or '').lower()
+        if not vision_model and (not model or any(kw in _model_lower for kw in _NON_VISION)):
+            return f'[图片识别失败: 当前模型 "{model}" 不支持多模态。请在模型设置中填写 Vision 模型（如 gpt-4o / glm-4v / claude-sonnet-4）]'
+        client = get_client(base_url, api_key)
+        
+        resp = await client.chat.completions.create(
+            model=model,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "请详细描述这张图片中的所有文字、数据、图表内容。如果是财报截图，提取所有可见数字。如果是图表，描述趋势和数据点。"},
+                    {"type": "image_url", "image_url": {"url": f"data:{content_type};base64,{b64_data}"}},
+                ]
+            }],
+            max_tokens=2000,
+        )
+        return resp.choices[0].message.content or "(无内容)"
+    except Exception as e:
+        _err = str(e)[:200]
+        logger.warning(f"Vision extraction failed: {_err}")
+        # Give user a clear fix instruction
+        if '400' in _err or 'deserialize' in _err or 'invalid' in _err.lower():
+            return f'[图片识别失败: 模型 "{model}" 不支持图片识别。请打开模型设置，在 "Vision 模型" 栏填写支持多模态的模型名（如 gpt-4o / glm-4v / claude-sonnet-4）]'
+        return f"[图片识别失败: {_err}]"
 
 
 # ==================== Reports & Tasks ====================

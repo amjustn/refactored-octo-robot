@@ -72,7 +72,12 @@ class AgentRunner:
         if spec.strategy == "series":
             return await self.run_series(spec.skill_name, spec.arguments, llm_config=llm_config)
         if spec.strategy == "multi":
-            return await self.run_multi(spec.skill_name, spec.arguments, llm_config=llm_config)
+            return await self.run_multi(
+                spec.skill_name, spec.arguments,
+                llm_config=llm_config,
+                synthesis_llm_config=spec.llm.to_synthesis_config_dict(),
+                spec=spec,  # pass full spec for per-agent model lookup
+            )
         return await self.run_single(
             spec.skill_name, spec.arguments,
             llm_config=llm_config, stream=spec.stream,
@@ -152,11 +157,23 @@ class AgentRunner:
         skill_name: str,
         arguments: str,
         llm_config: dict = None,
+        synthesis_llm_config: dict = None,
+        spec: "TaskSpec" = None,
     ) -> str:
         """Run multi-agent parallel analysis and synthesize.
 
         Supports phased execution: skills may define post_synthesis_agents
         that run AFTER the Team Lead synthesis.
+
+        synthesis_llm_config：Team Lead 综合环节可选的独立 LLM override
+        （用户可为综合环节单独指定更强模型）。为 None 或与 llm_config
+        同模型时行为与旧版一致；研究 Agent 与 post_synthesis Agent
+        始终使用 llm_config。
+
+        per_agent_enabled：当 spec.llm.per_agent_enabled 为 True 时，
+        每个研究 Agent 使用 spec.llm.to_agent_config_dict(agent_name)
+        获取自己的模型配置（未映射的 Agent 回退到 llm_config）。
+        post_synthesis Agent 也遵循相同的 per-agent 规则。
         """
         skill = get_skill(skill_name)
         agent_names = skill.get("agents", [])
@@ -176,12 +193,32 @@ class AgentRunner:
 
         research_agents = [a for a in agent_names if a not in post_synthesis_agents]
 
+        # ── Per-agent model resolution ─────────────────────────
+        # When per_agent_enabled is True, each agent gets its own model
+        # from spec.llm.agent_models, falling back to llm_config otherwise.
+        per_agent_enabled = spec is not None and spec.llm.per_agent_enabled
+        if per_agent_enabled:
+            total_overrides = len(spec.llm.agent_models)
+            if total_overrides:
+                logger.info(
+                    f"Per-agent model enabled: {total_overrides} agent(s) have custom models "
+                    f"(global model: {(llm_config or {}).get('model') or 'server default'})"
+                )
+            else:
+                logger.info("Per-agent model enabled but no agent overrides set — all agents use global model")
+
         async def agent_task(name: str) -> tuple[str, str]:
+            # Resolve per-agent LLM config
+            agent_cfg = llm_config
+            if per_agent_enabled and spec is not None:
+                agent_cfg = spec.llm.to_agent_config_dict(name)
+                if agent_cfg and agent_cfg != llm_config:
+                    logger.info(f"Agent '{name}' using model: {agent_cfg.get('model')}")
             self._progress(name, "running", "开始分析...")
             try:
                 result = await self.run_single(
                     skill_name, arguments, agent_role=name,
-                    context=context, llm_config=llm_config, stream=True,
+                    context=context, llm_config=agent_cfg, stream=True,
                 )
                 self._progress(name, "completed", "分析完成", 1.0)
                 return name, result
@@ -215,12 +252,41 @@ class AgentRunner:
                 continue
             success_count += 1
             role_label = get_role_label(name)
-            agent_reports += f"\n\n---\n## {role_label}\n\n{result}\n"
+            # Strip tool-call noise: remove entire XML blocks + function-call artifacts
+            import re as _strip_re
+            _clean = _strip_re.sub(
+                r'<\s*(?:｜｜DSML｜｜tool_calls|｜｜DSML｜｜invoke|｜｜DSML｜｜parameter|/｜｜DSML｜｜tool_calls|/｜｜DSML｜｜invoke|/｜｜DSML｜｜parameter)\s*[^>]*>',
+                '', result, flags=_strip_re.DOTALL
+            )
+            # Also catch self-closing forms: <｜｜DSML｜｜invoke ... />
+            _clean = _strip_re.sub(
+                r'<\s*｜｜DSML｜｜(?:tool_calls|invoke|parameter)\b[^>]*?/>',
+                '', _clean, flags=_strip_re.DOTALL
+            )
+            agent_reports += f"\n\n---\n## {role_label}\n\n{_clean}\n"
 
         if success_count == 0:
             return f"# AI Berkshire 投研报告\n\n**目标**：{arguments}\n\n## 错误\n\n所有 {failed_count} 个 Agent 均执行失败，无法生成报告。\n\n请检查 LLM API 配置和网络连接。"
 
         # Phase 2: Team Lead synthesis (streamed as agent="team-lead")
+        # When per_agent_enabled, the Team Lead model comes from agent_models["team-lead"];
+        # otherwise falls back to synthesis_config (or llm_config if no synthesis override).
+        if per_agent_enabled and spec is not None:
+            synthesis_config = spec.llm.to_agent_config_dict("team-lead")
+            base_model = (llm_config or {}).get("model") or "(服务器默认)"
+            tl_model = (synthesis_config or {}).get("model") or "(服务器默认)"
+            if tl_model != base_model:
+                logger.info(f"Team Lead (per-agent mode) 使用模型: {tl_model}（研究团队: {base_model}）")
+            else:
+                logger.info(f"Team Lead (per-agent mode) 使用全局模型: {tl_model}")
+        else:
+            synthesis_config = synthesis_llm_config if synthesis_llm_config is not None else llm_config
+            base_model = (llm_config or {}).get("model") or "(服务器默认)"
+            synthesis_model = (synthesis_config or {}).get("model") or "(服务器默认)"
+            if synthesis_model != base_model:
+                logger.info(f"Team Lead 综合使用独立模型: {synthesis_model}（研究团队模型: {base_model}）")
+            else:
+                logger.info(f"Team Lead 综合使用模型: {synthesis_model}")
         agent_label = f"{success_count} 位分析师"
         if failed_count > 0:
             agent_label += f"（{failed_count} 个 Agent 失败，已排除）"
@@ -233,7 +299,7 @@ class AgentRunner:
         async for chunk in chat_stream(
             synthesis_prompt,
             f"请综合以上报告，输出最终投研报告。目标：{arguments}",
-            llm_config=llm_config,
+            llm_config=synthesis_config,
         ):
             synthesis += chunk
             self._chunk(chunk, agent="team-lead")
@@ -241,23 +307,30 @@ class AgentRunner:
         # Phase 3: post-synthesis agents (sequential, streamed)
         post_synthesis_output = ""
         if post_synthesis_agents:
+            # Truncate synthesis to avoid token overflow for post-synthesis agents
+            _MAX_PS_INPUT = 12000  # chars for synthesis passed to editor/reviewer
+            _synth_trimmed = synthesis[-_MAX_PS_INPUT:] if len(synthesis) > _MAX_PS_INPUT else synthesis
             for agent_name in post_synthesis_agents:
+                # Resolve per-agent LLM config for post-synthesis agents too
+                psa_cfg = llm_config
+                if per_agent_enabled and spec is not None:
+                    psa_cfg = spec.llm.to_agent_config_dict(agent_name)
                 self._progress(agent_name, "running", "处理中...")
                 try:
                     role_prompt = AGENT_ROLE_PROMPTS.get(agent_name, "你是一位专业的财经编辑。")
-                    if context:
-                        role_prompt = f"{role_prompt}\n\n{context}"
-                    post_input = f"以下是投研团队的综合研究报告，请基于此进行你的工作：\n\n{synthesis}"
+                    # Only include minimal context for post-synthesis (time only, not full market data)
+                    post_input = f"以下是投研团队的综合研究报告（已截取关键部分），请基于此进行你的工作：\n\n{_synth_trimmed}"
                     post_result = ""
-                    async for chunk in chat_stream(role_prompt, post_input, llm_config=llm_config):
+                    async for chunk in chat_stream(role_prompt, post_input, llm_config=psa_cfg):
                         post_result += chunk
                         self._chunk(chunk, agent=agent_name)
                     post_synthesis_output += f"\n\n---\n## {agent_name}\n\n{post_result}\n"
                     self._progress(agent_name, "completed", "完成", 1.0)
                 except Exception as e:
-                    logger.warning(f"Post-synthesis agent {agent_name} failed: {e}")
-                    post_synthesis_output += f"\n\n---\n## {agent_name}\n\n[错误] {str(e)}\n"
-                    self._progress(agent_name, "failed", str(e))
+                    logger.error(f"Post-synthesis agent {agent_name} failed: {e}", exc_info=True)
+                    _err_msg = str(e)[:200]
+                    post_synthesis_output += f"\n\n---\n## {agent_name}\n\n[错误] {_err_msg}\n"
+                    self._progress(agent_name, "failed", _err_msg)
 
         all_agent_count = len(agent_names)
         final_report = f"""# AI Berkshire 投研报告

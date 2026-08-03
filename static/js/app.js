@@ -90,11 +90,17 @@ document.addEventListener('DOMContentLoaded', function() {
     _favorites = new Set(JSON.parse(localStorage.getItem('ai_berkshire_favs') || '[]'));
   } catch(e) { _favorites = new Set(); }
 
-  // Restore last report from sessionStorage
+  // Restore failed tasks
+  renderFailedTasks();
+  updateUploadVisibility();
+
+  // Restore last report from sessionStorage (only if model is configured)
   try {
     var savedReport = sessionStorage.getItem('ai_berkshire_report');
     var savedMeta = JSON.parse(sessionStorage.getItem('ai_berkshire_report_meta') || '{}');
-    if (savedReport) {
+    var _cfgCheck = _loadLlmConfig();
+    var _hasCfg = !!(_cfgCheck && (_cfgCheck.model || _cfgCheck.api_key || _cfgCheck.base_url));
+    if (savedReport && _hasCfg) {
       currentReport = savedReport;
       document.getElementById('empty-state').style.display = 'none';
       document.getElementById('result-area').style.display = 'block';
@@ -277,6 +283,8 @@ function selectSkill(name) {
   if (!skill) return;
 
   currentSkill = skill;
+  // Close history panel when switching skills
+  document.getElementById('history-area').style.display = 'none';
   localStorage.setItem('ai_berkshire_skill', name);
 
   document.querySelectorAll('.nav-item').forEach(function(el) { el.classList.remove('active'); });
@@ -326,40 +334,93 @@ var LLM_PROVIDER_PRESETS = {
   deepseek: {
     label: 'DeepSeek',
     base_url: 'https://api.deepseek.com',
-    models: []   // populated from /api/llm/default
+    models: []
+  },
+  openai: {
+    label: 'OpenAI',
+    base_url: 'https://api.openai.com/v1',
+    models: ['gpt-4.1', 'gpt-4.1-mini', 'gpt-4o', 'gpt-4o-mini', 'o4-mini', 'o3']
+  },
+  codex: {
+    label: 'Codex（OpenAI）',
+    base_url: 'https://api.openai.com/v1',
+    models: ['gpt-5.1-codex-max', 'gpt-5.1-codex', 'gpt-5-codex-mini', 'codex-2025-08-01']
+  },
+  anthropic: {
+    label: 'Anthropic（Claude）',
+    base_url: 'https://api.anthropic.com/v1',
+    models: ['claude-opus-4-20250514', 'claude-sonnet-4-20250514', 'claude-3.5-sonnet', 'claude-3.5-haiku']
+  },
+  google: {
+    label: 'Google（Gemini）',
+    base_url: 'https://generativelanguage.googleapis.com/v1beta/openai',
+    models: ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.0-flash-lite']
+  },
+  zhipu: {
+    label: '智谱（GLM）',
+    base_url: 'https://open.bigmodel.cn/api/paas/v4',
+    models: ['glm-4.7', 'glm-4.7-flash', 'glm-4.5', 'glm-4v-plus', 'glm-4v-flash']
+  },
+  qwen: {
+    label: '阿里（通义千问）',
+    base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    models: ['qwen3-max', 'qwen3-plus', 'qwen3-turbo', 'qwen-vl-max', 'qwen-vl-plus']
+  },
+  baidu: {
+    label: '百度（文心）',
+    base_url: 'https://qianfan.baidubce.com/v2',
+    models: ['ernie-4.5-turbo', 'ernie-4.5', 'ernie-4.0-turbo', 'ernie-speed', 'ernie-lite']
+  },
+  hunyuan: {
+    label: '腾讯混元',
+    base_url: 'https://api.hunyuan.cloud.tencent.com/v1',
+    models: ['hunyuan-turbos', 'hunyuan-t1', 'hunyuan-a13b', 'hunyuan-lite']
+  },
+  doubao: {
+    label: '字节（豆包）',
+    base_url: 'https://ark.cn-beijing.volces.com/api/v3',
+    models: ['doubao-1.5-pro-256k', 'doubao-1.5-lite-128k', 'doubao-1.5-vision-pro']
   },
   kimi: {
     label: 'Kimi（Moonshot）',
     base_url: 'https://api.moonshot.cn/v1',
     models: ['kimi-k3', 'kimi-k3-0905-preview', 'kimi-k2-0905-preview']
   },
-  zhipu: {
-    label: '智谱（GLM）',
-    base_url: 'https://open.bigmodel.cn/api/paas/v4',
-    models: ['glm-5.2', 'glm-4.7', 'glm-4.7-flash', 'glm-4.5', 'glm-4.5-air']
-  },
-  hunyuan: {
-    label: '腾讯混元',
-    base_url: 'https://api.hunyuan.cloud.tencent.com/v1',
-    models: ['hunyuan-turbo', 'hunyuan-pro', 'hunyuan-lite']
-  },
-  openai: {
-    label: 'OpenAI',
-    base_url: 'https://api.openai.com/v1',
-    models: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'o3-mini']
-  },
-  openrouter: {
-    label: 'OpenRouter',
-    base_url: 'https://openrouter.ai/api/v1',
-    models: ['deepseek/deepseek-chat', 'anthropic/claude-sonnet-4', 'google/gemini-2.5-pro']
-  },
   ollama: {
     label: 'Ollama（本地）',
     base_url: 'http://localhost:11434/v1',
-    models: ['qwen2.5:14b', 'qwen2.5:7b', 'llama3.1:8b', 'deepseek-r1:8b']
+    models: ['qwen3:14b', 'qwen3:7b', 'llama4:8b', 'deepseek-r1:8b', 'gemma3:12b']
+  },
+  custom: {
+    label: '自定义中转站',
+    base_url: '',
+    models: []
   }
 };
 var _serverDefaultModel = '';
+
+// Agent name → human-readable label for per-agent model UI
+var AGENT_LABELS = {
+  'business-analyst': '商业模式分析师',
+  'financial-analyst': '财务估值分析师',
+  'industry-researcher': '行业竞争分析师',
+  'risk-assessor': '风险评估师',
+  'company-event-scout': '公司事件侦察员',
+  'regulatory-watcher': '监管政策观察员',
+  'industry-peer-analyst': '行业对手分析师',
+  'sentiment-tracker': '市场情绪追踪员',
+  'business-interpreter': '生意本质解读者',
+  'financial-auditor': '财务质量审计师',
+  'competition-analyst': '竞争变化解读者',
+  'risk-hunter': '风险信号猎手',
+  'editor': '公众号财经编辑',
+  'reader-reviewer': '投资者评审',
+  'researcher': '深度研究员'
+};
+
+function _getAgentLabel(name) {
+  return AGENT_LABELS[name] || name;
+}
 
 // Called once on page load to pull the server's supported model list.
 function _initLlmDefaults(serverInfo) {
@@ -373,10 +434,21 @@ function _initLlmDefaults(serverInfo) {
 function updatePoweredBy() {
   var el = document.getElementById('powered-by');
   var cfg = _loadLlmConfig();
-  if (cfg && cfg.model) {
-    el.textContent = '模型：' + cfg.model + '（自定义）';
+  if (cfg && (cfg.model || cfg.base_url || cfg.api_key)) {
+    var presetLabel = '';
+    if (cfg._preset && LLM_PROVIDER_PRESETS[cfg._preset]) {
+      presetLabel = LLM_PROVIDER_PRESETS[cfg._preset].label + ' · ';
+    }
+    el.textContent = '模型：' + presetLabel + (cfg.model || '自定义') + '（自定义）';
+  } else if (cfg && cfg.agent_models && Object.keys(cfg.agent_models).length) {
+    // Only per-agent configured — show first agent's model
+    var agents = Object.keys(cfg.agent_models);
+    var first = cfg.agent_models[agents[0]];
+    var label = typeof first === 'string' ? first : (first.model || '自定义');
+    var p = (typeof first === 'object' && first._provider) ? first._provider : '';
+    el.textContent = '模型：' + (p ? p + ' · ' : '') + label + '（Agent）';
   } else {
-    el.textContent = '模型：' + (_serverDefaultModel || 'deepseek-v4-flash') + '（服务器默认）';
+    el.textContent = '模型：' + (_serverDefaultModel || 'DeepSeek');
   }
   updateLlmNotice();
 }
@@ -387,7 +459,9 @@ function updateLlmNotice() {
   var notice = document.getElementById('llm-notice');
   if (!notice) return;
   var cfg = _loadLlmConfig();
-  var configured = !!(cfg && (cfg.api_key || cfg.base_url || cfg.model));
+  var hasGlobal = !!(cfg && (cfg.api_key || cfg.base_url || cfg.model));
+  var hasPerAgent = !!(cfg && cfg.agent_models && Object.keys(cfg.agent_models).length > 0);
+  var configured = hasGlobal || hasPerAgent;
   notice.style.display = configured ? 'none' : 'block';
 }
 
@@ -405,6 +479,8 @@ function _saveLlmConfig(cfg) {
 
 // Build the per-request config object sent to the server.
 // Returns null when user wants server defaults.
+// per_agent_enabled / agent_models：按Agent分配不同模型（可选功能），
+// 仅在 per_agent_enabled 开关开启时发送。
 function getLlmConfig() {
   var cfg = _loadLlmConfig();
   if (!cfg) return null;
@@ -412,6 +488,23 @@ function getLlmConfig() {
   if (cfg.model) out.model = cfg.model;
   if (cfg.base_url) out.base_url = cfg.base_url;
   if (cfg.api_key) out.api_key = cfg.api_key;
+  if (cfg.per_agent_enabled) {
+    out.per_agent_enabled = true;
+    if (cfg.agent_models && Object.keys(cfg.agent_models).length) {
+      // Strip _provider (UI-only field) before sending
+      var clean = {};
+      Object.keys(cfg.agent_models).forEach(function(k) {
+        var v = cfg.agent_models[k];
+        if (typeof v === 'string') { clean[k] = v; return; }
+        var sub = {};
+        if (v.model) sub.model = v.model;
+        if (v.base_url) sub.base_url = v.base_url;
+        if (v.api_key) sub.api_key = v.api_key;
+        if (Object.keys(sub).length) clean[k] = sub;
+      });
+      if (Object.keys(clean).length) out.agent_models = clean;
+    }
+  }
   return Object.keys(out).length ? out : null;
 }
 
@@ -446,7 +539,7 @@ async function loginWithToken(secret) {
 // ── Modal ─────────────────────────────────────────────────
 function openLlmModal() {
   var cfg = _loadLlmConfig();
-  var preset = (cfg && cfg._preset) || '';
+  var preset = (cfg && cfg._preset) || 'deepseek';
 
   // Restore form
   document.getElementById('llm-preset').value = preset;
@@ -454,6 +547,7 @@ function openLlmModal() {
   document.getElementById('llm-base-url').value = (cfg && cfg.base_url) || '';
   // Keep the stored key — wiping it here silently drops the key on re-save
   document.getElementById('llm-api-key').value = (cfg && cfg.api_key) || '';
+  
 
   // Trigger UI refresh
   onProviderChange();
@@ -467,6 +561,17 @@ function openLlmModal() {
       }
     }
   }
+
+  // Per-agent model: rebuild table + restore
+  _rebuildPerAgentTable();
+  var paEnabled = !!(cfg && cfg.per_agent_enabled);
+  document.getElementById('llm-per-agent-enabled').checked = paEnabled;
+  // Ensure per-agent block is visible when checkbox is on (onProviderChange may have hidden it)
+  if (paEnabled || (cfg && cfg.agent_models && Object.keys(cfg.agent_models).length)) {
+    document.getElementById('llm-per-agent-block').style.display = 'block';
+  }
+  updateUploadVisibility();
+  onPerAgentToggle();
 
   document.getElementById('llm-test-result').textContent = '';
   document.getElementById('llm-modal').style.display = 'flex';
@@ -484,11 +589,11 @@ function onProviderChange() {
   var customFields = document.getElementById('llm-custom-fields');
 
   if (!preset) {
-    // Server default — hide everything
+    // Server default — hide all fields
     modelSelect.style.display = 'none';
     modelInput.style.display = 'none';
     customFields.style.display = 'none';
-    return;
+        return;
   }
 
   var info = LLM_PROVIDER_PRESETS[preset];
@@ -496,7 +601,9 @@ function onProviderChange() {
     // Known provider with a model list — show dropdown
     modelSelect.innerHTML = '<option value="">请选择模型</option>';
     info.models.forEach(function(m) {
-      modelSelect.innerHTML += '<option value="' + m + '">' + m + '</option>';
+      var isMulti = _MULTIMODAL_MODELS.some(function(k) { return m.toLowerCase().indexOf(k) >= 0; });
+      var tag = isMulti ? ' 📎' : '';
+      modelSelect.innerHTML += '<option value="' + m + '">' + m + tag + '</option>';
     });
     modelSelect.style.display = 'block';
     modelInput.style.display = 'none';
@@ -513,11 +620,224 @@ function onProviderChange() {
     document.getElementById('llm-base-url').value = (info && info.base_url) || '';
     customFields.style.display = 'block';  // always show so user can override key
   }
+    // Per-agent block: only show for multi-agent skills (dynamically when modal opens)
+  _rebuildPerAgentTable();
 }
 
 // When a model is picked from the dropdown, sync it to the hidden input for save.
 function onModelSelectChange() {
   document.getElementById('llm-model').value = document.getElementById('llm-model-select').value;
+}
+
+// ── Per-agent model assignment (optional feature) ─────────
+// Each agent can independently choose provider → model → base_url → api_key.
+// Unconfigured agents fall back to the global (top-level) LLM config.
+
+// Per-agent provider dropdown options: "跟随全局" + all providers from LLM_PROVIDER_PRESETS
+function _paProviderOptions(selected) {
+  var opts = '';
+  Object.keys(LLM_PROVIDER_PRESETS).forEach(function(k) {
+    var p = LLM_PROVIDER_PRESETS[k];
+    opts += '<option value="' + k + '"' + (k === selected ? ' selected' : '') + '>' + escHtml(p.label) + '</option>';
+  });
+  return opts;
+}
+
+// Get agent names for the active skill (multi-agent only)
+function _getActiveSkillAgents() {
+  if (!currentSkill || !currentSkill.is_multi_agent || !currentSkill.agents) return [];
+  return currentSkill.agents;
+}
+
+// Rebuild the per-agent table: agent label + provider + model + url + key per row.
+// Team Lead appended at end.
+function _rebuildPerAgentTable() {
+  var table = document.getElementById('llm-per-agent-table');
+  var block = document.getElementById('llm-per-agent-block');
+  var agents = _getActiveSkillAgents();
+  if (!agents.length) {
+    // Still show block if user has saved per-agent config from previous session
+    var _savedCfg = _loadLlmConfig();
+    if (!_savedCfg || !_savedCfg.agent_models || !Object.keys(_savedCfg.agent_models).length) {
+      block.style.display = 'none'; return;
+    }
+  }
+  block.style.display = 'block';
+
+  var cfg = _loadLlmConfig();
+  var stored = (cfg && cfg.agent_models) || {};
+  var allNames = agents.concat(['team-lead']);
+  var rows = '';
+
+  allNames.forEach(function(name) {
+    var isTL = (name === 'team-lead');
+    var label = isTL ? 'Team Lead' : _getAgentLabel(name);
+    var rowClass = isTL ? ' per-agent-row-tl' : '';
+    var agentCfg = stored[name] || {};
+    // Support both legacy string and new dict format
+    if (typeof agentCfg === 'string') agentCfg = { model: agentCfg };
+
+    var paProvider = agentCfg._provider || '';
+    var paModel = agentCfg.model || '';
+    var paUrl = agentCfg.base_url || '';
+    var paKey = agentCfg.api_key || '';
+    var showFields = !!paProvider;  // show url/key when provider is set
+
+    rows += '<div class="per-agent-row' + rowClass + '" data-agent="' + escHtml(name) + '">' +
+      '<span class="agent-label">' + escHtml(label) + '</span>' +
+      '<select class="pa-provider" onchange="_onPaProviderChange(this)" style="width:120px">' +
+      _paProviderOptions(paProvider) +
+      '</select>' +
+      '<span class="pa-model-wrap" style="' + (showFields ? '' : 'display:none') + '">' +
+      '<input type="text" class="pa-model" value="' + escHtml(paModel) +
+      '" placeholder="模型名" style="width:130px">' +
+      '</span>' +
+      '<span class="pa-extra" style="' + (showFields ? '' : 'display:none') + '">' +
+      '<input type="text" class="pa-url" value="' + escHtml(paUrl) +
+      '" placeholder="Base URL" style="width:170px">' +
+      '<input type="password" class="pa-key" value="' + escHtml(paKey) +
+      '" placeholder="API Key" style="width:140px">' +
+      '</span>' +
+      '<button class="pa-test-btn" onclick="_onPaTest(this)"' + (showFields ? '' : ' style="display:none"') + '>测试</button>' +
+      '<button class="pa-save-btn" onclick="_onPaSave(this)"' + (showFields ? '' : ' style="display:none"') + '>保存</button>' +
+      '<span class="pa-test-result"></span>' +
+      '</div>';
+  });
+
+  if (rows) {
+    rows += '<p class="modal-tip" style="margin-top:8px">未指定服务商的Agent将使用上方全局模型配置。</p>';
+  }
+  table.innerHTML = rows;
+}
+
+// When a per-agent provider changes, show/hide model/url/key fields and auto-fill URL
+function _onPaProviderChange(sel) {
+  var row = sel.closest('.per-agent-row');
+  var provider = sel.value;
+  var modelWrap = row.querySelector('.pa-model-wrap');
+  var extra = row.querySelector('.pa-extra');
+  if (provider) {
+    modelWrap.style.display = '';
+    extra.style.display = '';
+    // Auto-fill base_url from provider preset
+    var info = LLM_PROVIDER_PRESETS[provider];
+    var urlInput = row.querySelector('.pa-url');
+    if (info && info.base_url && !urlInput.value) {
+      urlInput.value = info.base_url;
+    }
+    // Read current model value from whichever element exists
+    var curModelEl = row.querySelector('.pa-model-sel') || row.querySelector('.pa-model');
+    var curModel = (curModelEl && curModelEl.value) || '';
+    // If provider has known models, swap to dropdown
+    if (info && info.models && info.models.length) {
+      var selHtml = '<select class="pa-model-sel" style="width:130px"><option value="">请选择</option>';
+      info.models.forEach(function(m) {
+        var isMulti = _MULTIMODAL_MODELS.some(function(k) { return m.toLowerCase().indexOf(k) >= 0; });
+        var tag = isMulti ? ' 📎' : '';
+        selHtml += '<option value="' + m + '"' + (m === curModel ? ' selected' : '') + '>' + m + tag + '</option>';
+      });
+      selHtml += '</select>';
+      modelWrap.innerHTML = selHtml;
+    } else {
+      modelWrap.innerHTML = '<input type="text" class="pa-model" value="' + escHtml(curModel) +
+        '" placeholder="模型名" style="width:130px">';
+    }
+  } else {
+    modelWrap.style.display = 'none';
+    extra.style.display = 'none';
+  }
+  // Show/hide test/save buttons + clear result
+  var testBtn = row.querySelector('.pa-test-btn');
+  var saveBtn = row.querySelector('.pa-save-btn');
+  var testResult = row.querySelector('.pa-test-result');
+  if (testBtn) testBtn.style.display = provider ? '' : 'none';
+  if (saveBtn) saveBtn.style.display = provider ? '' : 'none';
+  if (testResult) testResult.textContent = '';
+}
+
+// Per-agent test connection: reads current row config, calls /api/llm/test
+async function _onPaTest(btn) {
+  var row = btn.closest('.per-agent-row');
+  var resultEl = row.querySelector('.pa-test-result');
+  var modelEl = row.querySelector('.pa-model-sel') || row.querySelector('.pa-model');
+  var model = (modelEl || {}).value || '';
+  var url = (row.querySelector('.pa-url') || {}).value || '';
+  var key = (row.querySelector('.pa-key') || {}).value || '';
+
+  if (!model) { resultEl.textContent = '请填写模型名'; resultEl.className = 'pa-test-result err'; return; }
+
+  resultEl.textContent = '测试中...';
+  resultEl.className = 'pa-test-result';
+  btn.disabled = true;
+
+  var cfg = { model: model };
+  if (url) cfg.base_url = url;
+  if (key) cfg.api_key = key;
+
+  try {
+    var res = await fetch('/api/llm/test', {
+      method: 'POST',
+      headers: Object.assign({ 'Content-Type': 'application/json' }, getAuthHeaders()),
+      body: JSON.stringify({ llm_config: cfg })
+    });
+    if (res.status === 401 || res.status === 403) {
+      resultEl.textContent = '登录过期';
+      resultEl.className = 'pa-test-result err';
+      return;
+    }
+    var data = await res.json();
+    if (data.ok) {
+      resultEl.textContent = '✓ ' + (data.reply || '').slice(0, 30);
+      resultEl.className = 'pa-test-result ok';
+    } else {
+      resultEl.textContent = '✗ ' + (data.error || '失败').slice(0, 40);
+      resultEl.className = 'pa-test-result err';
+    }
+  } catch(e) {
+    resultEl.textContent = '✗ ' + e.message.slice(0, 40);
+    resultEl.className = 'pa-test-result err';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// Per-agent save: reads current row config, persists to localStorage immediately
+function _onPaSave(btn) {
+  var row = btn.closest('.per-agent-row');
+  var agent = row.dataset.agent;
+  var resultEl = row.querySelector('.pa-test-result');
+  var modelEl = row.querySelector('.pa-model-sel') || row.querySelector('.pa-model');
+  var model = (modelEl || {}).value || '';
+  var url = (row.querySelector('.pa-url') || {}).value || '';
+  var key = (row.querySelector('.pa-key') || {}).value || '';
+  var provider = (row.querySelector('.pa-provider') || {}).value || '';
+
+  if (!model) { resultEl.textContent = '请填写模型名'; resultEl.className = 'pa-test-result err'; return; }
+
+  var cfg = _loadLlmConfig() || {};
+  var agentModels = cfg.agent_models || {};
+  var sub = { model: model };
+  if (url) sub.base_url = url;
+  if (key) sub.api_key = key;
+  if (provider) sub._provider = provider;
+  agentModels[agent] = sub;
+  cfg.agent_models = agentModels;
+  cfg.per_agent_enabled = true;
+  _saveLlmConfig(cfg);
+  updateLlmNotice();
+  updatePoweredBy();
+
+  resultEl.textContent = '✓ 已保存';
+  resultEl.className = 'pa-test-result ok';
+  setTimeout(function() { resultEl.textContent = ''; }, 1500);
+}
+
+// Toggle per-agent fields visibility
+function onPerAgentToggle() {
+  var enabled = document.getElementById('llm-per-agent-enabled').checked;
+  // Rebuild table when enabling, so it always reflects current skill's agents
+  if (enabled) _rebuildPerAgentTable();
+  document.getElementById('llm-per-agent-fields').style.display = enabled ? 'block' : 'none';
 }
 
 // ── Save / Reset / Test ───────────────────────────────────
@@ -527,14 +847,7 @@ function saveLlmConfig() {
   var baseUrl = document.getElementById('llm-base-url').value.trim();
   var apiKey = document.getElementById('llm-api-key').value.trim();
 
-  if (!preset) {
-    // User chose "server default" — clear all config
-    _saveLlmConfig(null);
-    updatePoweredBy();
-    closeLlmModal();
-    showToast('已恢复服务器默认模型', 'info');
-    return;
-  }
+
 
   if (!model && preset !== 'custom') {
     showToast('请选择模型', 'error');
@@ -549,12 +862,43 @@ function saveLlmConfig() {
     return;
   }
 
+  // Per-agent model config: read provider + model + url + key from each row
+  var perAgentEnabled = document.getElementById('llm-per-agent-enabled').checked;
+  var agentModels = {};
+  if (perAgentEnabled) {
+    var rows = document.querySelectorAll('#llm-per-agent-table .per-agent-row');
+    for (var ri = 0; ri < rows.length; ri++) {
+      var row = rows[ri];
+      var agent = row.dataset.agent;
+      var provider = (row.querySelector('.pa-provider') || {}).value || '';
+      if (!provider) continue;  // no provider = use global config
+      // Read model (could be select or text input)
+      var modelEl = row.querySelector('.pa-model-sel') || row.querySelector('.pa-model');
+      var model = (modelEl || {}).value || '';
+      if (!model) continue;
+      var url = (row.querySelector('.pa-url') || {}).value || '';
+      var key = (row.querySelector('.pa-key') || {}).value || '';
+      var sub = { model: model };
+      if (url) sub.base_url = url;
+      if (key) sub.api_key = key;
+      sub._provider = provider;  // stored for UI restore, not sent to server
+      agentModels[agent] = sub;
+    }
+  }
+
   var cfg = { _preset: preset };
   if (model) cfg.model = model;
   if (baseUrl) cfg.base_url = baseUrl;
   if (apiKey) cfg.api_key = apiKey;
+  
+  // Per-agent model: switch + mapping
+  if (perAgentEnabled) {
+    cfg.per_agent_enabled = true;
+    if (Object.keys(agentModels).length) cfg.agent_models = agentModels;
+  }
 
   _saveLlmConfig(cfg);
+  updateUploadVisibility();
   updatePoweredBy();
   closeLlmModal();
   showToast('模型配置已保存', 'info');
@@ -566,10 +910,12 @@ function resetLlmConfig() {
   document.getElementById('llm-model-select').innerHTML = '<option value="">请选择模型</option>';
   document.getElementById('llm-base-url').value = '';
   document.getElementById('llm-api-key').value = '';
+  document.getElementById('llm-per-agent-enabled').checked = false;
+  document.getElementById('llm-per-agent-table').innerHTML = '';
+  document.getElementById('llm-per-agent-fields').style.display = 'none';
   document.getElementById('llm-test-result').textContent = '';
   onProviderChange();
   _saveLlmConfig(null);
-  updatePoweredBy();
   showToast('已清除所有自定义配置', 'info');
 }
 
@@ -584,6 +930,7 @@ async function testLlmConfig() {
   if (model) cfg.model = model;
   if (baseUrl) cfg.base_url = baseUrl;
   if (apiKey) cfg.api_key = apiKey;
+  
 
   if (!cfg.model && !cfg.base_url && !cfg.api_key) {
     resultEl.textContent = '请先填写配置';
@@ -618,8 +965,13 @@ async function testLlmConfig() {
     }
     var data = await res.json();
     if (data.ok) {
-      resultEl.textContent = '✓ 连接成功！模型 ' + (data.model || '?') + ' 回复: ' + (data.reply || '');
+      var note = data.using_server_key ? '（使用服务器 Key）' : '';
+      resultEl.textContent = '✓ 连接成功！模型 ' + (data.model || '?') + ' → ' + (data.reply || '') + note;
       resultEl.className = 'llm-test-result ok';
+      if (!data.model) {
+        resultEl.textContent = '⚠ 连接成功但模型名为空，请填写模型名称';
+        resultEl.className = 'llm-test-result err';
+      }
     } else {
       resultEl.textContent = '✗ ' + (data.error || '连接失败');
       resultEl.className = 'llm-test-result err';
@@ -639,13 +991,73 @@ var ARG_VALIDATORS = {
     return a.indexOf('%') >= 0 ? null : '持仓清单需要包含仓位百分比，如：腾讯30%,美团20%,现金30%';
   },
   'earnings-review': function(a) {
-    return (/\s/.test(a.trim()) || a.indexOf('最新') >= 0) ? null : '需要同时提供公司名和季度，如：腾讯 2025Q4 / PDD 最新';
+    var trimmed = a.trim();
+    // Detect quarter pattern: 2025Q4, 2025 Q4, etc.
+    var qMatch = trimmed.match(/(\d{4})\s*Q([1-4])/);
+    var hasLatest = trimmed.indexOf('最新') >= 0;
+    if (!trimmed || (!qMatch && !hasLatest)) {
+      return '需要同时提供公司名和季度，如：腾讯 2025Q4 / 腾讯2025Q4 / 最新';
+    }
+    // Check for future quarters
+    if (qMatch) {
+      var year = parseInt(qMatch[1]), quarter = parseInt(qMatch[2]);
+      var now = new Date();
+      var curYear = now.getFullYear(), curQuarter = Math.floor(now.getMonth() / 3) + 1;
+      var availYear = curYear, availQuarter = curQuarter - 1;
+      if (availQuarter === 0) { availQuarter = 4; availYear--; }
+      if (year > availYear || (year === availYear && quarter > availQuarter)) {
+        return '⚠ ' + year + 'Q' + quarter + ' 财报尚未发布！最新可用为 ' + availYear + 'Q' + availQuarter + '。请使用已发布的季度或输入"最新"';
+      }
+    }
+    return null;
   },
   'earnings-team': function(a) {
-    return (/\s/.test(a.trim()) || a.indexOf('最新') >= 0) ? null : '需要同时提供公司名和季度，如：腾讯 2025Q4';
+    var trimmed = a.trim();
+    var qMatch = trimmed.match(/(\d{4})\s*Q([1-4])/);
+    var hasLatest = trimmed.indexOf('最新') >= 0;
+    if (!trimmed || (!qMatch && !hasLatest)) {
+      return '需要同时提供公司名和季度，如：腾讯 2025Q4 / 腾讯2025Q4 / 最新';
+    }
+    // Check for future quarters
+    var qMatch = trimmed.match(/(\d{4})\s*Q([1-4])/);
+    if (qMatch) {
+      var year = parseInt(qMatch[1]), quarter = parseInt(qMatch[2]);
+      var now = new Date();
+      var curYear = now.getFullYear(), curQuarter = Math.floor(now.getMonth() / 3) + 1;
+      var availYear = curYear, availQuarter = curQuarter - 1;
+      if (availQuarter === 0) { availQuarter = 4; availYear--; }
+      if (year > availYear || (year === availYear && quarter > availQuarter)) {
+        return '⚠ ' + year + 'Q' + quarter + ' 财报尚未发布！最新可用为 ' + availYear + 'Q' + availQuarter + '。请使用已发布的季度或输入"最新"';
+      }
+    }
+    return null;
   },
   'management-deep-dive': function(a) {
-    return /\s/.test(a.trim()) ? null : '需要同时提供管理层姓名和公司名，如：王兴 美团';
+    return a.trim().length >= 2 ? null : '请输入公司名，如：腾讯 / 茅台 / 美团';
+  },
+  'investment-research': function(a) {
+    return a.trim().length >= 2 ? null : '请输入公司名或股票代码，如：腾讯 / 0700.HK / 600519';
+  },
+  'investment-team': function(a) {
+    return a.trim().length >= 2 ? null : '请输入公司名或股票代码，如：腾讯 / 0700.HK / 600519';
+  },
+  'investment-checklist': function(a) {
+    return a.trim().length >= 2 ? null : '请输入公司名或股票代码（支持多个逗号分隔），如：腾讯,茅台,美团';
+  },
+  'financial-data': function(a) {
+    return a.trim().length >= 2 ? null : '请输入公司名或股票代码，如：腾讯 / 600519';
+  },
+  'industry-research': function(a) {
+    return a.trim().length >= 2 ? null : '请输入行业名称，如：半导体 / 新能源 / 消费';
+  },
+  'industry-funnel': function(a) {
+    return a.trim().length >= 2 ? null : '请输入行业或方向，如：AI应用 / 光伏 / 创新药';
+  },
+  'quality-screen': function(a) {
+    return a.trim().length >= 2 ? null : '请输入行业/指数/主题，如：沪深300 / 半导体';
+  },
+  'bottleneck-hunter': function(a) {
+    return a.trim().length >= 2 ? null : '请输入超级趋势方向，如：AI算力 / 固态电池';
   }
 };
 
@@ -697,9 +1109,144 @@ function stopProgressTimer() {
 }
 
 // ==================== Research ====================
+// ==================== File Upload ====================
+var _uploadedFiles = [];  // extracted text from uploaded files
+
+// Known multimodal models
+var _MULTIMODAL_MODELS = ['gpt-4o', 'gpt-4-turbo', 'gpt-4-vision', 'claude-sonnet-4', 'claude-3', 'claude-3.5', 'gemini', 'glm-4v', 'qwen-vl', 'qwenvl', 'llava', 'pixtral', 'doubao-vision', 'yi-vision', 'grok-vision', 'gemini-2'];
+
+function updateUploadVisibility() {
+  var cfg = _loadLlmConfig();
+  var hasVision = !!(cfg && cfg.vision_model);
+  // Check if main model or vision model is multimodal
+  var mainModel = (cfg && cfg.model || '').toLowerCase();
+  var visionModel = (cfg && cfg.vision_model || '').toLowerCase();
+  var isMulti = _MULTIMODAL_MODELS.some(function(m) {
+    return mainModel.indexOf(m) >= 0 || visionModel.indexOf(m) >= 0;
+  });
+  document.getElementById('file-upload-row').style.display = (hasVision || isMulti) ? '' : 'none';
+}
+
+async function handleFileUpload(fileList) {
+  if (!fileList || !fileList.length) return;
+  var status = document.getElementById('file-status');
+  var preview = document.getElementById('file-preview');
+  var formData = new FormData();
+  var names = [];
+  
+  for (var i = 0; i < fileList.length; i++) {
+    formData.append('files', fileList[i]);
+    names.push(fileList[i].name);
+  }
+  
+  status.textContent = '处理中...';
+  preview.style.display = 'none';
+  
+  try {
+    var headers = {};
+    Object.assign(headers, getAuthHeaders());
+    // Append vision model + credentials from config
+    var llmCfg = getLlmConfig() || {};
+    var visionModel = llmCfg.vision_model || '';
+    // Auto-use main model if it's multimodal and no vision model specified
+    if (!visionModel && llmCfg.model) {
+      var mainLower = llmCfg.model.toLowerCase();
+      var isMulti = _MULTIMODAL_MODELS.some(function(k) { return mainLower.indexOf(k) >= 0; });
+      if (isMulti) visionModel = llmCfg.model;
+    }
+    if (visionModel) {
+      formData.append('vision_model', visionModel);
+      if (llmCfg.base_url) formData.append('vision_base_url', llmCfg.base_url);
+      if (llmCfg.api_key) formData.append('vision_api_key', llmCfg.api_key);
+    }
+    var res = await fetch('/api/upload', { method: 'POST', headers: headers, body: formData });
+    if (!res.ok) {
+      var err = await res.json().catch(function() { return {}; });
+      throw new Error(err.detail || '上传失败 (' + res.status + ')');
+    }
+    var data = await res.json();
+    var html = '<div class="fp-header">已提取 ' + data.files.length + ' 个文件的内容（将自动注入研究）</div>';
+    var allText = [];
+    data.files.forEach(function(f) {
+      html += '<div class="fp-item">';
+      html += '<span class="fp-filename">' + escHtml(f.filename) + '</span>';
+      if (f.error) {
+        html += ' <span class="fp-error">✗ ' + escHtml(f.error) + '</span>';
+      } else {
+        if (f.summary) {
+          // UI: always show AI summary for human preview
+          html += ' <span style="color:#6b8e6b;font-size:0.75rem">🤖 AI摘要 (' + f.method + ')</span>';
+          html += '<div class="fp-summary">' + escHtml(f.summary) + '</div>';
+          // Injection: use original if short, summary if long
+          var MAX_INJECT = 5000;
+          if (f.text && f.text.length <= MAX_INJECT) {
+            allText.push('【文件：' + f.filename + '】\n' + f.text);
+            html += ' <span style="color:#8c8273;font-size:0.7rem">（注入原文 ' + f.text.length + '字）</span>';
+          } else {
+            allText.push('【文件：' + f.filename + ' - AI摘要】\n' + f.summary);
+            html += ' <span style="color:#8c8273;font-size:0.7rem">（原文 ' + (f.text ? f.text.length : 0) + '字过长，注入摘要）</span>';
+          }
+        } else {
+          allText.push('【文件：' + f.filename + '】\n' + f.text);
+          var preview = f.text ? f.text.slice(0, 100) + (f.text.length > 100 ? '...' : '') : '';
+          html += ' <span style="color:#8c8273;font-size:0.75rem">(' + f.method + ', ' + (f.text ? f.text.length : 0) + '字)</span>';
+          html += '<div style="color:#8c8273;font-size:0.72rem;margin-top:2px">' + escHtml(preview) + '</div>';
+        }
+      }
+      html += '</div>';
+    });preview.innerHTML = html;
+    preview.style.display = 'block';
+    _uploadedFiles = allText;
+    status.textContent = '✓ ' + allText.length + ' 个文件已就绪';
+    status.style.color = '#6b8e6b';
+    
+    // If no text in arg-field, suggest the file content
+    var af = document.getElementById('arg-field');
+    if (!af.value.trim() && allText.length) {
+      af.value = names.join(', ');
+    }
+  } catch(e) {
+    status.textContent = '✗ ' + e.message;
+    status.style.color = '#b85c5c';
+    preview.style.display = 'none';
+  }
+}
+
 async function startResearch() {
   var args = document.getElementById('arg-field').value.trim();
+  // Append uploaded file content as reference material (not analysis target)
+  if (_uploadedFiles.length) {
+    // Try to guess target from filename if user didn't specify
+    if (!args) {
+      var fi = document.getElementById('file-input');
+      if (fi && fi.files && fi.files.length) {
+        var fn = fi.files[0].name.replace(/\.[^.]+$/, '');  // strip extension
+        fn = fn.replace(/[_\-]/g, ' ').replace(/\s+/g, ' ').trim();
+        // Extract first meaningful word group (company name)
+        var parts = fn.split(/[【（(]/);
+        args = parts[0].trim() || fn;
+      }
+    }
+    args = (args || '分析上传的文件') + '\n\n【以下为上传文件的参考内容，请基于此进行分析】\n' + _uploadedFiles.join('\n\n');
+    // Clear file preview immediately — content already injected into research
+    document.getElementById('file-preview').style.display = 'none';
+    document.getElementById('file-preview').innerHTML = '';
+    document.getElementById('file-status').textContent = '';
+    document.getElementById('file-status').style.color = '';
+    var fi2 = document.getElementById('file-input');
+    if (fi2) fi2.value = '';
+  }
   if (!currentSkill) { showToast('请先选择技能', 'warning'); return; }
+
+  // Block if no model configured (per-agent-only config also counts)
+  var cfg = _loadLlmConfig();
+  var hasGlobal = !!(cfg && (cfg.model || cfg.base_url || cfg.api_key));
+  var hasPerAgent = !!(cfg && cfg.agent_models && Object.keys(cfg.agent_models).length);
+  if (!hasGlobal && !hasPerAgent) {
+    showToast('⚠ 请先在模型设置中配置供应商、模型和 API Key', 'error');
+    document.getElementById('llm-notice').style.display = 'block';
+    return;
+  }
 
   var err = validateArgs(currentSkill, args);
   if (err) {
@@ -722,6 +1269,7 @@ async function startResearch() {
   _userCancelled = false;
   currentTaskId = null;
   _wsShouldReconnect = false;
+  _uploadedFiles = [];
   if (_researchAbort) { _researchAbort.abort(); _researchAbort = null; }
   if (ws) { ws.close(); ws = null; }
 
@@ -733,6 +1281,10 @@ async function startResearch() {
   document.getElementById('report-content').innerHTML = '';
   document.getElementById('report-meta').style.display = 'none';
   document.getElementById('restore-banner').style.display = 'none';
+  document.getElementById('follow-up-area').style.display = 'none';
+  document.getElementById('follow-up-qa').innerHTML = '';
+  _followUpHistory = [];
+  try { localStorage.removeItem('ai_berkshire_followup'); } catch(e) {}
   hideToc();
   currentReport = '';
 
@@ -764,7 +1316,8 @@ async function startResearch() {
     return '<div class="agent-row" id="agent-' + i + '">' +
       '<div class="agent-dot pending"></div>' +
       '<span>' + escHtml(name) + topic + '</span>' +
-      '<span style="color:var(--text-secondary);font-size:0.7rem">等待中</span></div>';
+      '<span style="color:var(--text-secondary);font-size:0.7rem">等待中</span>' +
+      '<button class="agent-retry" onclick="retryFailedTask()" title="重试">⟳ 重试</button></div>';
   }).join('');
 
   // Stream mode now works for ALL skills via WebSocket:
@@ -817,7 +1370,7 @@ function _streamResearchImpl(args) {
       if (ws) { ws.close(); ws = null; }
       batchResearch(args);
     }
-  }, 90000);
+  }, currentSkill && currentSkill.is_multi_agent ? 180000 : 90000);
 
   try {
     ws = new WebSocket(url);
@@ -1010,6 +1563,7 @@ function updateAgentProgress(name, status, message) {
   } else if (status === 'failed') {
     statusText.textContent = message || '失败';
     statusText.style.color = 'var(--accent-red)';
+    row.classList.add('failed');
   }
 
   var allRows = document.querySelectorAll('#agent-progress .agent-row');
@@ -1047,6 +1601,8 @@ function finishResearch(success, errorMsg, meta) {
     statusEl.textContent = '失败';
     statusEl.className = 'status-badge failed';
     if (errorMsg) {
+      // Save failed task for retry on next visit
+      saveFailedTask(errorMsg);
       // Keep whatever partial content was already generated — it is often
       // still useful — and append the error instead of wiping the report.
       if (currentReport) {
@@ -1086,14 +1642,201 @@ function finishResearch(success, errorMsg, meta) {
 
   _wsShouldReconnect = false;
   if (ws) { ws.close(); ws = null; }
+  // Clear uploaded file preview after research completes
+  _uploadedFiles = [];
+  document.getElementById('file-preview').style.display = 'none';
+  document.getElementById('file-preview').innerHTML = '';
+  document.getElementById('file-status').textContent = '';
+  document.getElementById('file-status').style.color = '';
+  // Reset file input
+  var fi = document.getElementById('file-input');
+  if (fi) fi.value = '';
   localStorage.setItem('ai_berkshire_skill', currentSkill ? currentSkill.name : '');
 }
 
 // ==================== Rendering / TOC ====================
+// ==================== Failed Task Persistence ====================
+function saveFailedTask(errorMsg) {
+  if (!currentSkill) return;
+  try {
+    var list = JSON.parse(localStorage.getItem('ai_berkshire_failed') || '[]');
+    list.push({
+      skill: currentSkill.name,
+      skillLabel: currentSkill.display_name || currentSkill.name,
+      arguments: document.getElementById('arg-field').value.trim(),
+      error: errorMsg || '未知错误',
+      ts: Date.now()
+    });
+    // Keep last 10 failed tasks
+    localStorage.setItem('ai_berkshire_failed', JSON.stringify(list.slice(-10)));
+  } catch(e) {}
+}
+
+function renderFailedTasks() {
+  var el = document.getElementById('failed-tasks');
+  try {
+    var list = JSON.parse(localStorage.getItem('ai_berkshire_failed') || '[]');
+  } catch(e) { el.style.display = 'none'; return; }
+  if (!list.length) { el.style.display = 'none'; return; }
+  
+  var html = '<div style="font-size:0.85rem;color:#b85c5c;margin-bottom:8px">⚠ 上次有 ' + list.length + ' 个未完成的任务：</div>';
+  list.forEach(function(t, i) {
+    var when = new Date(t.ts).toLocaleString();
+    html += '<div class="failed-task-card" id="ft-' + i + '">' +
+      '<div class="ft-info">' +
+      '<div class="ft-skill">' + escHtml(t.skillLabel) + '</div>' +
+      '<div class="ft-args">' + escHtml(t.arguments || '(空)') + '</div>' +
+      '<div class="ft-error">' + escHtml(t.error) + '</div>' +
+      '<div class="ft-time">' + when + '</div>' +
+      '</div>' +
+      '<button class="btn-retry" onclick="retryFailedTask(' + i + ')">⟳ 继续</button>' +
+      '<button class="btn-dismiss" onclick="dismissFailedTask(' + i + ')" title="忽略">✕</button>' +
+      '</div>';
+  });
+  el.innerHTML = html;
+  el.style.display = 'block';
+}
+
+function retryFailedTask(idx) {
+  try {
+    var list = JSON.parse(localStorage.getItem('ai_berkshire_failed') || '[]');
+    if (idx >= list.length) return;
+    var t = list[idx];
+    // Remove this task from the list
+    list.splice(idx, 1);
+    localStorage.setItem('ai_berkshire_failed', JSON.stringify(list));
+    // Re-render
+    renderFailedTasks();
+  updateUploadVisibility();
+    // Select skill and start research
+    selectSkill(t.skill);
+    document.getElementById('arg-field').value = t.arguments || '';
+    startResearch();
+  } catch(e) { showToast('重试失败: ' + e.message, 'error'); }
+}
+
+function dismissFailedTask(idx) {
+  try {
+    var list = JSON.parse(localStorage.getItem('ai_berkshire_failed') || '[]');
+    list.splice(idx, 1);
+    localStorage.setItem('ai_berkshire_failed', JSON.stringify(list));
+    renderFailedTasks();
+  updateUploadVisibility();
+  } catch(e) {}
+}
+
 function renderReport(md) {
   document.getElementById('report-content').innerHTML =
     DOMPurify.sanitize(marked.parse(md)) +
     '<div class="ai-disclaimer">该数据由AI在数据的基础上进行分析，仅供参考</div>';
+  // Show follow-up area when a report is rendered
+  document.getElementById('follow-up-area').style.display = 'block';
+  // Restore follow-up Q&A history
+  _loadFollowUpHistory();
+}
+
+// ==================== Follow-up Q&A ====================
+var _followUpLoading = false;
+var _followUpHistory = [];
+
+function _saveFollowUpHistory() {
+  var items = [];
+  document.querySelectorAll('#follow-up-qa .follow-up-qa-item').forEach(function(el) {
+    var isQ = el.classList.contains('follow-up-q');
+    items.push({
+      type: isQ ? 'q' : 'a',
+      html: el.querySelector('.qa-content').innerHTML,
+      label: el.querySelector('.qa-label').textContent
+    });
+  });
+  _followUpHistory = items;
+  try { localStorage.setItem('ai_berkshire_followup', JSON.stringify(items)); } catch(e) {}
+}
+
+function _loadFollowUpHistory() {
+  try {
+    var items = JSON.parse(localStorage.getItem('ai_berkshire_followup') || '[]');
+    if (!items.length) return;
+    _followUpHistory = items;
+    var qa = document.getElementById('follow-up-qa');
+    var html = '';
+    items.forEach(function(item) {
+      var cls = item.type === 'q' ? 'follow-up-q' : 'follow-up-a';
+      html += '<div class="follow-up-qa-item ' + cls + '">' +
+        '<div class="qa-label">' + escHtml(item.label) + '</div>' +
+        '<div class="qa-content">' + item.html + '</div>' +
+        '</div>';
+    });
+    qa.innerHTML = html;
+    document.getElementById('follow-up-area').style.display = 'block';
+  // Restore follow-up Q&A history
+  _loadFollowUpHistory();
+  } catch(e) {}
+}
+
+async function submitFollowUp() {
+  if (_followUpLoading) return;
+  var field = document.getElementById('follow-up-field');
+  var question = field.value.trim();
+  if (!question) return;
+  if (!currentReport) { showToast('请先生成报告', 'warning'); return; }
+
+  _followUpLoading = true;
+  var btn = document.getElementById('btn-follow-up');
+  btn.disabled = true;
+  btn.textContent = '思考中...';
+  field.disabled = true;
+
+  // Show question immediately
+  var qa = document.getElementById('follow-up-qa');
+  var qId = 'fu-q-' + Date.now();
+  qa.insertAdjacentHTML('beforeend',
+    '<div class="follow-up-qa-item follow-up-q" id="' + qId + '">' +
+    '<div class="qa-label">🙋 追问</div>' +
+    '<div class="qa-content">' + escHtml(question) + '</div>' +
+    '</div>');
+  var aId = 'fu-a-' + Date.now();
+  qa.insertAdjacentHTML('beforeend',
+    '<div class="follow-up-qa-item follow-up-a" id="' + aId + '">' +
+    '<div class="qa-label">🤖 AI 回复</div>' +
+    '<div class="qa-content follow-up-loading">思考中...</div>' +
+    '</div>');
+  qa.scrollTop = qa.scrollHeight;
+
+  try {
+    var headers = { 'Content-Type': 'application/json' };
+    Object.assign(headers, getAuthHeaders());
+    var res = await fetch('/api/follow-up', {
+      method: 'POST',
+      headers: headers,
+      body: JSON.stringify({
+        report: currentReport,
+        question: question,
+        skill_name: currentSkill ? currentSkill.name : '',
+        llm_config: getLlmConfig() || undefined
+      })
+    });
+    if (!res.ok) {
+      var err = await res.json().catch(function() { return {}; });
+      throw new Error(err.detail || '请求失败 (' + res.status + ')');
+    }
+    var data = await res.json();
+    document.getElementById(aId).querySelector('.qa-content').innerHTML =
+      DOMPurify.sanitize(marked.parse(data.answer || '(无回复)'));
+    // Persist Q&A to localStorage
+    _saveFollowUpHistory();
+  } catch(e) {
+    document.getElementById(aId).querySelector('.qa-content').innerHTML =
+      '<span style="color:var(--accent-red)">✗ ' + escHtml(e.message) + '</span>';
+  } finally {
+    _followUpLoading = false;
+    btn.disabled = false;
+    btn.textContent = '发送';
+    field.disabled = false;
+    field.value = '';
+    field.focus();
+    qa.scrollTop = qa.scrollHeight;
+  }
 }
 
 function buildToc() {
@@ -1219,6 +1962,10 @@ function clearResult() {
   document.getElementById('report-content').innerHTML = '';
   document.getElementById('report-meta').style.display = 'none';
   document.getElementById('restore-banner').style.display = 'none';
+  document.getElementById('follow-up-area').style.display = 'none';
+  document.getElementById('follow-up-qa').innerHTML = '';
+  _followUpHistory = [];
+  try { localStorage.removeItem('ai_berkshire_followup'); } catch(e) {}
   hideToc();
   document.getElementById('empty-state').style.display = 'flex';
   try {
@@ -1228,6 +1975,14 @@ function clearResult() {
 }
 
 // ==================== History ====================
+function backToHome() {
+  document.getElementById('result-area').style.display = 'none';
+  document.getElementById('progress-area').style.display = 'none';
+  document.getElementById('history-area').style.display = 'none';
+  document.getElementById('compare-area').style.display = 'none';
+  document.getElementById('empty-state').style.display = 'block';
+}
+
 async function showHistory() {
   document.getElementById('empty-state').style.display = 'none';
   document.getElementById('result-area').style.display = 'none';
@@ -1376,6 +2131,10 @@ function closeCompare() {
 }
 
 async function loadReport(filename) {
+  // Block if no model configured
+  var _cfg = _loadLlmConfig();
+  var _ok = !!(_cfg && (_cfg.model || _cfg.api_key || _cfg.base_url || (_cfg.agent_models && Object.keys(_cfg.agent_models).length)));
+  if (!_ok) { showToast('⚠ 请先在模型设置中配置模型', 'error'); return; }
   try {
     var headers = {};
     Object.assign(headers, getAuthHeaders());

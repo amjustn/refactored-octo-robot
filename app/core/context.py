@@ -163,28 +163,17 @@ async def build_web_search_context(symbol: str = "", arguments: str = "", skill_
     parts = []
     search_keywords = []
 
-    # Build search keywords from symbol and arguments
-    if symbol:
-        search_keywords.append(symbol)
-        # Also search by company name if it's a known Chinese company
-        from ..tools.market_data import _resolve_company_name, COMPANY_NAME_MAP
-        # Reverse lookup: find Chinese name from code
-        for name, code in COMPANY_NAME_MAP.items():
-            if code.upper() == symbol.upper():
-                search_keywords.append(name)
-                break
-
-    # Extract additional keywords from arguments (first 20 chars)
+    # Build search keywords — ALWAYS prioritize user's own words
+    # The user's arguments (what they typed) are the ground truth.
+    # Symbol-based keywords are fallbacks for when arguments are absent.
     if arguments:
-        # Use arguments directly as search term (truncated)
-        arg_short = arguments.strip()[:30]
-        if arg_short and arg_short not in search_keywords:
-            search_keywords.append(arg_short)
-
-    if not search_keywords:
+        # Primary keyword = user's exact input (truncated to 60 chars)
+        primary_keyword = arguments.strip()[:60]
+    elif symbol:
+        primary_keyword = symbol
+    else:
         return ""
 
-    primary_keyword = search_keywords[0]
     parts.append(f"## 网络最新信息（自动搜索）")
     parts.append(f"*搜索关键词: {primary_keyword}*")
     parts.append("")
@@ -195,7 +184,13 @@ async def build_web_search_context(symbol: str = "", arguments: str = "", skill_
         from ..tools.web_search import web_search, read_webpage
         import asyncio
 
-        search_query = f"{primary_keyword} 2025 最新 业绩 新闻"
+        # Extract year from arguments if present
+        # Match: 2026Q4, 2026年, 2026的, 2026财报, 2026年报 etc.
+        import re as _re
+        _year_match = _re.search(r'20(\d{2})(?!\d)', arguments) if arguments else None
+        _search_year = f"20{_year_match.group(1)}" if _year_match else datetime.now().strftime('%Y')
+        # Use user's full query as the search term — this is what they asked for
+        search_query = f"{primary_keyword} {_search_year} 最新"
         logger.info(f"Auto web search for context: {search_query}")
         web_results = await asyncio.wait_for(
             web_search(search_query, max_results=8),
@@ -311,6 +306,44 @@ async def build_full_context(arguments: str = "", skill_name: str = "") -> str:
     """
     parts = [build_time_context()]
 
+    # ── Pre-validation: check if requested data period is in the future ──
+    _data_warnings = []
+    import re as _re
+    _now = datetime.now()
+    _current_quarter = (_now.month - 1) // 3 + 1
+    _avail_year = _now.year
+    _avail_quarter = _current_quarter - 1 if _current_quarter > 1 else 4
+    if _avail_quarter == 4:
+        _avail_year -= 1
+
+    if arguments:
+        # Check for quarter references: 2026Q4, 2026 Q4
+        _quarter_match = _re.search(r'(\d{4})\s*Q([1-4])', arguments)
+        if _quarter_match:
+            _req_year = int(_quarter_match.group(1))
+            _req_quarter = int(_quarter_match.group(2))
+            _is_future = (_req_year > _avail_year) or (_req_year == _avail_year and _req_quarter > _avail_quarter)
+            if _is_future:
+                _qw = ("\n\n**⚠️ 数据不可用警告**：你请求分析的是 " + str(_req_year) + "Q" + str(_req_quarter)
+                    + " 财报，但当前最新可用财报为 " + str(_avail_year) + "Q" + str(_avail_quarter) + "。"
+                    + str(_req_year) + "Q" + str(_req_quarter) + " 财报尚未发布，请等待财报公布后重试。\n")
+                _data_warnings.append(_qw)
+        else:
+            # Check for bare year references: 2026, 2026年, 2026的, 2026年财报 etc.
+            # Exclude false positives like stock codes (600519, 000001)
+            _bare_year_match = _re.search(r'(?<!\d)(20\d{2})(?!\d)', arguments)
+            if _bare_year_match:
+                _req_year = int(_bare_year_match.group(1))
+                if _req_year > _avail_year:
+                    msg = (
+                        "\n\n**⚠️ 数据可用性提醒**：你请求聚焦 " + str(_req_year) + " 年的数据，"
+                        "但当前最新完整财年为 " + str(_avail_year) + "。"
+                        "" + str(_req_year) + " 年数据可能不完整。"
+                        "**【禁止】** 不要生成观察清单、展望、预览等替代内容。"
+                        "对确实存在的数据正常分析，对缺失部分直接标注\u201c数据尚未发布\u201d。\n"
+                    )
+                    _data_warnings.append(msg)
+
     # Try to get market indices
     try:
         from ..tools.market_data import (
@@ -406,5 +439,22 @@ async def build_full_context(arguments: str = "", skill_name: str = "") -> str:
             parts.append(knowledge)
     except Exception as e:
         logger.debug(f"Knowledge context failed: {e}")
+
+    # Inject any data validation warnings at the top
+    if _data_warnings:
+        parts.insert(1, "\n".join(_data_warnings))
+
+    # ── Global instruction: prioritize user keywords over training data ──
+    if arguments:
+        _kw = arguments.strip()[:80]
+        _instr = ("\n**🔑 核心指令：用户输入的关键词是本次分析的唯一基准。**\n"
+            + "用户要求分析：\u300c" + _kw + "\u300d\n"
+            + "\n**【严令禁止】**\n"
+            + "1. 如果用户要求的财报/数据尚未发布，必须直接告知\u201c该数据尚未发布，无法进行分析\u201d，不得生成任何替代内容。\n"
+            + "2. 禁止生成\u201c观察清单\u201d、\u201c发布前展望\u201d、\u201c核心关注点\u201d、\u201c预览\u201d、\u201c指南\u201d等替代性内容。\n"
+            + "3. 禁止用旧季度/旧年份的数据拼凑成用户要求的分析。\n"
+            + "4. 只有确认数据确实存在且可获取时，才进行实际分析。\n"
+            + "5. 如果你的训练数据与用户指定的时间范围不一致，以用户为准并明确标注数据来源的时间。\n")
+        parts.insert(1, _instr)
 
     return "\n".join(parts)
