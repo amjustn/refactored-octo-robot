@@ -25,23 +25,26 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from ..core.llm import chat_stream, chat_complete, chat_complete_with_tools
-from .context import ContextBuilder
-from ..core.config import MAX_PARALLEL_AGENTS, AGENT_TIMEOUT
+from ..core.config import AGENT_TIMEOUT, MAX_PARALLEL_AGENTS
+from ..core.llm import chat_complete, chat_complete_with_tools, chat_stream
 from ..models.schemas import AgentProgress
-from ..skills import get_skill, build_user_prompt
+from ..skills import build_user_prompt, get_skill
+from .context import ContextBuilder
+
+# P3: decision log
+from .decision_log import save_decision as _save_decision
 from .events import EventBus, EventType
-from .guards import MAX_SERIES_REPORT_LENGTH  # re-export (sole definition lives in guards)
+from .guards import MAX_SERIES_REPORT_LENGTH  # noqa: F401  # re-export (sole definition lives in guards)
 from .persist import get_repository
 from .prompts import (
-    AGENT_ROLE_PROMPTS, TEAM_LEAD_PROMPT, SERIES_SYSTEM_PROMPT,
-    get_default_system_prompt, get_role_label,
+    AGENT_ROLE_PROMPTS,
+    SERIES_SYSTEM_PROMPT,
+    get_default_system_prompt,
+    get_role_label,
+    get_synthesis_prompt,
 )
 from .spec import TaskSpec
 from .tools import ALL_TOOL_SCHEMAS, TOOL_ENABLED_AGENTS, get_gateway
-
-# P3: decision log
-from .decision_log import save_decision as _save_decision, load_decisions as _load_decisions
 
 logger = logging.getLogger("ai_berkshire.harness.runner")
 
@@ -495,7 +498,7 @@ class AgentRunner:
         agent_label = f"{success_count} 位分析师"
         if failed_count > 0:
             agent_label += f"（{failed_count} 个 Agent 失败，已排除）"
-        synthesis_prompt = TEAM_LEAD_PROMPT
+        synthesis_prompt = get_synthesis_prompt(skill_name)
         if context:
             synthesis_prompt += f"\n\n{context}"
         synthesis_prompt += f"\n\n以下是{agent_label}的独立研究报告：\n{agent_reports}"
@@ -618,7 +621,7 @@ class AgentRunner:
                 for j, (t, a) in enumerate(articles):
                     excerpt = a[:200].replace("\n", " ") + "..."
                     prev_summaries.append(f"第{j + 1}篇《{t}》：{excerpt}")
-                context_str = f"\n\n## 前文回顾\n" + "\n".join(prev_summaries)
+                context_str = "\n\n## 前文回顾\n" + "\n".join(prev_summaries)
 
             user_msg = f"""请撰写关于「{arguments}」的深度系列文章的第 {i + 1}/{total} 篇。
 
@@ -675,7 +678,7 @@ class AgentRunner:
             f"# 深度系列长文：{arguments}\n",
             f"**框架**：{skill['display_name']}",
             f"**执行模式**：系列生成（{success_count}/{total} 篇成功{f'，{failed_count} 篇失败' if failed_count else ''}）",
-            f"**数据源**：实时市场数据 + 投资大师知识库\n",
+            "**数据源**：实时市场数据 + 投资大师知识库\n",
         ]
 
         for i, (topic, article) in enumerate(articles):

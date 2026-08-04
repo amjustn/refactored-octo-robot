@@ -16,22 +16,23 @@ v3.1 fixes:
 - Proper timezone detection
 """
 import asyncio
-import json
 import logging
 import re
-from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from typing import Optional
 
+from ..core.config import MARKET_SYNC_WORKERS
 from ..core.data_cache import DataCache
 from .market_data_http import (
     fetch_a_share_price_dashboard,
-    fetch_a_share_price_tencent,
     fetch_a_share_price_sina,
-    fetch_news_eastmoney,
-    fetch_news_sina,
+    fetch_a_share_price_tencent,
     fetch_indices_tencent,
     fetch_indices_tencent_global,
     fetch_indices_yahoo,
+    fetch_news_eastmoney,
+    fetch_news_sina,
     fetch_us_hk_price_tencent,
     fetch_us_hk_price_yahoo,
 )
@@ -46,6 +47,40 @@ CACHE_TTL_INDICES = 600        # 10 minutes for market indices
 CACHE_TTL_COMPANY = 86400      # 24 hours for company info
 
 _cache = DataCache()
+
+# Dedicated bounded executor for sync SDK calls (akshare/yfinance).
+# asyncio.wait_for cancels the await but CANNOT kill the underlying thread,
+# so a hung fetch leaves an orphaned thread running. Routing all sync calls
+# through this small pool caps orphan accumulation and isolates hung
+# market-data threads from the event loop's default executor.
+SYNC_EXECUTOR = ThreadPoolExecutor(
+    max_workers=MARKET_SYNC_WORKERS,
+    thread_name_prefix="mkt-sync",
+)
+
+# Hung-call telemetry: number of wait_for timeouts observed around sync
+# fetches. Each timeout potentially leaves one orphaned thread in the pool.
+_sync_timeouts_total = 0
+
+
+def _record_sync_timeout(source: str) -> None:
+    """Record a wait_for timeout around a sync fetch (orphaned thread likely)."""
+    global _sync_timeouts_total
+    _sync_timeouts_total += 1
+    logger.warning(
+        f"sync fetch timed out (source={source}); "
+        f"orphaned thread may remain in mkt-sync pool "
+        f"(timeouts_total={_sync_timeouts_total})"
+    )
+
+
+def sync_pool_stats() -> dict:
+    """Stats for the dedicated sync executor, exposed via health endpoint."""
+    return {
+        "workers": MARKET_SYNC_WORKERS,
+        "queued_estimate": SYNC_EXECUTOR._work_queue.qsize(),
+        "timeouts_total": _sync_timeouts_total,
+    }
 
 # ==================== Chinese Company Name Mapping ====================
 # Common Chinese company names → stock code
@@ -197,9 +232,9 @@ def _normalize_a_share_code(code: str) -> str:
 
 
 async def _run_sync(func, *args, **kwargs):
-    """Run a synchronous function in a thread pool."""
+    """Run a synchronous function in the dedicated bounded sync pool."""
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, lambda: func(*args, **kwargs))
+    return await loop.run_in_executor(SYNC_EXECUTOR, lambda: func(*args, **kwargs))
 
 
 # ==================== A-Share Data (via akshare) ====================
@@ -464,6 +499,7 @@ async def fetch_market_indices() -> dict:
         try:
             data = await asyncio.wait_for(_run_sync(_fetch), timeout=8.0)
         except asyncio.TimeoutError:
+            _record_sync_timeout("indices")
             logger.warning("Primary indices source timed out (>8s), using HTTP fallback")
             data = None
 
@@ -978,7 +1014,7 @@ def get_current_date_context() -> dict:
 
     # Use system timezone info, fallback to Asia/Shanghai for Chinese deployments
     import time as _time
-    tz_name = _time.tzname[0] if _time.tzname[0] else "Asia/Shanghai"
+
     # Normalize common Chinese timezone names
     tz_display = "Asia/Shanghai (UTC+8)"  # Default for Chinese deployments
     try:

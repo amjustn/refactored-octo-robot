@@ -256,8 +256,57 @@ INDUSTRY_TOOL_SCHEMAS = [
     },
 ]
 
+# ==================== QuantTrader (QT) Quant Signal Tool Schemas ====================
+
+QUANT_TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "quant_factor_signal",
+            "description": "查询 QuantTrader 多因子量化信号（19个信号因子加权评分），返回个股的 buy/sell/hold 判断、加权得分、置信度、触发理由及因子明细。分析A股个股时可查询此信号与基本面分析交叉验证；量化信号偏中短期技术面/资金面，应与估值结论区分使用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "codes": {"type": "string", "description": "逗号分隔的A股代码，如 600519 或 600519,000001（最多50只）"},
+                },
+                "required": ["codes"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "quant_market_scores",
+            "description": "获取 QuantTrader 全市场因子评分快照：评分股票数、买入/卖出/持有分布、8个因子维度均分、Top买入与Top卖出名单。用于了解量化视角下的全市场强弱分布和候选股票池，做自上而下研究或寻找标的时使用。",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "quant_bottom_thermometer",
+            "description": "获取 QuantTrader 底部温度计：ERP估值、PB分位、维持担保比例、成交量分位 4个维度的底部信号触发情况，以及 E8 入场判定（两融回落+低估值）。判断A股整体是否处于历史大底区域、评估系统性买入时机时使用。",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "quant_daily_review",
+            "description": "获取 QuantTrader 每日复盘总览：大盘状态判断、市场宽度（涨跌家数/涨跌停数）、板块机会与风险、一句话总结。需要了解最近交易日A股整体表现和市场情绪时使用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "date": {"type": "string", "description": "日期：today/yesterday/YYYY-MM-DD，默认 today", "default": "today"},
+                },
+                "required": [],
+            },
+        },
+    },
+]
+
 # All tools available to agents
-ALL_TOOL_SCHEMAS = FINANCIAL_TOOL_SCHEMAS + DATA_TOOL_SCHEMAS + WEB_TOOL_SCHEMAS + INDUSTRY_TOOL_SCHEMAS
+ALL_TOOL_SCHEMAS = FINANCIAL_TOOL_SCHEMAS + DATA_TOOL_SCHEMAS + WEB_TOOL_SCHEMAS + INDUSTRY_TOOL_SCHEMAS + QUANT_TOOL_SCHEMAS
 
 
 # ==================== Tool Executor ====================
@@ -269,8 +318,12 @@ async def _execute_tool(tool_name: str, arguments: dict) -> str:
     """
     # --- Financial tools (sync) ---
     from ..tools import (
-        verify_market_cap, verify_valuation, cross_validate,
-        three_scenario, calc, benford,
+        benford,
+        calc,
+        cross_validate,
+        three_scenario,
+        verify_market_cap,
+        verify_valuation,
     )
     sync_tools = {
         "verify_market_cap": verify_market_cap,
@@ -289,15 +342,21 @@ async def _execute_tool(tool_name: str, arguments: dict) -> str:
             return json.dumps({"error": str(e)}, ensure_ascii=False)
 
     # --- Market data tools (async) ---
+    # --- QuantTrader quant signal tools (async) ---
+    from ..tools import quant_link
+
+    # --- Industry chain tools (async) ---
+    from ..tools.industry_sources import list_industry_sources, search_industry_chain
     from ..tools.market_data import (
-        get_stock_price, get_financial_data,
-        fetch_company_news, fetch_market_indices,
+        fetch_company_news,
+        fetch_market_indices,
+        get_financial_data,
+        get_stock_price,
         search_company,
     )
+
     # --- Web search tools (async) ---
-    from ..tools.web_search import web_search, read_webpage
-    # --- Industry chain tools (async) ---
-    from ..tools.industry_sources import search_industry_chain, list_industry_sources
+    from ..tools.web_search import read_webpage, web_search
 
     async_tools = {
         "get_stock_price": get_stock_price,
@@ -309,6 +368,10 @@ async def _execute_tool(tool_name: str, arguments: dict) -> str:
         "read_webpage": read_webpage,
         "search_industry_chain": search_industry_chain,
         "list_industry_sources": lambda category="": list_industry_sources(category),
+        "quant_factor_signal": quant_link.get_factor_signal,
+        "quant_market_scores": quant_link.get_market_scores,
+        "quant_bottom_thermometer": quant_link.get_bottom_thermometer,
+        "quant_daily_review": quant_link.get_daily_review,
     }
 
     if tool_name in async_tools:
@@ -339,7 +402,7 @@ import asyncio
 import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime
-from typing import Any, Awaitable, Callable, Optional
+from typing import Awaitable, Callable, Optional
 
 
 @dataclass
@@ -448,6 +511,11 @@ TOOL_DEFS: dict[str, ToolDef] = {
     "read_webpage": ToolDef("read_webpage", timeout=20),
     "search_industry_chain": ToolDef("search_industry_chain", timeout=25),
     "list_industry_sources": ToolDef("list_industry_sources", timeout=10, cache_ttl=86400),
+    # QuantTrader quant signals — 本机 HTTP，QT 侧信号扫描较慢故放宽超时
+    "quant_factor_signal": ToolDef("quant_factor_signal", timeout=70, retries=0, cache_ttl=300),
+    "quant_market_scores": ToolDef("quant_market_scores", timeout=25, cache_ttl=1800),
+    "quant_bottom_thermometer": ToolDef("quant_bottom_thermometer", timeout=35, cache_ttl=3600),
+    "quant_daily_review": ToolDef("quant_daily_review", timeout=35, cache_ttl=3600),
 }
 
 
@@ -600,6 +668,14 @@ class ToolGateway:
                 continue
             try:
                 data = await asyncio.wait_for(fetch(), timeout=timeout_s)
+            except asyncio.TimeoutError:
+                if source in ("akshare", "yfinance"):
+                    # 同步 SDK 超时会在 mkt-sync 线程池留下孤儿线程，计入遥测
+                    md._record_sync_timeout(source)
+                br.record_failure(f"timeout>{timeout_s}s")
+                errors.append(f"{source}: timeout>{timeout_s}s")
+                logger.warning(f"行情源 {source} 超时（{resolved}，>{timeout_s}s）")
+                continue
             except Exception as e:
                 br.record_failure(str(e)[:120])
                 errors.append(f"{source}: {str(e)[:80]}")

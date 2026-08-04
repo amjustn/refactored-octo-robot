@@ -62,11 +62,17 @@ def chat_calls(monkeypatch):
 
 
 def _split_calls(calls):
-    """按 system_prompt 区分 Team Lead 综合调用与其余 Agent 调用。"""
+    """按 system_prompt 区分 Team Lead 综合调用与其余 Agent 调用。
+
+    P5 交叉辩论阶段会产生额外的 chat_complete 调用（system 为辩论 prompt），
+    它们既不是综合调用也不是研究 Agent 调用，先按辩论标记剔除再拆分。
+    """
     from app.harness.prompts import TEAM_LEAD_PROMPT
     lead_prefix = TEAM_LEAD_PROMPT[:40]
-    lead = [c for c in calls if c[1].startswith(lead_prefix)]
-    others = [c for c in calls if not c[1].startswith(lead_prefix)]
+    debate_marker = "请从你的专业角度审视这份报告"
+    non_debate = [c for c in calls if debate_marker not in c[1]]
+    lead = [c for c in non_debate if c[1].startswith(lead_prefix)]
+    others = [c for c in non_debate if not c[1].startswith(lead_prefix)]
     return lead, others
 
 

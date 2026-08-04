@@ -16,7 +16,7 @@ from time import time
 from typing import Optional
 
 from ..core.config import MAX_CONCURRENT_RUNS
-from ..core.llm import set_usage_context, get_usage, clear_usage
+from ..core.llm import chat_complete, clear_usage, get_usage, set_usage_context
 from ..models.schemas import AgentProgress, ResearchStatus
 from .events import EventBus, EventType, get_bus
 from .persist import Repository, get_repository
@@ -82,6 +82,16 @@ def active_count() -> int:
     return len(_active)
 
 
+def is_active(task_id: str) -> bool:
+    """True while the task is registered as running in the active registry.
+
+    Used by the WS watch path (reconnect resume): only tasks still in the
+    registry will ever emit more events on the bus.
+    """
+    status = _active.get(task_id)
+    return bool(status) and status.status == "running"
+
+
 def get_status(task_id: str):
     """Active ResearchStatus, else DB row, else None."""
     if task_id in _active:
@@ -101,6 +111,60 @@ def cancel(task_id: str) -> dict:
         status.error = "已被用户取消"
         get_repository().save_task(status)
     return {"cancelled": True, "task_id": task_id}
+
+
+# ==================== report summary ====================
+
+_SUMMARY_LLM_TIMEOUT_S = 15
+_SUMMARY_MAX_CHARS = 100
+_SUMMARY_SYSTEM_PROMPT = "用一句不超过60字的中文概括这份投研报告的核心结论。只输出这句话。"
+
+
+def _extract_summary(report: str) -> str:
+    """Deterministic summary: first heading + first non-empty paragraph line."""
+    heading = ""
+    paragraph = ""
+    for line in report.splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        if s.startswith("#"):
+            if not heading:
+                heading = s.lstrip("#").strip()
+            continue
+        if s.startswith(">"):
+            continue
+        paragraph = s
+        break
+    if heading and paragraph:
+        text = f"{heading}：{paragraph}"
+    else:
+        text = heading or paragraph
+    return text[:_SUMMARY_MAX_CHARS]
+
+
+async def _summarize_report(report: str, spec: TaskSpec) -> str:
+    """One-line conclusion for the report meta.
+
+    LLM polish over the deterministic extract; any failure/timeout falls
+    back to the extract so report saving is never blocked.
+    """
+    fallback = _extract_summary(report)
+    try:
+        out = await asyncio.wait_for(
+            chat_complete(
+                _SUMMARY_SYSTEM_PROMPT,
+                report[:3000],
+                temperature=0.3,
+                llm_config=spec.llm.to_llm_config_dict(),
+            ),
+            timeout=_SUMMARY_LLM_TIMEOUT_S,
+        )
+        first_line = (out or "").strip().splitlines()[0].strip().strip('"').strip() if (out or "").strip() else ""
+        return first_line[:_SUMMARY_MAX_CHARS] or fallback
+    except Exception as e:
+        logger.info(f"report summary LLM polish failed for {spec.task_id}, using extract: {e}")
+        return fallback
 
 
 # ==================== execution ====================
@@ -201,6 +265,10 @@ async def run(spec: TaskSpec, bus: Optional[EventBus] = None) -> RunResult:
             guard = OutputGuard(bus=bus, task_id=spec.task_id)
             report, guard_warnings = guard.check(report, spec.skill_name, spec.strategy)
 
+            # One-line conclusion for the reports list (before get_usage so
+            # its tokens flow into the existing usage accounting).
+            summary = await _summarize_report(report, spec)
+
             duration = time() - start_ts
             tokens = get_usage(spec.task_id)
             billing = await repo.asave_billing(
@@ -214,6 +282,7 @@ async def run(spec: TaskSpec, bus: Optional[EventBus] = None) -> RunResult:
             }
             report_path = await repo.asave_report(
                 spec.skill_name, spec.arguments, report, duration, tokens,
+                summary=summary,
             )
             report_saved = True
 

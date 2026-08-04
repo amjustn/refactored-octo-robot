@@ -1,0 +1,14 @@
+skill: global-macro-analysis
+arguments: "美联储2026年降息路径与全球资产影响"
+mock_date: "2026-07-31"
+expect:
+  sections: ["核心判断", "Regime", "情景树", "触发点", "跨资产", "风险"]
+  min_chars: 400
+  max_duration_s: 600
+  must_cite: ["联邦基金利率"]
+  rubric_focus:
+    - 情景树概率完整性
+    - 触发点可检验性
+    - 跨资产传导逻辑
+  data_points:
+    联邦基金利率: 4.25

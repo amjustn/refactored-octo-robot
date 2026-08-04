@@ -108,6 +108,9 @@ class Repository:
     def mark_running_as_interrupted(self):
         return self.store.mark_running_as_interrupted()
 
+    def get_cost_stats(self, days: int = 30) -> dict:
+        return self.store.get_cost_stats(days)
+
     # ---------- artifacts (intermediate agent results) ----------
 
     def save_artifact(self, task_id: str, agent_name: str, content: str):
@@ -135,6 +138,9 @@ class Repository:
 
     async def aget_artifacts(self, task_id: str) -> list[tuple[str, str]]:
         return await asyncio.to_thread(self.get_artifacts, task_id)
+
+    async def aget_cost_stats(self, days: int = 30) -> dict:
+        return await asyncio.to_thread(self.get_cost_stats, days)
 
     # ---------- billing ----------
 
@@ -195,6 +201,20 @@ class Repository:
         finally:
             conn.close()
 
+    def get_task_extras(self, task_id: str) -> dict:
+        """arguments + billing duration/cost for the /api/task/{id} payload."""
+        conn = sqlite3.connect(str(self.store.db_path), timeout=10)
+        conn.row_factory = sqlite3.Row
+        try:
+            row = conn.execute(
+                """SELECT arguments, duration_s, cost_yuan
+                   FROM tasks WHERE task_id = ?""",
+                (task_id,),
+            ).fetchone()
+            return dict(row) if row else {}
+        finally:
+            conn.close()
+
     # ---------- reports ----------
 
     def save_report(
@@ -205,11 +225,14 @@ class Repository:
         duration_seconds: float = 0,
         tokens: Optional[dict] = None,
         partial: bool = False,
+        summary: Optional[str] = None,
     ) -> Path:
         """Save report markdown + a metadata sidecar (.meta.json).
 
         partial=True marks the report as an incomplete-run artifact dump
         (cancelled/failed task); listings surface it via meta["partial"].
+        summary is an optional one-line conclusion stored as meta["summary"]
+        and shown on the reports list page.
         """
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         safe_skill = _sanitize_filename(skill_name)
@@ -224,6 +247,8 @@ class Repository:
         }
         if partial:
             meta["partial"] = True
+        if summary:
+            meta["summary"] = summary
         try:
             report_path.with_suffix(".meta.json").write_text(
                 json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"

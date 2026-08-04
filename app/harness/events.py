@@ -21,7 +21,6 @@ import logging
 import time
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Optional
 
 logger = logging.getLogger("ai_berkshire.harness.events")
 

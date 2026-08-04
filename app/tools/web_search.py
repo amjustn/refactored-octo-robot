@@ -16,7 +16,7 @@ import logging
 import re
 import socket
 from typing import Optional
-from urllib.parse import quote_plus, urljoin, urlparse
+from urllib.parse import urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup

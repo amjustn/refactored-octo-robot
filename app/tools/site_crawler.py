@@ -15,11 +15,7 @@ This gives us REAL latest news from:
 - 电子发烧友 (elecfans.com) — Hardware/electronics
 """
 import logging
-import re
-from typing import Optional
-from datetime import datetime
 
-import httpx
 from bs4 import BeautifulSoup
 
 from .web_search import _get_client
@@ -238,9 +234,7 @@ async def crawl_industry_news(query: str, max_per_site: int = 5) -> dict:
         "articles": list of {title, url, date, source},
     }
     """
-    query_lower = query.lower()
     relevant_sites = set()
-
     # Match query keywords to site categories
     for category, site_ids in CATEGORY_SITES.items():
         if category in query:
@@ -298,7 +292,7 @@ async def build_industry_news_context(query: str) -> str:
     if not result["articles"]:
         return ""
 
-    parts = [f"### 行业网站最新文章（直接爬取）"]
+    parts = ["### 行业网站最新文章（直接爬取）"]
     parts.append(f"*来源: {', '.join(result['sites_crawled'])}*")
     parts.append("")
 

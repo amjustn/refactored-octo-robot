@@ -1,0 +1,16 @@
+# 附件注入用例：attachments 经 TaskSpec.build -> spec.attachments -> build_user_prompt
+# 注入 Agent 用户提示词；replay stub 模式校验附件文本确实到达 LLM 消息
+# （checks.attachments_injected）。
+skill: thesis-tracker
+arguments: "腾讯"
+mock_date: "2026-07-31"
+attachments: "内部调研纪要（附件标记ATT2026EVAL）：微信小店GMV环比增长37%，视频号广告加载率提升，游戏递延收入创历史新高。"
+expect:
+  sections: ["核心假设", "红线", "估值"]
+  min_chars: 200
+  max_duration_s: 600
+  must_cite: ["GMV"]
+  rubric_focus:
+    - 附件资料是否纳入核心假设检查
+  data_points:
+    GMV: 37

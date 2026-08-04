@@ -289,6 +289,8 @@ function selectSkill(name) {
   currentSkill = skill;
   // Close history panel when switching skills
   document.getElementById('history-area').style.display = 'none';
+  document.getElementById('costs-area').style.display = 'none';
+  document.getElementById('decisions-area').style.display = 'none';
   localStorage.setItem('ai_berkshire_skill', name);
 
   document.querySelectorAll('.nav-item').forEach(function(el) { el.classList.remove('active'); });
@@ -1266,6 +1268,8 @@ async function startResearch() {
   document.getElementById('empty-state').style.display = 'none';
   document.getElementById('history-area').style.display = 'none';
   document.getElementById('compare-area').style.display = 'none';
+  document.getElementById('costs-area').style.display = 'none';
+  document.getElementById('decisions-area').style.display = 'none';
   document.getElementById('result-area').style.display = 'none';
   document.getElementById('report-content').innerHTML = '';
   document.getElementById('report-meta').style.display = 'none';
@@ -1273,6 +1277,7 @@ async function startResearch() {
   document.getElementById('follow-up-area').style.display = 'none';
   document.getElementById('follow-up-qa').innerHTML = '';
   _followUpHistory = [];
+  _clearFollowupFiles();
   try { localStorage.removeItem('ai_berkshire_followup'); } catch(e) {}
   hideToc();
   currentReport = '';
@@ -1347,13 +1352,24 @@ async function streamResearch(args, attachments) {
   _streamResearchImpl(args, attachments);
 }
 
-function _streamResearchImpl(args, attachments) {
+function _streamResearchImpl(args, attachments, watchTaskId) {
   var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   var url = proto + '//' + location.host + '/ws/research/' + currentSkill.name;
+  // Per-socket flag: set when we close the socket on purpose (watch-mode
+  // timeout re-attach) so onclose does not schedule a duplicate reconnect.
+  var _ignoreClose = false;
 
   // Timeout guard: if no data within 90s, fall back to batch mode
   var _wsTimeout = setTimeout(function() {
     if (!currentReport && _wsShouldReconnect) {
+      if (watchTaskId) {
+        // Watch mode must NOT fall back to batch (that would start a NEW
+        // run). Re-check the task state and resume again instead.
+        _ignoreClose = true;
+        if (ws) { ws.close(); ws = null; }
+        _reconnectResearch(args, attachments);
+        return;
+      }
       showToast('WebSocket响应超时，自动切换到普通模式', 'warning');
       _wsShouldReconnect = false;
       if (ws) { ws.close(); ws = null; }
@@ -1366,6 +1382,7 @@ function _streamResearchImpl(args, attachments) {
     ws.onopen = function() {
       _wsReconnectAttempts = 0;
       var msg = { arguments: args };
+      if (watchTaskId) msg.watch_task_id = watchTaskId;
       if (attachments) msg.attachments = attachments;
       msg.token = getWsToken();
       var llmConfig = getLlmConfig();
@@ -1424,12 +1441,13 @@ function _streamResearchImpl(args, attachments) {
       // Will trigger onclose, handle reconnect there
     };
     ws.onclose = function(event) {
+      if (_ignoreClose) return;
       if (_wsShouldReconnect && _wsReconnectAttempts < _WS_MAX_RECONNECT) {
         var delay = _WS_RECONNECT_DELAYS[_wsReconnectAttempts] || 10000;
         _wsReconnectAttempts++;
         showToast('连接断开，' + Math.round(delay/1000) + '秒后重试 (' + _wsReconnectAttempts + '/' + _WS_MAX_RECONNECT + ')', 'warning');
         setTimeout(function() {
-          if (_wsShouldReconnect) _streamResearchImpl(args, attachments);
+          if (_wsShouldReconnect) _reconnectResearch(args, attachments);
         }, delay);
       } else if (_wsShouldReconnect) {
         // Max retries reached — fall back to batch mode
@@ -1449,6 +1467,43 @@ function _streamResearchImpl(args, attachments) {
   } catch (e) {
     finishResearch(false, e.message);
   }
+}
+
+// Reconnect resume: before reopening the WS, ask the server about the
+// in-flight task (task_id captured from the 'started' frame) and RESUME its
+// display instead of blindly starting a duplicate run.
+async function _reconnectResearch(args, attachments) {
+  if (currentTaskId) {
+    try {
+      var headers = {};
+      Object.assign(headers, getAuthHeaders());
+      var res = await fetch('/api/task/' + currentTaskId, { headers: headers });
+      var t = await res.json();
+      if (t && t.status === 'running') {
+        // Server-side run is still alive — re-attach in watch mode and keep
+        // receiving its events (the terminal 'complete' frame carries the
+        // full report, so missed chunks are harmless).
+        showToast('已恢复连接，继续接收进度', 'success');
+        _streamResearchImpl(args, attachments, currentTaskId);
+        return;
+      }
+      if (t && t.status === 'completed' && t.report) {
+        // Run finished while we were disconnected — render the stored report
+        // exactly as if the 'complete' frame had arrived.
+        _wsShouldReconnect = false;
+        currentReport = t.report;
+        updateAllAgents('completed');
+        finishResearch(true, null, { duration: t.duration_seconds });
+        return;
+      }
+      // failed / cancelled / interrupted / not found → fall through to a
+      // fresh run (previous behavior: the reconnect re-sends the payload).
+    } catch (e) {
+      // Status check failed (server unreachable) — the fresh WS connect
+      // below will fail too and the normal backoff loop keeps going.
+    }
+  }
+  _streamResearchImpl(args, attachments);
 }
 
 // Throttled streaming render: re-parse the whole report at most every 150ms
@@ -1730,6 +1785,84 @@ function renderReport(md) {
 // ==================== Follow-up Q&A ====================
 var _followUpLoading = false;
 var _followUpHistory = [];
+var _followupFiles = [];  // extracted text from files attached to a follow-up question
+
+function _htmlToText(html) {
+  var d = document.createElement('div');
+  d.innerHTML = html;
+  return d.textContent || '';
+}
+
+function _clearFollowupFiles() {
+  _followupFiles = [];
+  var fi = document.getElementById('followup-file-input');
+  if (fi) fi.value = '';
+  var pv = document.getElementById('followup-file-preview');
+  if (pv) { pv.style.display = 'none'; pv.innerHTML = ''; }
+  var st = document.getElementById('followup-file-status');
+  if (st) { st.textContent = ''; st.style.color = ''; }
+}
+
+async function handleFollowupFileUpload(fileList) {
+  if (!fileList || !fileList.length) return;
+  var status = document.getElementById('followup-file-status');
+  var preview = document.getElementById('followup-file-preview');
+  var formData = new FormData();
+  for (var i = 0; i < fileList.length; i++) {
+    formData.append('files', fileList[i]);
+  }
+  status.textContent = '处理中...';
+  status.style.color = '';
+  preview.style.display = 'none';
+
+  try {
+    var headers = {};
+    Object.assign(headers, getAuthHeaders());
+    // Same vision-model logic as the research upload (for image OCR)
+    var llmCfg = _loadLlmConfig() || {};
+    var visionModel = llmCfg.vision_model || '';
+    if (!visionModel && llmCfg.model) {
+      var mainLower = llmCfg.model.toLowerCase();
+      var isMulti = _MULTIMODAL_MODELS.some(function(k) { return mainLower.indexOf(k) >= 0; });
+      if (isMulti) visionModel = llmCfg.model;
+    }
+    if (visionModel) {
+      formData.append('vision_model', visionModel);
+      if (llmCfg.base_url) formData.append('vision_base_url', llmCfg.base_url);
+      if (llmCfg.api_key) formData.append('vision_api_key', llmCfg.api_key);
+    }
+    var res = await fetch('/api/upload', { method: 'POST', headers: headers, body: formData });
+    if (!res.ok) {
+      var err = await res.json().catch(function() { return {}; });
+      throw new Error(err.detail || '上传失败 (' + res.status + ')');
+    }
+    var data = await res.json();
+    var html = '<div class="fp-header">已提取 ' + data.files.length + ' 个文件（将随下一次追问发送）</div>';
+    var allText = [];
+    data.files.forEach(function(f) {
+      html += '<div class="fp-item"><span class="fp-filename">' + escHtml(f.filename) + '</span>';
+      if (f.error) {
+        html += ' <span class="fp-error">✗ ' + escHtml(f.error) + '</span>';
+      } else if (f.summary && (!f.text || f.text.length > 5000)) {
+        allText.push('【文件：' + f.filename + ' - AI摘要】\n' + f.summary);
+        html += ' <span style="color:#8c8273;font-size:0.7rem">（注入AI摘要）</span>';
+      } else {
+        allText.push('【文件：' + f.filename + '】\n' + (f.text || f.summary || ''));
+        html += ' <span style="color:#8c8273;font-size:0.7rem">(' + (f.text ? f.text.length : 0) + '字)</span>';
+      }
+      html += '</div>';
+    });
+    preview.innerHTML = html;
+    preview.style.display = 'block';
+    _followupFiles = allText;
+    status.textContent = '✓ ' + allText.length + ' 个文件已就绪';
+    status.style.color = '#6b8e6b';
+  } catch(e) {
+    status.textContent = '✗ ' + e.message;
+    status.style.color = '#b85c5c';
+    preview.style.display = 'none';
+  }
+}
 
 function _saveFollowUpHistory() {
   var items = [];
@@ -1796,6 +1929,16 @@ async function submitFollowUp() {
   qa.scrollTop = qa.scrollHeight;
 
   try {
+    // Multi-turn history: previous Q&A turns of this report session
+    var history = [];
+    _followUpHistory.forEach(function(item) {
+      if (item.type === 'a' && item.html.indexOf('accent-red') >= 0) return;  // skip failed answers
+      var text = _htmlToText(item.html).trim();
+      if (text) history.push({ role: item.type === 'q' ? 'user' : 'assistant', content: text.slice(0, 2000) });
+    });
+    history = history.slice(-10);
+    var attachments = _followupFiles.length ? _followupFiles.join('\n\n') : '';
+
     var headers = { 'Content-Type': 'application/json' };
     Object.assign(headers, getAuthHeaders());
     var res = await fetch('/api/follow-up', {
@@ -1805,7 +1948,9 @@ async function submitFollowUp() {
         report: currentReport,
         question: question,
         skill_name: currentSkill ? currentSkill.name : '',
-        llm_config: getLlmConfig() || undefined
+        llm_config: getLlmConfig() || undefined,
+        history: history.length ? history : undefined,
+        attachments: attachments || undefined
       })
     });
     if (!res.ok) {
@@ -1817,6 +1962,8 @@ async function submitFollowUp() {
       DOMPurify.sanitize(marked.parse(data.answer || '(无回复)'));
     // Persist Q&A to localStorage
     _saveFollowUpHistory();
+    // Attachments are single-shot — clear after a successful send
+    if (attachments) _clearFollowupFiles();
   } catch(e) {
     document.getElementById(aId).querySelector('.qa-content').innerHTML =
       '<span style="color:var(--accent-red)">✗ ' + escHtml(e.message) + '</span>';
@@ -1996,6 +2143,7 @@ function clearResult() {
   document.getElementById('follow-up-area').style.display = 'none';
   document.getElementById('follow-up-qa').innerHTML = '';
   _followUpHistory = [];
+  _clearFollowupFiles();
   try { localStorage.removeItem('ai_berkshire_followup'); } catch(e) {}
   hideToc();
   document.getElementById('empty-state').style.display = 'flex';
@@ -2011,6 +2159,8 @@ function backToHome() {
   document.getElementById('progress-area').style.display = 'none';
   document.getElementById('history-area').style.display = 'none';
   document.getElementById('compare-area').style.display = 'none';
+  document.getElementById('costs-area').style.display = 'none';
+  document.getElementById('decisions-area').style.display = 'none';
   document.getElementById('empty-state').style.display = 'block';
 }
 
@@ -2019,6 +2169,8 @@ async function showHistory() {
   document.getElementById('result-area').style.display = 'none';
   document.getElementById('progress-area').style.display = 'none';
   document.getElementById('compare-area').style.display = 'none';
+  document.getElementById('costs-area').style.display = 'none';
+  document.getElementById('decisions-area').style.display = 'none';
 
   var historyArea = document.getElementById('history-area');
   var list = document.getElementById('history-list');
@@ -2066,11 +2218,13 @@ function renderHistory(reports) {
     metaParts.push((r.size/1024).toFixed(1) + 'KB');
     if (r.duration_seconds) metaParts.push('耗时 ' + fmtDuration(r.duration_seconds));
     var checked = _compareSelection.has(r.name) ? ' checked' : '';
+    var summary = (r.summary || '').trim();
     return '<div class="history-item" onclick="loadReport(\'' + safeName.replace(/'/g, "\\'") + '\')">' +
       '<input type="checkbox" class="compare-check" data-name="' + safeName + '"' + checked +
       ' onclick="event.stopPropagation();toggleCompareSelect(this)" title="选择两份报告进行对比">' +
       '<div class="history-item-body">' +
       '<div class="report-name">' + escHtml(title) + '</div>' +
+      (summary ? '<div class="report-summary" title="' + escHtml(summary) + '">' + escHtml(summary) + '</div>' : '') +
       '<div class="report-meta">' + escHtml(metaParts.join(' | ')) + '</div>' +
       (args ? '<div class="report-filename">' + safeName + '</div>' : '') +
       '</div>' +
@@ -2159,6 +2313,154 @@ async function compareSelected() {
 function closeCompare() {
   document.getElementById('compare-area').style.display = 'none';
   document.getElementById('history-area').style.display = 'block';
+}
+
+// ==================== Cost Stats ====================
+var _costDays = 30;
+var _costChartDaily = null;
+var _costChartSkill = null;
+
+async function showCosts() {
+  document.getElementById('empty-state').style.display = 'none';
+  document.getElementById('result-area').style.display = 'none';
+  document.getElementById('progress-area').style.display = 'none';
+  document.getElementById('history-area').style.display = 'none';
+  document.getElementById('compare-area').style.display = 'none';
+  document.getElementById('decisions-area').style.display = 'none';
+  document.getElementById('costs-area').style.display = 'block';
+  await loadCostStats();
+}
+
+function closeCosts() {
+  document.getElementById('costs-area').style.display = 'none';
+  document.getElementById('empty-state').style.display = 'block';
+}
+
+// ── P3: decision log panel ──────────────────────────────
+async function showDecisions() {
+  document.getElementById('empty-state').style.display = 'none';
+  document.getElementById('result-area').style.display = 'none';
+  document.getElementById('progress-area').style.display = 'none';
+  document.getElementById('history-area').style.display = 'none';
+  document.getElementById('compare-area').style.display = 'none';
+  document.getElementById('costs-area').style.display = 'none';
+  document.getElementById('decisions-area').style.display = 'block';
+
+  var list = document.getElementById('decisions-list');
+  list.innerHTML = '<p style="color:var(--text-secondary)">加载中...</p>';
+  try {
+    var headers = {};
+    Object.assign(headers, getAuthHeaders());
+    var res = await fetch('/api/decisions', { headers: headers });
+    var data = await res.json();
+    renderDecisions(data);
+  } catch (e) {
+    list.innerHTML = '<p style="color:var(--accent-red)">加载失败: ' + escHtml(e.message) + '</p>';
+  }
+}
+
+function closeDecisions() {
+  document.getElementById('decisions-area').style.display = 'none';
+  document.getElementById('empty-state').style.display = 'block';
+}
+
+function renderDecisions(data) {
+  var list = document.getElementById('decisions-list');
+  var summary = document.getElementById('decisions-summary');
+  var decisions = data.decisions || [];
+
+  summary.textContent = decisions.length
+    ? ('共 ' + data.total + ' 条 | ' + data.pending + ' 条待验证')
+    : '';
+
+  if (!decisions.length) {
+    list.innerHTML = '<p style="color:var(--text-secondary)">暂无决策记录。完成一次包含明确结论（买入/持有/卖出）的研究后，会自动记录在这里。</p>';
+    return;
+  }
+
+  list.innerHTML = decisions.map(function(d) {
+    var status = d.status === 'resolved' ? 'resolved' : 'pending';
+    var statusLabel = status === 'resolved' ? '已验证' : '待验证';
+    var rows = '';
+    if (d.confidence) rows += '<div class="decision-row"><b>置信度</b>：' + escHtml(d.confidence) + '</div>';
+    if (d.assumptions && d.assumptions !== '未指定') rows += '<div class="decision-row"><b>关键假设</b>：' + escHtml(d.assumptions) + '</div>';
+    if (d.target && d.target !== '未指定') rows += '<div class="decision-row"><b>目标价/信号</b>：' + escHtml(d.target) + '</div>';
+    var meta = [];
+    if (d.skill) meta.push(d.skill);
+    if (d.time) meta.push(d.time);
+    return '<div class="decision-item">' +
+      '<div class="decision-head">' +
+        '<span class="decision-stock">' + escHtml(d.stock || '未知标的') + '</span>' +
+        '<span class="decision-badge ' + status + '">' + statusLabel + '</span>' +
+        '<span class="decision-time">' + escHtml(meta.join(' | ')) + '</span>' +
+      '</div>' +
+      '<div class="decision-conclusion">' + escHtml(d.conclusion || '') + '</div>' +
+      rows +
+    '</div>';
+  }).join('');
+}
+
+function setCostDays(days) {
+  _costDays = days;
+  document.querySelectorAll('#costs-days button').forEach(function(b) {
+    b.classList.toggle('active', parseInt(b.dataset.days, 10) === days);
+  });
+  loadCostStats();
+}
+
+async function loadCostStats() {
+  try {
+    var headers = {};
+    Object.assign(headers, getAuthHeaders());
+    var res = await fetch('/api/stats/costs?days=' + _costDays, { headers: headers });
+    var data = await res.json();
+    renderCostStats(data);
+  } catch (e) {
+    showToast('成本数据加载失败: ' + e.message, 'error');
+  }
+}
+
+function renderCostStats(data) {
+  var t = data.totals || {};
+  var totalTokens = (t.tokens_prompt || 0) + (t.tokens_completion || 0);
+  document.getElementById('cost-total-runs').textContent = t.runs || 0;
+  document.getElementById('cost-total-tokens').textContent = totalTokens.toLocaleString();
+  document.getElementById('cost-total-yuan').textContent = '¥' + (t.cost_yuan || 0).toFixed(4);
+  document.getElementById('cost-avg-duration').textContent = fmtDuration(t.avg_duration_s || 0);
+
+  var byDay = data.by_day || [];
+  if (_costChartDaily) { _costChartDaily.dispose(); }
+  _costChartDaily = echarts.init(document.getElementById('cost-chart-daily'));
+  _costChartDaily.setOption({
+    grid: { left: 60, right: 20, top: 30, bottom: 30 },
+    tooltip: { trigger: 'axis' },
+    xAxis: { type: 'category', data: byDay.map(function(d) { return d.date.slice(5); }) },
+    yAxis: { type: 'value', name: '¥' },
+    series: [{
+      name: '每日费用', type: 'bar', barMaxWidth: 24,
+      itemStyle: { color: '#6b8e6b' },
+      data: byDay.map(function(d) { return d.cost_yuan; })
+    }]
+  });
+
+  var bySkill = data.by_skill || [];
+  if (_costChartSkill) { _costChartSkill.dispose(); }
+  _costChartSkill = echarts.init(document.getElementById('cost-chart-skill'));
+  _costChartSkill.setOption({
+    grid: { left: 10, right: 40, top: 10, bottom: 30, containLabel: true },
+    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+    xAxis: { type: 'value', name: '¥' },
+    yAxis: {
+      type: 'category', inverse: true,
+      data: bySkill.map(function(s) { return skillDisplayName(s.skill_name) || s.skill_name; })
+    },
+    series: [{
+      name: '费用', type: 'bar', barMaxWidth: 20,
+      itemStyle: { color: '#c4a77d' },
+      label: { show: true, position: 'right', formatter: function(p) { return '¥' + p.value.toFixed(4); } },
+      data: bySkill.map(function(s) { return s.cost_yuan; })
+    }]
+  });
 }
 
 async function loadReport(filename) {

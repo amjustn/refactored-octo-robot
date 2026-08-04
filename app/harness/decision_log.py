@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import logging
 import re
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -82,6 +81,55 @@ def save_decision(
     except Exception as e:
         logger.warning(f"Failed to save decision: {e}")
         return False
+
+
+def list_decisions(max_entries: int = 100) -> list:
+    """P3 frontend: parse decision-log.md into structured entries, newest first.
+
+    Each entry: {stock, time, skill, conclusion, confidence, assumptions,
+    target, status, task_id}. Returns [] when the log does not exist.
+    """
+    if not DECISION_LOG_PATH.exists():
+        return []
+
+    try:
+        content = DECISION_LOG_PATH.read_text(encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"Failed to read decision log: {e}")
+        return []
+
+    entries = []
+    sections = re.split(r"\n(?=## )", content)
+    for section in sections:
+        section = section.strip()
+        if not section.startswith("## "):
+            continue
+        lines = section.split("\n")
+        # Title: "## 贵州茅台 — 2026-08-04 12:00 UTC"
+        title = lines[0][3:].strip()
+        stock, _, ts = title.partition(" — ")
+
+        def _field(name: str) -> str:
+            for ln in lines[1:]:
+                m = re.match(rf"- \*\*{name}\*\*[：:]\s*(.*)", ln.strip())
+                if m:
+                    return m.group(1).strip()
+            return ""
+
+        entries.append({
+            "stock": stock.strip(),
+            "time": ts.strip(),
+            "skill": _field("技能"),
+            "conclusion": _field("结论"),
+            "confidence": _field("置信度"),
+            "assumptions": _field("关键假设"),
+            "target": _field("目标价/信号"),
+            "status": _field("状态") or "pending",
+            "task_id": _field("任务ID"),
+        })
+
+    entries.reverse()  # file is append-only; newest last → newest first
+    return entries[:max_entries]
 
 
 def load_decisions(arguments: str, max_entries: int = 5) -> str:

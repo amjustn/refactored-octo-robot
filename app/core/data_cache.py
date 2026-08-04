@@ -9,7 +9,7 @@ import sqlite3
 import threading
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional, Any
+from typing import Any, Optional
 
 from .config import BASE_DIR
 

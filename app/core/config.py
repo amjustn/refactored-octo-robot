@@ -2,9 +2,10 @@
 
 Added data source configuration for market data and knowledge base.
 """
-import os
 import logging
+import os
 from pathlib import Path
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -45,6 +46,18 @@ MAX_CONCURRENT_RUNS = int(os.getenv("BERKSHIRE_MAX_CONCURRENT_RUNS", "2"))
 DATA_CACHE_TTL_REALTIME = int(os.getenv("DATA_CACHE_TTL_REALTIME", "300"))  # 5 min
 DATA_CACHE_TTL_FINANCIAL = int(os.getenv("DATA_CACHE_TTL_FINANCIAL", "86400"))  # 24 hours
 DATA_CACHE_TTL_NEWS = int(os.getenv("DATA_CACHE_TTL_NEWS", "3600"))  # 1 hour
+GOAL_PARSE_CACHE_TTL = int(os.getenv("GOAL_PARSE_CACHE_TTL", "86400"))  # 24 hours
+# Bounded thread pool for sync SDK calls (akshare/yfinance). asyncio.wait_for
+# cancels the await but cannot kill the underlying thread, so hung fetches
+# leave orphaned threads behind; a dedicated small pool caps that accumulation
+# and isolates it from the event loop's default executor.
+MARKET_SYNC_WORKERS = int(os.getenv("MARKET_SYNC_WORKERS", "6"))
+
+# QuantTrader (QT) quant-signal service — sibling FastAPI project on the same
+# host, exposes read-only quant signals consumed by app/tools/quant_link.py.
+QT_BASE_URL = os.getenv("QT_BASE_URL", "http://127.0.0.1:8000")
+QT_API_TOKEN = os.getenv("QT_API_TOKEN", "").strip() or None
+QT_TOKEN_FILE = os.getenv("QT_TOKEN_FILE", "/home/q/quant_trader/data/api_token.txt")
 
 # Knowledge Base Configuration
 KNOWLEDGE_REFRESH_INTERVAL = int(os.getenv("KNOWLEDGE_REFRESH_INTERVAL", "604800"))  # 7 days

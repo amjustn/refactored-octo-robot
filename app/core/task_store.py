@@ -7,12 +7,12 @@ import json
 import logging
 import sqlite3
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
-from ..models.schemas import ResearchStatus, AgentProgress
 from ..core.config import BASE_DIR
+from ..models.schemas import AgentProgress, ResearchStatus
 
 logger = logging.getLogger("ai_berkshire.task_store")
 
@@ -204,6 +204,89 @@ class TaskStore:
                 return deleted
             finally:
                 conn.close()
+
+    def get_cost_stats(self, days: int = 30) -> dict:
+        """Aggregate LLM billing stats over the last `days` calendar days
+        (including today, local time).
+
+        Only tasks that actually ran to a terminal state are counted:
+        status IN ('completed', 'failed', 'cancelled'). 'running' rows
+        have no final billing yet, and 'interrupted' rows never finished
+        a run — including their partial/zero billing would skew the
+        totals and averages, so both are excluded.
+
+        Returns totals / by_day (missing days zero-filled) / by_skill
+        (sorted by cost desc). `days` is clamped to [1, 365].
+        """
+        days = max(1, min(int(days), 365))
+        today = datetime.now().date()
+        start = today - timedelta(days=days - 1)
+        cutoff = datetime(start.year, start.month, start.day).isoformat()
+        where = ("WHERE status IN ('completed', 'failed', 'cancelled') "
+                 "AND created_at >= ?")
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                tot = conn.execute(f"""
+                    SELECT COUNT(*) AS runs,
+                           COALESCE(SUM(tokens_prompt), 0) AS tokens_prompt,
+                           COALESCE(SUM(tokens_completion), 0) AS tokens_completion,
+                           COALESCE(SUM(cost_yuan), 0) AS cost_yuan,
+                           COALESCE(AVG(COALESCE(duration_s, 0)), 0) AS avg_duration_s
+                    FROM tasks {where}
+                """, (cutoff,)).fetchone()
+                day_rows = conn.execute(f"""
+                    SELECT substr(created_at, 1, 10) AS day,
+                           COUNT(*) AS runs,
+                           COALESCE(SUM(cost_yuan), 0) AS cost_yuan,
+                           COALESCE(SUM(tokens_prompt + tokens_completion), 0) AS tokens
+                    FROM tasks {where}
+                    GROUP BY day
+                """, (cutoff,)).fetchall()
+                skill_rows = conn.execute(f"""
+                    SELECT skill_name,
+                           COUNT(*) AS runs,
+                           COALESCE(SUM(cost_yuan), 0) AS cost_yuan,
+                           COALESCE(SUM(tokens_prompt + tokens_completion), 0) AS tokens
+                    FROM tasks {where}
+                    GROUP BY skill_name
+                    ORDER BY cost_yuan DESC, runs DESC
+                """, (cutoff,)).fetchall()
+            finally:
+                conn.close()
+
+        day_map = {r["day"]: r for r in day_rows}
+        by_day = []
+        for i in range(days):
+            d = (start + timedelta(days=i)).isoformat()
+            r = day_map.get(d)
+            by_day.append({
+                "date": d,
+                "runs": r["runs"] if r else 0,
+                "cost_yuan": round(r["cost_yuan"], 4) if r else 0,
+                "tokens": r["tokens"] if r else 0,
+            })
+        by_skill = [
+            {
+                "skill_name": r["skill_name"],
+                "runs": r["runs"],
+                "cost_yuan": round(r["cost_yuan"], 4),
+                "tokens": r["tokens"],
+            }
+            for r in skill_rows
+        ]
+        return {
+            "days": days,
+            "totals": {
+                "runs": tot["runs"],
+                "tokens_prompt": tot["tokens_prompt"],
+                "tokens_completion": tot["tokens_completion"],
+                "cost_yuan": round(tot["cost_yuan"], 4),
+                "avg_duration_s": round(tot["avg_duration_s"], 1),
+            },
+            "by_day": by_day,
+            "by_skill": by_skill,
+        }
 
     def mark_running_as_interrupted(self):
         """On startup, mark any 'running' tasks as 'interrupted'."""

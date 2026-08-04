@@ -14,7 +14,6 @@ import json
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 from ..core.config import BASE_DIR
 from ..core.llm import chat_complete
@@ -123,7 +122,7 @@ DEFAULT_SKILL_KNOWLEDGE = {
     },
     "thesis-tracker": {
         "skill_name": "thesis-tracker",
-        "display_name": "论文追踪",
+        "display_name": "持仓评估",
         "latest_frameworks": "买入论文纪律系统：1)核心假设清单 2)红线触发(3条) 3)估值季度更新 4)健康度评分(绿/黄/红)",
         "key_criteria": "核心假设验证率<60%触发减仓，红线触发立即清仓",
         "data_sources": "公司公告+财报+行业数据持续追踪",
@@ -132,7 +131,7 @@ DEFAULT_SKILL_KNOWLEDGE = {
     },
     "news-pulse": {
         "skill_name": "news-pulse",
-        "display_name": "新闻脉搏",
+        "display_name": "股价异动归因",
         "latest_frameworks": "4维并行侦察：1)公司事件 2)监管政策 3)行业对手 4)市场情绪，输出事件时间线",
         "key_criteria": "区分公司Alpha事件vs行业Beta波动，标注与股价异动相关性(高/中/低)",
         "data_sources": "实时新闻via fetch_company_news + 交易所公告 + 社交媒体情绪",

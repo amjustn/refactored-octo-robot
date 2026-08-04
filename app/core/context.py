@@ -13,8 +13,6 @@ has access to current information when making investment analysis.
 import logging
 from datetime import datetime
 
-from .config import BASE_DIR
-
 logger = logging.getLogger("ai_berkshire.context")
 
 
@@ -108,7 +106,7 @@ def build_company_context(symbol: str, price_data: dict = None, news_data: list 
         elif change < 0:
             parts.append(f"  涨跌幅: 🟢{change:.2f}%")
         else:
-            parts.append(f"  涨跌幅: 0.00%")
+            parts.append("  涨跌幅: 0.00%")
 
         if price_data.get("pe"):
             parts.append(f"  PE: {price_data['pe']:.1f}")
@@ -161,7 +159,6 @@ async def build_web_search_context(symbol: str = "", arguments: str = "", skill_
     Returns a formatted context string with search findings.
     """
     parts = []
-    search_keywords = []
 
     # Build search keywords — ALWAYS prioritize user's own words
     # The user's arguments (what they typed) are the ground truth.
@@ -178,19 +175,20 @@ async def build_web_search_context(symbol: str = "", arguments: str = "", skill_
     if search_query and search_query.strip():
         primary_keyword = search_query.strip()[:60]
 
-    parts.append(f"## 网络最新信息（自动搜索）")
+    parts.append("## 网络最新信息（自动搜索）")
     parts.append(f"*搜索关键词: {primary_keyword}*")
     parts.append("")
 
     # ── 1. Web search for latest news ──
     web_results = []
     try:
-        from ..tools.web_search import web_search, read_webpage
         import asyncio
 
         # Extract year from arguments if present
         # Match: 2026Q4, 2026年, 2026的, 2026财报, 2026年报 etc.
         import re as _re
+
+        from ..tools.web_search import read_webpage, web_search
         _year_match = _re.search(r'20(\d{2})(?!\d)', arguments) if arguments else None
         _search_year = f"20{_year_match.group(1)}" if _year_match else datetime.now().strftime('%Y')
         # Use user's full query as the search term — this is what they asked for
@@ -250,8 +248,9 @@ async def build_web_search_context(symbol: str = "", arguments: str = "", skill_
 
     # ── 3. Direct site crawling (latest articles from industry websites) ──
     try:
-        from ..tools.site_crawler import build_industry_news_context
         import asyncio as _aio
+
+        from ..tools.site_crawler import build_industry_news_context
 
         crawl_ctx = await _aio.wait_for(
             build_industry_news_context(primary_keyword),
@@ -268,8 +267,9 @@ async def build_web_search_context(symbol: str = "", arguments: str = "", skill_
 
     if is_industry_query and primary_keyword:
         try:
-            from ..tools.industry_sources import search_industry_chain
             import asyncio
+
+            from ..tools.industry_sources import search_industry_chain
 
             industry_query = primary_keyword
             logger.info(f"Auto industry chain search for context: {industry_query}")
@@ -282,7 +282,7 @@ async def build_web_search_context(symbol: str = "", arguments: str = "", skill_
                 sources = industry_result.get("sources_searched", [])
                 results = industry_result.get("results", [])
                 parts.append(f"### 产业链搜索结果 ({len(results)} 条)")
-                parts.append(f"*数据源: {", ".join(sources)}*")
+                parts.append(f"*数据源: {', '.join(sources)}*")
                 for r in results[:5]:
                     title = r.get("title", "")
                     url = r.get("url", "")
@@ -353,21 +353,26 @@ async def build_full_context(arguments: str = "", skill_name: str = "", goal_hin
                     )
                     _data_warnings.append(msg)
 
-    # Try to get market indices
+    # ── Market / company / web data — fetched in parallel ──
+    # Symbol resolution is synchronous (company-name map + regex) and feeds
+    # both the company branch and the web-search branch, so it runs first.
+    # The three fetch groups (indices / price+news / web search) are
+    # independent of each other and run concurrently via asyncio.gather;
+    # each branch degrades to empty on failure, exactly as before.
+    symbol = None
+    _md = None
     try:
-        from ..tools.market_data import (
-            fetch_market_indices, get_stock_price, fetch_company_news,
-            _detect_market, _resolve_company_name,
-        )
         import re
 
-        indices = await fetch_market_indices()
-        if indices and not indices.get("error"):
-            parts.append(build_market_context(indices))
+        from ..tools.market_data import (
+            _resolve_company_name,
+            fetch_company_news,
+            fetch_market_indices,
+            get_stock_price,
+        )
 
         # Try to extract stock symbol from arguments
         # Strategy: 1) Check Chinese company name map 2) Regex for code patterns
-        symbol = None
 
         # Goal-parser hints take priority when available:
         # validated hint symbol → company-name resolution → legacy path below
@@ -418,33 +423,68 @@ async def build_full_context(arguments: str = "", skill_name: str = "", goal_hin
                     else:
                         symbol = candidate
 
-        if symbol:
-            try:
-                price = await get_stock_price(symbol)
-                if price and not price.get("error"):
-                    news = await fetch_company_news(symbol, days=14)
-                    parts.append(build_company_context(symbol, price, news))
-            except Exception as e:
-                logger.debug(f"Could not fetch company data for {symbol}: {e}")
+        _md = (fetch_market_indices, get_stock_price, fetch_company_news)
     except ImportError:
         logger.debug("market_data module not available")
     except Exception as e:
         logger.debug(f"Context building partial failure: {e}")
 
-    # ── Auto web search for latest internet information ──
-    # This ensures every report has the LATEST news/data from the web
-    if symbol or arguments:
+    # ── Parallel fetch branches ──
+    # Each branch is self-contained (no shared mutable state) and returns
+    # None/"" on failure so one slow or failing source cannot delay or
+    # break the others. price→news stays sequential inside the company
+    # branch because news is only fetched when the price lookup succeeds.
+    async def _fetch_indices_ctx():
+        if _md is None:
+            return None
         try:
-            web_ctx = await build_web_search_context(
+            indices = await _md[0]()
+            if indices and not indices.get("error"):
+                # Appended verbatim (possibly "") exactly as the legacy path
+                return build_market_context(indices)
+        except Exception as e:
+            logger.debug(f"Context building partial failure: {e}")
+        return None
+
+    async def _fetch_company_ctx():
+        if _md is None or not symbol:
+            return None
+        try:
+            price = await _md[1](symbol)
+            if price and not price.get("error"):
+                news = await _md[2](symbol, days=14)
+                return build_company_context(symbol, price, news)
+        except Exception as e:
+            logger.debug(f"Could not fetch company data for {symbol}: {e}")
+        return None
+
+    async def _fetch_web_ctx():
+        # Auto web search for latest internet information — ensures every
+        # report has the LATEST news/data from the web
+        if not (symbol or arguments):
+            return ""
+        try:
+            return await build_web_search_context(
                 symbol=symbol or "",
                 arguments=arguments,
                 skill_name=skill_name,
                 search_query=(goal_hints.get("search_query") or "") if goal_hints else "",
-            )
-            if web_ctx:
-                parts.append(web_ctx)
+            ) or ""
         except Exception as e:
             logger.debug(f"Web search context failed: {e}")
+            return ""
+
+    import asyncio
+    idx_ctx, comp_ctx, web_ctx = await asyncio.gather(
+        _fetch_indices_ctx(), _fetch_company_ctx(), _fetch_web_ctx(),
+    )
+    # Assemble sections in the same order as the sequential implementation
+    if idx_ctx is not None:
+        parts.append(idx_ctx)
+    if comp_ctx is not None:
+        parts.append(comp_ctx)
+    if web_ctx:
+        parts.append(web_ctx)
 
     # Add skill-specific domain knowledge (each of the 21 skills has its own)
     if skill_name:

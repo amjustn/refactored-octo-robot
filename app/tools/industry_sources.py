@@ -17,9 +17,8 @@ The LLM can call search_industry_chain() to get industry-specific data
 from these curated sources, instead of generic web search.
 """
 import logging
-from typing import Optional
 
-from .web_search import web_search, read_webpage, _get_client
+from .web_search import read_webpage, web_search
 
 logger = logging.getLogger("ai_berkshire.industry_sources")
 

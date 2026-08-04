@@ -3,9 +3,9 @@
 Loads skill .md prompt templates from app/skills/ directory.
 Falls back to generated prompts when .md files are missing.
 """
-import re
 from pathlib import Path
 from typing import Optional
+
 from .registry import SKILLS
 
 SKILLS_DIR = Path(__file__).parent
@@ -60,7 +60,7 @@ def _generate_fallback_prompt(skill: dict) -> str:
 """
     if is_multi:
         agents = skill.get("agents", [])
-        prompt += f"\n## 多Agent角色\n"
+        prompt += "\n## 多Agent角色\n"
         prompt += f"本分析由{len(agents)}个专业Agent并行执行，最终由Team Lead综合。\n"
 
     return prompt

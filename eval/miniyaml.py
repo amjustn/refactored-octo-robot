@@ -66,7 +66,6 @@ def loads(text: str) -> dict:
     root = {}
     # stack of (indent, container)
     stack = [(-1, root)]
-    pending_key = None  # (indent, container, key) awaiting a block value
 
     for raw_line in text.split("\n"):
         if not raw_line.strip() or raw_line.strip().startswith("#"):
@@ -110,7 +109,6 @@ def loads(text: str) -> dict:
 
 def load(path: str) -> dict:
     """Parse a golden-case file, tolerating dict/list ambiguity for '- ' blocks."""
-    import re
 
     text = open(path, encoding="utf-8").read()
     # Pre-pass: find keys whose block is a list (next non-empty line starts with '- ')

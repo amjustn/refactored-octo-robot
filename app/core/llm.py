@@ -8,9 +8,11 @@ import asyncio
 import json
 import logging
 from contextvars import ContextVar
-from typing import AsyncGenerator, Optional, Callable, Awaitable
+from typing import AsyncGenerator, Awaitable, Callable, Optional
+
 from openai import AsyncOpenAI
-from .config import LLM_BASE_URL, LLM_API_KEY, LLM_MODEL, AGENT_TIMEOUT
+
+from .config import AGENT_TIMEOUT, LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
 
 logger = logging.getLogger("ai_berkshire.llm")
 
@@ -139,7 +141,7 @@ async def _create_completion(client, **kwargs):
                 kwargs.pop("temperature", None)
                 continue
             if "stream_options" in kwargs and ("stream_options" in msg or "include_usage" in msg):
-                logger.info(f"Endpoint rejects stream_options, retrying without it (token stats may be incomplete)")
+                logger.info("Endpoint rejects stream_options, retrying without it (token stats may be incomplete)")
                 kwargs.pop("stream_options", None)
                 continue
             raise
@@ -185,20 +187,27 @@ async def chat_complete(
     model: str = None,
     temperature: float = 0.7,
     llm_config: dict = None,
+    history: list = None,
 ) -> str:
-    """Complete a chat (non-streaming) with automatic retry."""
+    """Complete a chat (non-streaming) with automatic retry.
+
+    Optional ``history`` is a list of prior {"role", "content"} turns
+    inserted between the system prompt and the final user message.
+    """
     cfg_base, cfg_key, cfg_model = resolve_llm_config(llm_config)
     client = get_client(cfg_base, cfg_key)
     model = cfg_model or model or LLM_MODEL
+
+    messages = [{"role": "system", "content": system_prompt}]
+    if history:
+        messages.extend(history)
+    messages.append({"role": "user", "content": user_message})
 
     async def _create():
         return await _create_completion(
             client,
             model=model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_message},
-            ],
+            messages=messages,
             temperature=temperature,
         )
 

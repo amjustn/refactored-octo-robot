@@ -1,10 +1,10 @@
 from .financial_rigor import (
-    verify_market_cap,
-    verify_valuation,
+    benford,
+    calc,
     cross_validate,
     three_scenario,
-    calc,
-    benford,
+    verify_market_cap,
+    verify_valuation,
 )
 
 # Market data tools — lazy import to avoid hard dependency on akshare/yfinance
@@ -12,12 +12,12 @@ from .financial_rigor import (
 # they just won't be able to fetch live data.
 try:
     from .market_data import (
-        get_stock_price,
-        get_financial_data,
         fetch_company_news,
         fetch_market_indices,
-        search_company,
         get_current_date_context,
+        get_financial_data,
+        get_stock_price,
+        search_company,
     )
 except ImportError:
     get_stock_price = None
@@ -29,12 +29,12 @@ except ImportError:
 
 try:
     from .knowledge_updater import (
-        update_master_knowledge,
-        update_all_masters,
-        get_master_knowledge,
         get_all_knowledge,
-        get_knowledge_summary_for_prompt,
         get_knowledge_status,
+        get_knowledge_summary_for_prompt,
+        get_master_knowledge,
+        update_all_masters,
+        update_master_knowledge,
     )
 except ImportError:
     update_master_knowledge = None

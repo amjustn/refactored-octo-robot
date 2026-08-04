@@ -14,13 +14,12 @@ Knowledge base is stored as JSON files in data/knowledge/.
 import asyncio
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 from ..core.config import BASE_DIR
-from ..core.llm import chat_complete
 from ..core.data_cache import DataCache
+from ..core.llm import chat_complete
 
 logger = logging.getLogger("ai_berkshire.knowledge")
 

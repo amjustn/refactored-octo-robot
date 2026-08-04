@@ -11,21 +11,47 @@ name / stock code), an LLM call extracts:
 Short inputs (< MIN_GOAL_LEN chars) keep the legacy behavior — no LLM call.
 Every failure mode (timeout, LLM error, unparseable JSON, junk values)
 degrades gracefully to None so context building is never broken.
+
+Successful parses are cached (SQLite DataCache, category "goal_parse",
+TTL GOAL_PARSE_CACHE_TTL) keyed by the sha256 of the whitespace-normalized
+goal text plus the model name. Failures/None results are never cached, and
+any cache error is swallowed so parsing is never broken by the cache.
 """
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
 from typing import Optional
 
+from .config import GOAL_PARSE_CACHE_TTL, LLM_MODEL
 from .llm import chat_complete
 
 logger = logging.getLogger("ai_berkshire.goal_parser")
 
 MIN_GOAL_LEN = 25          # shorter inputs keep legacy symbol-extraction behavior
 PARSE_TIMEOUT_S = 20.0     # hard cap on the LLM parse call
+
+_CACHE_CATEGORY = "goal_parse"
+_cache = None              # lazy DataCache singleton
+
+
+def _get_cache():
+    """Lazy DataCache so importing this module never touches sqlite."""
+    global _cache
+    if _cache is None:
+        from .data_cache import DataCache
+        _cache = DataCache()
+    return _cache
+
+
+def _cache_key(goal: str, llm_config: Optional[dict]) -> str:
+    """sha256 of the whitespace-normalized goal + model name (never the api key)."""
+    normalized = " ".join(goal.split())
+    model = ((llm_config or {}).get("model") or "").strip() or LLM_MODEL
+    return hashlib.sha256(f"{model}\n{normalized}".encode("utf-8")).hexdigest()
 
 # Same shape as the legacy regex in core.context.build_full_context, plus
 # HK numeric tickers (0700.HK / 9988.HK are 1-5 digits, not 6)
@@ -104,6 +130,19 @@ async def parse_goal(arguments: str, llm_config: Optional[dict] = None) -> Optio
     if len(goal) < MIN_GOAL_LEN:
         return None
 
+    # Cache lookup — sync sqlite offloaded to a thread; any cache error
+    # degrades to a plain miss so parsing is never broken by the cache.
+    key = _cache_key(goal, llm_config)
+    try:
+        cached = await asyncio.to_thread(
+            _get_cache().get, _CACHE_CATEGORY, key, max_age_seconds=GOAL_PARSE_CACHE_TTL
+        )
+        if isinstance(cached, dict):
+            logger.debug("parse_goal: cache hit")
+            return cached
+    except Exception as e:
+        logger.debug(f"parse_goal: cache get failed: {e}")
+
     try:
         raw = await asyncio.wait_for(
             chat_complete(
@@ -136,6 +175,12 @@ async def parse_goal(arguments: str, llm_config: Optional[dict] = None) -> Optio
 
     hints = _sanitize(data)
     if hints:
+        # Only successful parses are cached; failures/None stay uncached
+        # so a retry always reaches the LLM again.
+        try:
+            await asyncio.to_thread(_get_cache().set, _CACHE_CATEGORY, key, hints)
+        except Exception as e:
+            logger.debug(f"parse_goal: cache set failed: {e}")
         logger.info(
             f"parse_goal: symbol={hints.get('symbol')} company={hints.get('company')} "
             f"query={hints.get('search_query')}"

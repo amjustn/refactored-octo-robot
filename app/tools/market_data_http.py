@@ -81,14 +81,14 @@ async def _get_dashboard_token() -> Optional[str]:
 
 async def fetch_a_share_price_dashboard(symbol: str) -> Optional[dict]:
     """Fetch A-share real-time price via QuantTrader Dashboard (multi-source rotator).
-    
+
     Falls through to Tencent/Sina if dashboard is unavailable.
     Dashboard rotator cycles: sina → tencent → eastmoney with cross-validation.
     """
     token = await _get_dashboard_token()
     if not token:
         return None
-    
+
     code = symbol.replace('.SH', '').replace('.SZ', '').replace('.BJ', '')
     try:
         client = await get_client()
@@ -100,7 +100,7 @@ async def fetch_a_share_price_dashboard(symbol: str) -> Optional[dict]:
         data = resp.json()
         if data.get("code") != 0 or not data.get("data"):
             return None
-        
+
         item = data["data"][0]
         return {
             "symbol": symbol,

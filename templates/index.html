@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>AI Berkshire Web - 价值投资研究工作站</title>
 <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
-<link rel="stylesheet" href="/static/css/style.css?v=20260804a">
+<link rel="stylesheet" href="/static/css/style.css?v=20260804b">
 </head>
 <body>
 <div id="toast-container"></div>
@@ -32,6 +32,8 @@
     </nav>
     <div class="sidebar-footer">
       <button class="btn-history" onclick="showHistory()">历史报告</button>
+      <button class="btn-history" onclick="showDecisions()">历史决策</button>
+      <button class="btn-history" onclick="showCosts()">成本统计</button>
       <button class="btn-history btn-llm-settings" onclick="openLlmModal()">⚙ 模型设置</button>
       <p class="powered" id="powered-by">Powered by DeepSeek</p>
     </div>
@@ -112,10 +114,14 @@
       <div id="follow-up-area" style="display:none">
         <div class="follow-up-header">🔍 追问深挖</div>
         <div id="follow-up-qa"></div>
+        <div id="followup-file-preview" class="file-preview" style="display:none"></div>
         <div class="follow-up-input">
+          <input type="file" id="followup-file-input" accept="image/*,.pdf,.xlsx,.xls,.csv,.txt,.docx,.doc,.pptx,.ppt,.md,.json" multiple onchange="handleFollowupFileUpload(this.files)" style="display:none">
+          <button type="button" id="btn-followup-upload" class="btn-upload" title="附加参考资料" onclick="document.getElementById('followup-file-input').click()">📎</button>
           <input type="text" id="follow-up-field" placeholder="对这份报告进一步提问，AI会基于报告内容回答..." onkeydown="if(event.key==='Enter')submitFollowUp()">
           <button id="btn-follow-up" onclick="submitFollowUp()">发送</button>
         </div>
+        <span class="file-status" id="followup-file-status"></span>
       </div>
     </div>
 
@@ -130,6 +136,18 @@
       </div>
     </div>
 
+    <div id="decisions-area" style="display:none">
+      <div class="history-card">
+        <div class="costs-header">
+          <button onclick="closeDecisions()" class="btn-back">← 返回</button>
+          <h2>历史决策</h2>
+          <span id="decisions-summary" class="decisions-summary"></span>
+        </div>
+        <p class="decisions-hint">每次研究完成后自动记录结论与关键假设；下次分析同股票时会自动注入上下文验证旧假设。</p>
+        <div id="decisions-list"></div>
+      </div>
+    </div>
+
     <div id="compare-area" style="display:none">
       <div class="result-toolbar">
         <button onclick="closeCompare()">← 返回列表</button>
@@ -138,6 +156,30 @@
       <div class="compare-panes">
         <div class="compare-pane"><div id="compare-left" class="markdown-body"></div></div>
         <div class="compare-pane"><div id="compare-right" class="markdown-body"></div></div>
+      </div>
+    </div>
+
+    <div id="costs-area" style="display:none">
+      <div class="history-card costs-card">
+        <div class="costs-header">
+          <button onclick="closeCosts()" class="btn-back">← 返回</button>
+          <h2>成本统计</h2>
+          <div class="costs-days" id="costs-days">
+            <button data-days="7" onclick="setCostDays(7)">近7天</button>
+            <button data-days="30" class="active" onclick="setCostDays(30)">近30天</button>
+            <button data-days="90" onclick="setCostDays(90)">近90天</button>
+          </div>
+        </div>
+        <div class="cost-cards">
+          <div class="cost-card"><div class="cost-card-label">总运行次数</div><div class="cost-card-value" id="cost-total-runs">-</div></div>
+          <div class="cost-card"><div class="cost-card-label">总Token</div><div class="cost-card-value" id="cost-total-tokens">-</div></div>
+          <div class="cost-card"><div class="cost-card-label">总费用</div><div class="cost-card-value" id="cost-total-yuan">-</div></div>
+          <div class="cost-card"><div class="cost-card-label">平均耗时</div><div class="cost-card-value" id="cost-avg-duration">-</div></div>
+        </div>
+        <h3 class="costs-section-title">每日费用（¥）</h3>
+        <div id="cost-chart-daily" class="cost-chart"></div>
+        <h3 class="costs-section-title">按技能费用（¥）</h3>
+        <div id="cost-chart-skill" class="cost-chart"></div>
       </div>
     </div>
 
@@ -214,6 +256,6 @@
 <script src="/static/js/marked.min.js"></script>
 <script src="/static/js/echarts.min.js"></script>
 <script src="https://cdn.bootcdn.net/ajax/libs/dompurify/3.0.6/purify.min.js"></script>
-<script src="/static/js/app.js?v=20260804a"></script>
+<script src="/static/js/app.js?v=20260804b"></script>
 </body>
 </html>

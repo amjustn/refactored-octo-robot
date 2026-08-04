@@ -198,8 +198,8 @@ def _calc_factors(bs, code: str) -> dict[str, float]:
         pass
 
     # Normalize to percentile scores
+    # For percentile we'd need cross-sectional data; use absolute scale instead.
     normed = {}
-    all_codes = [code]  # For percentile, we'd need cross-sectional. Use absolute scale instead.
     for fkey, fdef in FACTOR_DEFS.items():
         if fkey in factors:
             val = factors[fkey]

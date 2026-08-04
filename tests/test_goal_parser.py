@@ -7,10 +7,19 @@ tests/test_bug_fixes_round2.py).
 import asyncio
 import json
 
+import pytest
+
 from app.core import goal_parser
+from app.core.data_cache import DataCache
 from app.core.goal_parser import parse_goal
 
 LONG_GOAL = "请帮我深入分析腾讯控股2025年的护城河变化，重点关注游戏和广告业务的竞争格局"
+
+
+@pytest.fixture(autouse=True)
+def _isolated_cache(monkeypatch, tmp_path):
+    """Point parse_goal's cache at a throwaway db so tests never touch the real one."""
+    monkeypatch.setattr(goal_parser, "_cache", DataCache(tmp_path / "goal_parse_test.db"))
 VALID_PAYLOAD = {
     "symbol": "0700.HK",
     "company": "腾讯控股",

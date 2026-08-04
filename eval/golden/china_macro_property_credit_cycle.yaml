@@ -1,0 +1,15 @@
+# 长文本自由形式 goal：arguments 为完整自然语言段落（>25 字符），
+# 走 goal_parser 路径（stub 模式下 parse_goal 被补丁为返回 None，优雅回退）。
+skill: china-macro-analysis
+arguments: "请分析2026年中国地产与信用周期的相互作用：地产销售能否止跌回稳，社融与M1能否进入扩张通道，政策利率还有多少下调空间，对A股、债券与人民币汇率的配置含义分别是什么"
+mock_date: "2026-07-31"
+expect:
+  sections: ["核心判断", "政策反应函数", "周期定位", "情景树", "触发点", "风险"]
+  min_chars: 400
+  max_duration_s: 600
+  must_cite: ["社融增速"]
+  rubric_focus:
+    - 政策触发阈值的可检验性
+    - 周期定位的证据链完整性
+  data_points:
+    社融增速: 8.5
