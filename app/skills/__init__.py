@@ -87,8 +87,13 @@ def load_skill_prompt(name: str) -> str:
     return prompt
 
 
-def build_user_prompt(skill_name: str, arguments: str) -> str:
-    """Build the user-facing prompt from skill template + user args."""
+def build_user_prompt(skill_name: str, arguments: str, attachments: str = "") -> str:
+    """Build the user-facing prompt from skill template + user args.
+
+    attachments: extracted text from user-uploaded files. Kept separate
+    from arguments (never used for context building); appended as a
+    dedicated reference section when non-empty.
+    """
     skill = get_skill(skill_name)
     if not skill:
         raise ValueError(f"Unknown skill: {skill_name}")
@@ -96,6 +101,12 @@ def build_user_prompt(skill_name: str, arguments: str) -> str:
     # Replace $ARGUMENTS placeholder
     skill_prompt = load_skill_prompt(skill_name)
     skill_prompt = skill_prompt.replace("$ARGUMENTS", arguments)
+
+    attachment_block = ""
+    if attachments:
+        attachment_block = (
+            f"\n\n## 用户上传的参考资料\n{attachments}\n\n请将上述资料作为分析的重要依据。"
+        )
 
     return f"""请使用以下研究框架进行分析：
 
@@ -105,6 +116,6 @@ def build_user_prompt(skill_name: str, arguments: str) -> str:
 
 ## 用户输入
 {arguments}
-
+{attachment_block}
 请严格按照上述框架执行分析，输出结构完整的投研报告。
 """

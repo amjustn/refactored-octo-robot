@@ -328,6 +328,8 @@ TOOL_ENABLED_AGENTS = {
     "company-event-scout", "industry-peer-analyst",
     "business-interpreter", "financial-auditor", "competition-analyst", "risk-hunter",
     "researcher",
+    "macro-institutional-economist", "macro-forecaster", "macro-strategist",
+    "cn-policy-framework", "cn-data-cycle", "cn-fx-external", "cn-structure-trend",
 }
 
 
@@ -685,11 +687,13 @@ class ToolGateway:
                 circuit="open", error="circuit open", fallback_depth=depth,
             )
 
-        # Cache
+        # Cache (sqlite I/O offloaded so the event loop is never stalled)
         cache_key = self._cache_key(tool, args)
         if tdef.cache_ttl:
             try:
-                cached = self._get_cache().get("gateway", cache_key, max_age_seconds=tdef.cache_ttl)
+                cached = await asyncio.to_thread(
+                    self._get_cache().get, "gateway", cache_key, max_age_seconds=tdef.cache_ttl,
+                )
                 if cached is not None:
                     return ToolResult(tool, True, cached if isinstance(cached, str) else json.dumps(cached, ensure_ascii=False),
                                       source="cache", cache_hit=True, fallback_depth=depth)
@@ -721,7 +725,7 @@ class ToolGateway:
                     breaker.record_success()
                     if tdef.cache_ttl:
                         try:
-                            self._get_cache().set("gateway", cache_key, content)
+                            await asyncio.to_thread(self._get_cache().set, "gateway", cache_key, content)
                         except Exception:
                             pass
                     return ToolResult(tool, True, content, source=source, latency_ms=latency, fallback_depth=depth)

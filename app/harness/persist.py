@@ -6,9 +6,13 @@
   Old rows default to 0 / '[]'.
 - Cost is computed from a per-model price list (constants below, adjust
   to match the actual provider bill).
+- Sync methods do blocking sqlite/file I/O; async callers (harness run
+  loop, agent runner) must use the ``a*`` wrappers, which offload to a
+  thread via ``asyncio.to_thread`` so the event loop is never stalled.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -104,6 +108,34 @@ class Repository:
     def mark_running_as_interrupted(self):
         return self.store.mark_running_as_interrupted()
 
+    # ---------- artifacts (intermediate agent results) ----------
+
+    def save_artifact(self, task_id: str, agent_name: str, content: str):
+        self.store.save_artifact(task_id, agent_name, content)
+
+    def get_artifacts(self, task_id: str) -> list[tuple[str, str]]:
+        return self.store.get_artifacts(task_id)
+
+    # ---------- async wrappers (offload blocking I/O from the loop) ----------
+
+    async def asave_task(self, status: ResearchStatus, arguments: str = ""):
+        await asyncio.to_thread(self.save_task, status, arguments)
+
+    async def aget_task(self, task_id: str) -> Optional[ResearchStatus]:
+        return await asyncio.to_thread(self.get_task, task_id)
+
+    async def asave_billing(self, *args, **kwargs) -> dict:
+        return await asyncio.to_thread(self.save_billing, *args, **kwargs)
+
+    async def asave_report(self, *args, **kwargs) -> Path:
+        return await asyncio.to_thread(self.save_report, *args, **kwargs)
+
+    async def asave_artifact(self, task_id: str, agent_name: str, content: str):
+        await asyncio.to_thread(self.save_artifact, task_id, agent_name, content)
+
+    async def aget_artifacts(self, task_id: str) -> list[tuple[str, str]]:
+        return await asyncio.to_thread(self.get_artifacts, task_id)
+
     # ---------- billing ----------
 
     def save_billing(
@@ -172,8 +204,13 @@ class Repository:
         report: str,
         duration_seconds: float = 0,
         tokens: Optional[dict] = None,
+        partial: bool = False,
     ) -> Path:
-        """Save report markdown + a metadata sidecar (.meta.json)."""
+        """Save report markdown + a metadata sidecar (.meta.json).
+
+        partial=True marks the report as an incomplete-run artifact dump
+        (cancelled/failed task); listings surface it via meta["partial"].
+        """
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         safe_skill = _sanitize_filename(skill_name)
         report_path = REPORTS_DIR / f"{safe_skill}_{timestamp}.md"
@@ -185,6 +222,8 @@ class Repository:
             "tokens": tokens or {},
             "created_at": datetime.now().isoformat(),
         }
+        if partial:
+            meta["partial"] = True
         try:
             report_path.with_suffix(".meta.json").write_text(
                 json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"

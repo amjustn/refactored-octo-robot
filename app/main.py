@@ -78,16 +78,19 @@ MANUAL_HTML = """<!DOCTYPE html>
 <tr><th>技能名</th><th>显示名</th><th>输入</th><th>说明</th></tr>
 <tr><td><code>investment-team</code></td><td>多Agent投研团队<span class="tag">4A</span></td><td>公司名/代码</td><td>★推荐★ 商业模式/财务/护城河/估值 4Agent并行</td></tr>
 <tr><td><code>investment-research</code></td><td>四大师综合分析</td><td>公司名/代码</td><td>巴菲特+芒格+段永平+李录 四大视角</td></tr>
+<tr><td><code>dyp-ask</code></td><td>段永平问答</td><td>投资问题</td><td>以段永平思维框架回答投资问题</td></tr>
 <tr><td><code>investment-checklist</code></td><td>巴菲特Checklist</td><td>多公司</td><td>六关快速筛选，支持多公司对比</td></tr>
 <tr><td><code>management-deep-dive</code></td><td>管理层深研</td><td>管理层名 公司</td><td>履历/能力圈/诚信/资本配置 全景评估（输入公司名即可）</td></tr>
 <tr><td><code>private-company-research</code></td><td>未上市公司研究</td><td>公司名</td><td>侦探式公开信息挖掘</td></tr>
 <tr><td><code>deep-company-series</code></td><td>深度系列长文</td><td>公司名</td><td>8篇系列专题（~12万字），逐篇生成</td></tr>
+<tr><td><code>wechat-article</code></td><td>公众号文章<span class="tag">3A</span></td><td>主题</td><td>3Agent并行生成公众号风格长文</td></tr>
 </table>
 
 <h3>财报分析</h3>
 <table>
 <tr><td><code>earnings-review</code></td><td>财报精读</td><td>公司名 季度</td><td>单Agent深度解读，营收/利润/现金流拆解</td></tr>
 <tr><td><code>earnings-team</code></td><td>财报精读团队<span class="tag">6A</span></td><td>公司名 季度</td><td>6Agent并行 + 首席审稿，全面覆盖</td></tr>
+<tr><td><code>financial-data</code></td><td>财务数据规范</td><td>股票代码</td><td>交叉验证的财务数据提取</td></tr>
 </table>
 
 <h3>行业筛选</h3>
@@ -103,13 +106,6 @@ MANUAL_HTML = """<!DOCTYPE html>
 <tr><td><code>portfolio-review</code></td><td>组合审视</td><td>持仓清单</td><td>仓位体检 + 调仓建议</td></tr>
 <tr><td><code>thesis-tracker</code></td><td>持仓评估</td><td>公司名</td><td>持仓健康度评估：假设检查+红线触发+买卖信号</td></tr>
 <tr><td><code>news-pulse</code></td><td>股价异动归因<span class="tag">4A</span></td><td>公司名 [涨跌]</td><td>4Agent并行归因，信息不实时立即报错</td></tr>
-</table>
-
-<h3>思维工具</h3>
-<table>
-<tr><td><code>dyp-ask</code></td><td>段永平问答</td><td>投资问题</td><td>以段永平思维框架回答投资问题</td></tr>
-<tr><td><code>financial-data</code></td><td>财务数据规范</td><td>股票代码</td><td>交叉验证的财务数据提取</td></tr>
-<tr><td><code>wechat-article</code></td><td>公众号文章<span class="tag">3A</span></td><td>主题</td><td>3Agent并行生成公众号风格长文</td></tr>
 </table>
 
 <h3>日报</h3>
@@ -428,8 +424,8 @@ async def manual():
 
 @app.get("/", response_class=HTMLResponse)
 async def index():
-    """Redirect to manual — 每次打开先看使用手册"""
-    return RedirectResponse(url="/manual", status_code=302)
+    """Go directly to the research workstation."""
+    return RedirectResponse(url="/app", status_code=302)
 
 
 @app.get("/app", response_class=HTMLResponse)
@@ -570,6 +566,50 @@ async def api_web_search(q: str, max_results: int = 10):
     from .tools.web_search import web_search
     results = await web_search(q, max_results=max_results)
     return {"query": q, "results": results}
+
+
+# ── P6: Factor screening ────────────────────────────────────────
+
+@app.get("/api/screen/factors")
+async def api_screen_factors(
+    categories: str = "value,quality,momentum,growth",
+    top_n: int = 20,
+):
+    """P6: Screen A-share stocks using multi-factor scoring.
+
+    categories: comma-separated list of factor categories
+    top_n: number of top-ranked stocks to return
+    """
+    from .tools.factor_screen import screen_stocks, FACTOR_DEFS, CATEGORY_LABELS
+
+    cat_list = [c.strip() for c in categories.split(",") if c.strip()]
+    try:
+        results = screen_stocks(categories=cat_list, top_n=min(top_n, 50))
+    except Exception as e:
+        logger.error(f"Factor screening failed: {e}", exc_info=True)
+        return {
+            "status": "error",
+            "message": f"因子筛选失败: {str(e)}",
+            "results": [],
+        }
+
+    # Format for frontend
+    return {
+        "status": "ok",
+        "categories": {c: CATEGORY_LABELS.get(c, c) for c in cat_list},
+        "factor_count": len(FACTOR_DEFS),
+        "total_factors": len(FACTOR_DEFS),
+        "results": [
+            {
+                "rank": r.rank,
+                "code": r.code,
+                "name": r.name,
+                "score": round(r.score, 1),
+                "factors": r.factors,
+            }
+            for r in results
+        ],
+    }
 
 
 @app.get("/api/data/read-url")
@@ -766,6 +806,7 @@ async def api_start_research(request: "Request", req: ResearchRequest):
     spec = TaskSpec.build(
         skill, req.arguments, llm_override=llm_config,
         caller="http", stream=False,
+        attachments=req.attachments or "",
     )
     result = await harness_run(spec)
 
@@ -862,15 +903,27 @@ async def ws_research(websocket: WebSocket, skill_name: str):
     try:
         req = json.loads(data)
         arguments = req.get("arguments", "")
+        attachments = (req.get("attachments", "") or "")[:30000]
         token = req.get("token", "")
         llm_config = _validate_llm_config(req.get("llm_config"))
     except json.JSONDecodeError:
         arguments = data
+        attachments = ""
         token = ""
         llm_config = None
 
     if not _ws_verify_jwt(token):
         await websocket.send_json({"type": "error", "message": "Unauthorized"})
+        try:
+            await websocket.close(code=1008)
+        except Exception:
+            pass
+        return
+
+    # Same per-IP rate limit as /api/research — WS runs cost the same LLM budget.
+    client_ip = websocket.client.host if websocket.client else "unknown"
+    if not _check_rate_limit(client_ip):
+        await websocket.send_json({"type": "error", "message": "请求过于频繁，请稍后再试"})
         try:
             await websocket.close(code=1008)
         except Exception:
@@ -888,6 +941,7 @@ async def ws_research(websocket: WebSocket, skill_name: str):
 
     spec = TaskSpec.build(
         skill, arguments, llm_override=llm_config, caller="ws", stream=True,
+        attachments=attachments,
     )
 
     # Subscribe BEFORE run() so no events are lost; forward bus → websocket.
@@ -1007,6 +1061,11 @@ async def api_upload_file(request: "Request"):
         content_type = getattr(f, "content_type", "") or ""
         data = await f.read()
         item = {"filename": filename, "type": content_type}
+
+        if len(data) > 20 * 1024 * 1024:
+            item["error"] = "文件超过20MB限制"
+            results.append(item)
+            continue
         
         try:
             if content_type.startswith("image/"):
@@ -1027,12 +1086,28 @@ async def api_upload_file(request: "Request"):
                 doc.close()
                 item["text"] = "\n".join(parts)[:50000]
                 item["method"] = "pdf-extract"
-                if len(item["text"]) > 500:
+                if len(item["text"].strip()) < 100:
+                    # Likely a scanned PDF (no text layer) → try vision OCR fallback
+                    try:
+                        ocr_text = await _ocr_scanned_pdf(data, form)
+                        if ocr_text is None:
+                            item.pop("text", None)
+                            item.pop("method", None)
+                            item["error"] = "该PDF为扫描件（无文字层），需要配置视觉模型才能识别"
+                        else:
+                            item["text"] = ocr_text
+                            item["method"] = "pdf-vision-ocr"
+                    except Exception as oe:
+                        item.pop("text", None)
+                        item.pop("method", None)
+                        item["error"] = f"扫描件识别失败: {str(oe)[:200]}"
+                        logger.error(f"Scanned PDF OCR failed ({filename}): {oe}", exc_info=True)
+                if item.get("text") and len(item["text"]) > 500:
                     try:
                         item["summary"] = await _summarize_data(item["text"], filename, form)
                     except Exception as se:
                         logger.warning(f"Summarization failed for {filename}: {se}")
-            
+
             elif filename.lower().endswith((".xlsx", ".xls")):
                 import openpyxl
                 wb = openpyxl.load_workbook(io.BytesIO(data), data_only=True)
@@ -1047,6 +1122,49 @@ async def api_upload_file(request: "Request"):
                 wb.close()
                 item["text"] = "\n".join(parts)[:50000]
                 item["method"] = "excel-extract"
+            
+            elif filename.lower().endswith(".docx"):
+                from docx import Document
+                docx_doc = Document(io.BytesIO(data))
+                parts = []
+                for para in docx_doc.paragraphs:
+                    if para.text.strip():
+                        parts.append(para.text)
+                for table in docx_doc.tables:
+                    for row in table.rows:
+                        parts.append("\t".join(cell.text for cell in row.cells))
+                item["text"] = "\n".join(parts)[:50000]
+                item["method"] = "docx-extract"
+                if len(item["text"]) > 500:
+                    try:
+                        item["summary"] = await _summarize_data(item["text"], filename, form)
+                    except Exception as se:
+                        logger.warning(f"Summarization failed for {filename}: {se}")
+            
+            elif filename.lower().endswith(".pptx"):
+                from pptx import Presentation
+                prs = Presentation(io.BytesIO(data))
+                parts = []
+                for slide_idx, slide in enumerate(prs.slides, 1):
+                    parts.append(f"## Slide {slide_idx}")
+                    for shape in slide.shapes:
+                        if shape.has_text_frame:
+                            shape_text = shape.text_frame.text.strip()
+                            if shape_text:
+                                parts.append(shape_text)
+                        if shape.has_table:
+                            for row in shape.table.rows:
+                                parts.append("\t".join(cell.text for cell in row.cells))
+                item["text"] = "\n".join(parts)[:50000]
+                item["method"] = "pptx-extract"
+                if len(item["text"]) > 500:
+                    try:
+                        item["summary"] = await _summarize_data(item["text"], filename, form)
+                    except Exception as se:
+                        logger.warning(f"Summarization failed for {filename}: {se}")
+            
+            elif filename.lower().endswith((".doc", ".ppt")):
+                item["error"] = "旧版 .doc/.ppt 格式暂不支持，请另存为 .docx/.pptx 后重新上传"
             
             elif filename.lower().endswith((".csv", ".txt", ".md", ".json")):
                 raw_text = data.decode("utf-8", errors="replace")[:50000]
@@ -1124,6 +1242,48 @@ async def _extract_image_text(b64_data: str, content_type: str, vision_model: st
         return f"[图片识别失败: {_err}]"
 
 
+async def _ocr_scanned_pdf(data: bytes, form) -> "str | None":
+    """OCR a scanned PDF (no text layer) via the vision model.
+
+    Rasterizes up to the first 5 pages at ~150 dpi and runs the same
+    vision extraction used for image uploads on each page. Returns the
+    concatenated page text (capped at 50000 chars), or None when no
+    usable vision model is configured.
+    """
+    import base64
+    import fitz
+    from .core.llm import resolve_llm_config
+
+    # Same vision-config resolution as _extract_image_text
+    vision_model = form.get("vision_model", "") or None
+    vision_base_url = form.get("vision_base_url", "") or None
+    vision_api_key = form.get("vision_api_key", "") or None
+    if vision_model:
+        base_url = vision_base_url or resolve_llm_config(None)[0]
+        api_key = vision_api_key or resolve_llm_config(None)[1]
+        model = vision_model
+    else:
+        base_url, api_key, model = resolve_llm_config(None)
+    _NON_VISION = {'deepseek', 'kimi', 'hunyuan'}
+    _model_lower = (model or '').lower()
+    if not vision_model and (not model or any(kw in _model_lower for kw in _NON_VISION)):
+        return None
+
+    doc = fitz.open(stream=data, filetype="pdf")
+    parts = []
+    try:
+        for page_idx, page in enumerate(doc):
+            if page_idx >= 5:
+                break
+            pix = page.get_pixmap(dpi=150)
+            b64 = base64.b64encode(pix.tobytes("png")).decode()
+            page_text = await _extract_image_text(b64, "image/png", model, base_url, api_key)
+            parts.append(f"## 第 {page_idx + 1} 页\n{page_text}")
+    finally:
+        doc.close()
+    return "\n\n".join(parts)[:50000]
+
+
 # ==================== Reports & Tasks ====================
 
 @app.get("/api/reports")
@@ -1192,6 +1352,65 @@ async def api_delete_report(filename: str):
     if meta_path.exists():
         meta_path.unlink()
     return {"deleted": safe_name}
+
+
+# ── P4: PDF export ──────────────────────────────────────────────
+
+_PDF_CSS = """
+@page { size: A4; margin: 2cm 2.2cm; @bottom-center { content: counter(page); font-size: 0.7rem; color: #999; } }
+body { font-family: "Noto Serif SC", "Source Han Serif SC", "SimSun", serif; font-size: 11pt; line-height: 1.8; color: #333; }
+h1 { font-size: 1.5rem; border-bottom: 1px solid #ccc; padding-bottom: 8px; }
+h2 { font-size: 1.2rem; color: #6b8e6b; margin-top: 24px; }
+h3 { font-size: 1rem; color: #c4a77d; }
+table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 9pt; }
+th, td { border: 1px solid #ddd; padding: 6px 10px; text-align: left; }
+th { background: #f5f5f5; }
+pre { background: #f8f8f8; padding: 10px; border-radius: 4px; font-size: 9pt; overflow-x: auto; }
+code { background: #f0f0f0; padding: 1px 4px; font-size: 0.9em; }
+blockquote { border-left: 3px solid #6b8e6b; padding-left: 12px; color: #666; margin: 12px 0; }
+.ai-disclaimer { border-top: 1px solid #ddd; margin-top: 24px; padding-top: 8px; font-size: 9pt; color: #999; text-align: center; }
+"""
+
+
+@app.post("/api/export/pdf")
+async def api_export_pdf(request: Request):
+    """P4: Convert markdown report to PDF with Chinese font support."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    markdown_text = body.get("markdown", "")
+    if not markdown_text or len(markdown_text) < 50:
+        raise HTTPException(status_code=400, detail="Markdown content too short")
+
+    try:
+        import markdown as _md_lib
+        html_body = _md_lib.markdown(
+            markdown_text,
+            extensions=["tables", "fenced_code", "codehilite", "toc"],
+        )
+    except ImportError:
+        # Fallback: basic conversion
+        html_body = markdown_text.replace("\n", "<br>")
+
+    html = f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><style>{_PDF_CSS}</style></head>
+<body>{html_body}</body>
+</html>"""
+
+    try:
+        from weasyprint import HTML
+        pdf_bytes = HTML(string=html).write_pdf()
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={"Content-Disposition": "inline; filename=report.pdf"},
+        )
+    except Exception as e:
+        logger.error(f"PDF generation failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"PDF generation failed: {str(e)}")
 
 
 @app.get("/api/task/{task_id}")

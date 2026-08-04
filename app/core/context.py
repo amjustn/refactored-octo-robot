@@ -146,7 +146,7 @@ def build_knowledge_context() -> str:
     return get_knowledge_summary_for_prompt()
 
 
-async def build_web_search_context(symbol: str = "", arguments: str = "", skill_name: str = "") -> str:
+async def build_web_search_context(symbol: str = "", arguments: str = "", skill_name: str = "", search_query: str = "") -> str:
     """Automatically search the web for latest information about the target.
 
     This is called by build_full_context() before every report generation,
@@ -173,6 +173,10 @@ async def build_web_search_context(symbol: str = "", arguments: str = "", skill_
         primary_keyword = symbol
     else:
         return ""
+
+    # Goal-parser hint: a concise search query beats the raw (possibly long) goal
+    if search_query and search_query.strip():
+        primary_keyword = search_query.strip()[:60]
 
     parts.append(f"## 网络最新信息（自动搜索）")
     parts.append(f"*搜索关键词: {primary_keyword}*")
@@ -298,11 +302,16 @@ async def build_web_search_context(symbol: str = "", arguments: str = "", skill_
     return "\n".join(parts)
 
 
-async def build_full_context(arguments: str = "", skill_name: str = "") -> str:
+async def build_full_context(arguments: str = "", skill_name: str = "", goal_hints: dict = None) -> str:
     """Build the full context string to inject into agent prompts.
 
     This combines time, market, company, skill-specific, and knowledge context.
     Tries to fetch real-time data but falls back gracefully.
+
+    goal_hints: optional output of core.goal_parser.parse_goal. When None,
+    behavior is identical to the legacy path (company map + regex on
+    arguments). When present, its symbol/company/search_query/intent steer
+    symbol resolution, web search, and the core-instruction section.
     """
     parts = [build_time_context()]
 
@@ -360,40 +369,54 @@ async def build_full_context(arguments: str = "", skill_name: str = "") -> str:
         # Strategy: 1) Check Chinese company name map 2) Regex for code patterns
         symbol = None
 
-        # First, try resolving Chinese company names (腾讯, 茅台, 拼多多, etc.)
-        resolved = _resolve_company_name(arguments.strip())
-        if resolved:
-            symbol = resolved
-        else:
-        # Look for patterns like: 600519, AAPL, 0700.HK, 002555.SZ
-            # Also try case-insensitive US tickers
-            # Exclude common false positives: Q1-Q4, AI, PE, PB, ROE, ROI, etc.
-            _FALSE_POSITIVES = {
-                "Q1", "Q2", "Q3", "Q4", "AI", "PE", "PB", "ROE", "ROI",
-                "EPS", "CEO", "CFO", "CTO", "IPO", "SPAC", "ETF", "API",
-                "GDP", "CPI", "PPI", "EBIT", "FCF", "DCA", "NAV", "AUM",
-                "YTD", "MTD", "QTD", "H1", "H2", "YOY", "MOM",
-                "IT", "HR", "PR", "US", "UK", "EU", "JP", "KR",
-                "URL", "PDF", "CSV", "HTML", "JSON", "XML",
-                # Single-letter false positives (A股, B股, H股, etc.)
-                "A", "B", "H", "T", "F", "C", "S", "P", "V", "D", "E",
-                "I", "K", "M", "N", "R", "U", "W", "X", "Y", "Z", "G", "L", "O", "J", "Q",
-                # Common financial abbreviations that could be tickers
-                "EBITDA", "CAPEX", "OPEX", "MARGIN", "CASH", "DEBT", "BOOK",
-                "SALE", "ASSET", "EBIT", "REVENUE", "PROFIT", "LOSS", "COST",
-                "BOOK", "DEEP", "GOOD", "REAL", "TICK", "BOND", "FUND",
-            }
-            symbol_match = re.search(
-                r'\b([A-Za-z]{1,6}(?:\.HK)?|\d{6}(?:\.SH|\.SZ|\.HK)?)\b',
-                arguments
-            )
-            if symbol_match:
-                candidate = symbol_match.group(1).upper()
-                # Skip common false positives (only for short purely-alpha codes)
-                if candidate in _FALSE_POSITIVES and not re.match(r'^\d{6}', candidate):
-                    pass  # Don't use this as a symbol
-                else:
-                    symbol = candidate
+        # Goal-parser hints take priority when available:
+        # validated hint symbol → company-name resolution → legacy path below
+        if goal_hints:
+            _hint_symbol = (goal_hints.get("symbol") or "").strip()
+            if _hint_symbol and re.match(
+                r'^\d{6}(\.(SH|SZ))?$|^\d{1,5}\.HK$|^[A-Za-z]{1,6}(\.HK)?$', _hint_symbol
+            ):
+                symbol = _hint_symbol
+            else:
+                _hint_company = (goal_hints.get("company") or "").strip()
+                if _hint_company:
+                    symbol = _resolve_company_name(_hint_company)
+
+        if symbol is None:
+            # First, try resolving Chinese company names (腾讯, 茅台, 拼多多, etc.)
+            resolved = _resolve_company_name(arguments.strip())
+            if resolved:
+                symbol = resolved
+            else:
+                # Look for patterns like: 600519, AAPL, 0700.HK, 002555.SZ
+                # Also try case-insensitive US tickers
+                # Exclude common false positives: Q1-Q4, AI, PE, PB, ROE, ROI, etc.
+                _FALSE_POSITIVES = {
+                    "Q1", "Q2", "Q3", "Q4", "AI", "PE", "PB", "ROE", "ROI",
+                    "EPS", "CEO", "CFO", "CTO", "IPO", "SPAC", "ETF", "API",
+                    "GDP", "CPI", "PPI", "EBIT", "FCF", "DCA", "NAV", "AUM",
+                    "YTD", "MTD", "QTD", "H1", "H2", "YOY", "MOM",
+                    "IT", "HR", "PR", "US", "UK", "EU", "JP", "KR",
+                    "URL", "PDF", "CSV", "HTML", "JSON", "XML",
+                    # Single-letter false positives (A股, B股, H股, etc.)
+                    "A", "B", "H", "T", "F", "C", "S", "P", "V", "D", "E",
+                    "I", "K", "M", "N", "R", "U", "W", "X", "Y", "Z", "G", "L", "O", "J", "Q",
+                    # Common financial abbreviations that could be tickers
+                    "EBITDA", "CAPEX", "OPEX", "MARGIN", "CASH", "DEBT", "BOOK",
+                    "SALE", "ASSET", "EBIT", "REVENUE", "PROFIT", "LOSS", "COST",
+                    "BOOK", "DEEP", "GOOD", "REAL", "TICK", "BOND", "FUND",
+                }
+                symbol_match = re.search(
+                    r'\b([A-Za-z]{1,6}(?:\.HK)?|\d{6}(?:\.SH|\.SZ|\.HK)?)\b',
+                    arguments
+                )
+                if symbol_match:
+                    candidate = symbol_match.group(1).upper()
+                    # Skip common false positives (only for short purely-alpha codes)
+                    if candidate in _FALSE_POSITIVES and not re.match(r'^\d{6}', candidate):
+                        pass  # Don't use this as a symbol
+                    else:
+                        symbol = candidate
 
         if symbol:
             try:
@@ -416,6 +439,7 @@ async def build_full_context(arguments: str = "", skill_name: str = "") -> str:
                 symbol=symbol or "",
                 arguments=arguments,
                 skill_name=skill_name,
+                search_query=(goal_hints.get("search_query") or "") if goal_hints else "",
             )
             if web_ctx:
                 parts.append(web_ctx)
@@ -455,6 +479,10 @@ async def build_full_context(arguments: str = "", skill_name: str = "") -> str:
             + "3. 禁止用旧季度/旧年份的数据拼凑成用户要求的分析。\n"
             + "4. 只有确认数据确实存在且可获取时，才进行实际分析。\n"
             + "5. 如果你的训练数据与用户指定的时间范围不一致，以用户为准并明确标注数据来源的时间。\n")
+        if goal_hints:
+            _intent = (goal_hints.get("intent") or "").strip()
+            if _intent:
+                _instr += "\n用户意图：" + _intent[:200] + "\n"
         parts.insert(1, _instr)
 
     return "\n".join(parts)

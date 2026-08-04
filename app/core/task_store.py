@@ -61,6 +61,18 @@ class TaskStore:
                     CREATE INDEX IF NOT EXISTS idx_tasks_updated
                     ON tasks(updated_at DESC)
                 """)
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS task_artifacts (
+                        task_id TEXT NOT NULL,
+                        agent_name TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        created_at REAL NOT NULL
+                    )
+                """)
+                conn.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_task_artifacts_task
+                    ON task_artifacts(task_id)
+                """)
                 conn.commit()
             finally:
                 conn.close()
@@ -132,6 +144,35 @@ class TaskStore:
                         (limit,),
                     ).fetchall()
                 return [self._row_to_status(r) for r in rows]
+            finally:
+                conn.close()
+
+    def save_artifact(self, task_id: str, agent_name: str, content: str):
+        """Persist an intermediate agent result for a task (append-only)."""
+        import time as _time
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                conn.execute(
+                    "INSERT INTO task_artifacts (task_id, agent_name, content, created_at) VALUES (?, ?, ?, ?)",
+                    (task_id, agent_name, content, _time.time()),
+                )
+                conn.commit()
+            except Exception as e:
+                logger.error(f"Failed to save artifact {task_id}/{agent_name}: {e}")
+            finally:
+                conn.close()
+
+    def get_artifacts(self, task_id: str) -> list[tuple[str, str]]:
+        """All artifacts for a task as [(agent_name, content)], oldest first."""
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                rows = conn.execute(
+                    "SELECT agent_name, content FROM task_artifacts WHERE task_id = ? ORDER BY created_at",
+                    (task_id,),
+                ).fetchall()
+                return [(row["agent_name"], row["content"]) for row in rows]
             finally:
                 conn.close()
 

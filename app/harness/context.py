@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from ..core.context import build_full_context
+from ..core.goal_parser import parse_goal
+from .decision_log import load_decisions as _load_decisions
 from .events import EventBus, EventType
 
 logger = logging.getLogger("ai_berkshire.harness.context")
@@ -110,13 +112,32 @@ class ContextBuilder:
         self.bus = bus
         self.task_id = task_id or "adhoc"
 
-    async def build(self, arguments: str, skill_name: str = "") -> ContextBundle:
-        """Build context with budget trimming + grading; emits context_ready."""
+    async def build(self, arguments: str, skill_name: str = "", llm_config: Optional[dict] = None) -> ContextBundle:
+        """Build context with budget trimming + grading; emits context_ready.
+
+        Long free-form goals are first run through the goal parser (LLM) to
+        extract symbol/company/search hints; short inputs and any parse
+        failure fall back to the legacy extraction inside build_full_context.
+        """
         raw = ""
+        goal_hints = None
         try:
-            raw = await build_full_context(arguments, skill_name=skill_name)
+            goal_hints = await parse_goal(arguments, llm_config)
+        except Exception as e:
+            logger.debug(f"ContextBuilder: goal parsing skipped: {e}")
+            goal_hints = None
+        try:
+            raw = await build_full_context(arguments, skill_name=skill_name, goal_hints=goal_hints)
         except Exception as e:
             logger.warning(f"ContextBuilder: collection failed: {e}")
+
+        # P3: inject past decision log entries for the same stock
+        try:
+            decisions = _load_decisions(arguments)
+            if decisions:
+                raw = decisions + "\n" + raw
+        except Exception as e:
+            logger.debug(f"ContextBuilder: decision log injection skipped: {e}")
 
         bundle = self._trim_and_grade(raw)
 

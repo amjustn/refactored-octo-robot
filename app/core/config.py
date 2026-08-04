@@ -36,6 +36,9 @@ MAX_PARALLEL_AGENTS = 4
 AGENT_TIMEOUT = 300  # seconds
 MAX_REPORT_LENGTH = 50000  # chars
 MAX_REPORT_AGE_DAYS = 90
+# Global cap on simultaneously running research tasks; extra runs get a
+# "busy" error immediately instead of queueing (protects the LLM budget).
+MAX_CONCURRENT_RUNS = int(os.getenv("BERKSHIRE_MAX_CONCURRENT_RUNS", "2"))
 
 # Market Data Configuration
 # Data libraries: akshare (A-shares), yfinance (US/HK stocks)

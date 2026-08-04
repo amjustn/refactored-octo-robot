@@ -115,12 +115,15 @@ document.addEventListener('DOMContentLoaded', function() {
     }
   } catch(e) {}
 
-  // Enter key to submit
+  // Enter key to submit (Shift+Enter inserts a newline)
   document.getElementById('arg-field').addEventListener('keydown', function(e) {
-    if (e.key === 'Enter') startResearch();
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      startResearch();
+    }
   });
 
-  // Input char count & hint
+  // Input char count & hint, plus textarea auto-grow
   document.getElementById('arg-field').addEventListener('input', function(e) {
     var val = e.target.value;
     var cc = document.getElementById('charCount');
@@ -132,9 +135,10 @@ document.addEventListener('DOMContentLoaded', function() {
       cc.textContent = '';
       document.getElementById('input-hint').textContent = currentSkill ? currentSkill.input_hint || '' : '';
     }
+    // Auto-grow with content, capped at ~160px
+    e.target.style.height = 'auto';
+    e.target.style.height = Math.min(e.target.scrollHeight, 160) + 'px';
   });
-
-  renderArgHistory();
 
   // Fetch server model info (supported model list, default model)
   fetch('/api/llm/default').then(function(r) { return r.json(); })
@@ -296,7 +300,7 @@ function selectSkill(name) {
   document.getElementById('skill-icon').textContent = CAT_ICONS[skill.category] || '?';
   document.getElementById('skill-desc').textContent = skill.description || '';
   document.getElementById('input-hint').textContent = skill.input_hint || '';
-  document.getElementById('arg-field').placeholder = skill.input_hint || '输入分析目标...';
+  document.getElementById('arg-field').placeholder = skill.input_hint || '描述你的分析目标...';
 
   var btn = document.getElementById('btn-research');
   btn.textContent = skill.is_multi_agent ? '启动 ' + skill.agent_count + ' Agent 并行研究' : '开始研究';
@@ -547,6 +551,7 @@ function openLlmModal() {
   document.getElementById('llm-base-url').value = (cfg && cfg.base_url) || '';
   // Keep the stored key — wiping it here silently drops the key on re-save
   document.getElementById('llm-api-key').value = (cfg && cfg.api_key) || '';
+  document.getElementById('llm-vision-model').value = (cfg && cfg.vision_model) || '';
   
 
   // Trigger UI refresh
@@ -846,8 +851,7 @@ function saveLlmConfig() {
   var model = document.getElementById('llm-model').value.trim();
   var baseUrl = document.getElementById('llm-base-url').value.trim();
   var apiKey = document.getElementById('llm-api-key').value.trim();
-
-
+  var visionModel = document.getElementById('llm-vision-model').value.trim();
 
   if (!model && preset !== 'custom') {
     showToast('请选择模型', 'error');
@@ -890,6 +894,7 @@ function saveLlmConfig() {
   if (model) cfg.model = model;
   if (baseUrl) cfg.base_url = baseUrl;
   if (apiKey) cfg.api_key = apiKey;
+  if (visionModel) cfg.vision_model = visionModel;
   
   // Per-agent model: switch + mapping
   if (perAgentEnabled) {
@@ -910,6 +915,7 @@ function resetLlmConfig() {
   document.getElementById('llm-model-select').innerHTML = '<option value="">请选择模型</option>';
   document.getElementById('llm-base-url').value = '';
   document.getElementById('llm-api-key').value = '';
+  document.getElementById('llm-vision-model').value = '';
   document.getElementById('llm-per-agent-enabled').checked = false;
   document.getElementById('llm-per-agent-table').innerHTML = '';
   document.getElementById('llm-per-agent-fields').style.display = 'none';
@@ -1078,16 +1084,6 @@ function saveArgHistory(args) {
     list = list.filter(function(x) { return x !== args; });
     list.unshift(args);
     localStorage.setItem('ai_berkshire_arg_history', JSON.stringify(list.slice(0, 20)));
-    renderArgHistory();
-  } catch(e) {}
-}
-
-function renderArgHistory() {
-  try {
-    var list = JSON.parse(localStorage.getItem('ai_berkshire_arg_history') || '[]');
-    document.getElementById('arg-history').innerHTML = list.map(function(a) {
-      return '<option value="' + escHtml(a) + '"></option>';
-    }).join('');
   } catch(e) {}
 }
 
@@ -1116,15 +1112,8 @@ var _uploadedFiles = [];  // extracted text from uploaded files
 var _MULTIMODAL_MODELS = ['gpt-4o', 'gpt-4-turbo', 'gpt-4-vision', 'claude-sonnet-4', 'claude-3', 'claude-3.5', 'gemini', 'glm-4v', 'qwen-vl', 'qwenvl', 'llava', 'pixtral', 'doubao-vision', 'yi-vision', 'grok-vision', 'gemini-2'];
 
 function updateUploadVisibility() {
-  var cfg = _loadLlmConfig();
-  var hasVision = !!(cfg && cfg.vision_model);
-  // Check if main model or vision model is multimodal
-  var mainModel = (cfg && cfg.model || '').toLowerCase();
-  var visionModel = (cfg && cfg.vision_model || '').toLowerCase();
-  var isMulti = _MULTIMODAL_MODELS.some(function(m) {
-    return mainModel.indexOf(m) >= 0 || visionModel.indexOf(m) >= 0;
-  });
-  document.getElementById('file-upload-row').style.display = (hasVision || isMulti) ? '' : 'none';
+  // Upload row is always visible — vision model only affects image OCR quality
+  document.getElementById('file-upload-row').style.display = '';
 }
 
 async function handleFileUpload(fileList) {
@@ -1146,7 +1135,8 @@ async function handleFileUpload(fileList) {
     var headers = {};
     Object.assign(headers, getAuthHeaders());
     // Append vision model + credentials from config
-    var llmCfg = getLlmConfig() || {};
+    // (read raw stored config — getLlmConfig() strips UI-only fields like vision_model)
+    var llmCfg = _loadLlmConfig() || {};
     var visionModel = llmCfg.vision_model || '';
     // Auto-use main model if it's multimodal and no vision model specified
     if (!visionModel && llmCfg.model) {
@@ -1214,21 +1204,19 @@ async function handleFileUpload(fileList) {
 
 async function startResearch() {
   var args = document.getElementById('arg-field').value.trim();
-  // Append uploaded file content as reference material (not analysis target)
-  if (_uploadedFiles.length) {
-    // Try to guess target from filename if user didn't specify
+  // Uploaded file content is sent as a separate attachments field
+  var attachments = _uploadedFiles.length ? _uploadedFiles.join('\n\n') : '';
+  if (attachments) {
+    // Fallback target from filenames if user didn't specify one
     if (!args) {
       var fi = document.getElementById('file-input');
+      var names = [];
       if (fi && fi.files && fi.files.length) {
-        var fn = fi.files[0].name.replace(/\.[^.]+$/, '');  // strip extension
-        fn = fn.replace(/[_\-]/g, ' ').replace(/\s+/g, ' ').trim();
-        // Extract first meaningful word group (company name)
-        var parts = fn.split(/[【（(]/);
-        args = parts[0].trim() || fn;
+        for (var i = 0; i < fi.files.length; i++) names.push(fi.files[i].name);
       }
+      args = names.length ? '分析上传的文件：' + names.join('、') : '分析上传的文件';
     }
-    args = (args || '分析上传的文件') + '\n\n【以下为上传文件的参考内容，请基于此进行分析】\n' + _uploadedFiles.join('\n\n');
-    // Clear file preview immediately — content already injected into research
+    // Clear file preview immediately — content already captured in attachments
     document.getElementById('file-preview').style.display = 'none';
     document.getElementById('file-preview').innerHTML = '';
     document.getElementById('file-status').textContent = '';
@@ -1248,7 +1236,8 @@ async function startResearch() {
     return;
   }
 
-  var err = validateArgs(currentSkill, args);
+  // Attachment-only runs skip the "arguments required" check
+  var err = attachments ? null : validateArgs(currentSkill, args);
   if (err) {
     showToast(err, 'warning');
     document.getElementById('input-hint').textContent = err;
@@ -1323,9 +1312,9 @@ async function startResearch() {
   // Stream mode now works for ALL skills via WebSocket:
   // single-agent streams chunks; multi-agent/series stream per-agent progress.
   if (streamMode) {
-    await streamResearch(args);
+    await streamResearch(args, attachments);
   } else {
-    await batchResearch(args);
+    await batchResearch(args, attachments);
   }
 }
 
@@ -1352,13 +1341,13 @@ function cancelResearch() {
   document.getElementById('btn-cancel').style.display = 'none';
 }
 
-async function streamResearch(args) {
+async function streamResearch(args, attachments) {
   _wsShouldReconnect = true;
   _wsReconnectAttempts = 0;
-  _streamResearchImpl(args);
+  _streamResearchImpl(args, attachments);
 }
 
-function _streamResearchImpl(args) {
+function _streamResearchImpl(args, attachments) {
   var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   var url = proto + '//' + location.host + '/ws/research/' + currentSkill.name;
 
@@ -1368,7 +1357,7 @@ function _streamResearchImpl(args) {
       showToast('WebSocket响应超时，自动切换到普通模式', 'warning');
       _wsShouldReconnect = false;
       if (ws) { ws.close(); ws = null; }
-      batchResearch(args);
+      batchResearch(args, attachments);
     }
   }, currentSkill && currentSkill.is_multi_agent ? 180000 : 90000);
 
@@ -1377,6 +1366,7 @@ function _streamResearchImpl(args) {
     ws.onopen = function() {
       _wsReconnectAttempts = 0;
       var msg = { arguments: args };
+      if (attachments) msg.attachments = attachments;
       msg.token = getWsToken();
       var llmConfig = getLlmConfig();
       if (llmConfig) msg.llm_config = llmConfig;
@@ -1439,7 +1429,7 @@ function _streamResearchImpl(args) {
         _wsReconnectAttempts++;
         showToast('连接断开，' + Math.round(delay/1000) + '秒后重试 (' + _wsReconnectAttempts + '/' + _WS_MAX_RECONNECT + ')', 'warning');
         setTimeout(function() {
-          if (_wsShouldReconnect) _streamResearchImpl(args);
+          if (_wsShouldReconnect) _streamResearchImpl(args, attachments);
         }, delay);
       } else if (_wsShouldReconnect) {
         // Max retries reached — fall back to batch mode
@@ -1449,7 +1439,7 @@ function _streamResearchImpl(args) {
           showToast('WebSocket连接失败，自动切换到普通模式', 'warning');
           _wsShouldReconnect = false;
           if (ws) { ws.close(); ws = null; }
-          batchResearch(args);
+          batchResearch(args, attachments);
           return;
         }
       } else if (currentReport && !document.getElementById('result-area').style.display) {
@@ -1474,7 +1464,7 @@ function scheduleRender() {
   }, 150);
 }
 
-async function batchResearch(args) {
+async function batchResearch(args, attachments) {
   _researchAbort = new AbortController();
   // 30-minute budget: multi-agent / series runs legitimately take a long time.
   // On timeout we no longer report failure — the server keeps running and the
@@ -1483,15 +1473,17 @@ async function batchResearch(args) {
   try {
     var headers = { 'Content-Type': 'application/json' };
     Object.assign(headers, getAuthHeaders());
+    var body = {
+      skill_name: currentSkill.name,
+      arguments: args,
+      stream: false,
+      llm_config: getLlmConfig() || undefined
+    };
+    if (attachments) body.attachments = attachments;
     var res = await fetch('/api/research', {
       method: 'POST',
       headers: headers,
-      body: JSON.stringify({
-        skill_name: currentSkill.name,
-        arguments: args,
-        stream: false,
-        llm_config: getLlmConfig() || undefined
-      }),
+      body: JSON.stringify(body),
       signal: _researchAbort.signal
     });
     clearTimeout(timeout);
@@ -1951,6 +1943,45 @@ function exportHtml() {
   showToast('已导出 HTML', 'success');
 }
 
+// P4: export PDF via weasyprint backend
+async function exportPdf() {
+  if (!currentReport) { showToast('没有可导出的内容', 'warning'); return; }
+  var btn = event ? event.target : null;
+  if (btn) { btn.disabled = true; btn.textContent = '生成中...'; }
+  try {
+    var llmCfg = getLlmConfig();
+    var headers = { 'Content-Type': 'application/json' };
+    var jwt = localStorage.getItem('ai_berkshire_jwt');
+    if (jwt) { headers['Authorization'] = 'Bearer ' + jwt; }
+    var resp = await fetch('/api/export/pdf', {
+      method: 'POST',
+      headers: headers,
+      body: JSON.stringify({ markdown: currentReport })
+    });
+    if (!resp.ok) {
+      var err = await resp.json().catch(function() { return { detail: '导出失败' }; });
+      throw new Error(err.detail || '导出失败');
+    }
+    var blob = await resp.blob();
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    var title = 'report';
+    try {
+      var meta = JSON.parse(sessionStorage.getItem('ai_berkshire_report_meta') || '{}');
+      title = (meta.skill || 'report') + '_' + new Date().toISOString().slice(0, 10);
+    } catch(e) {}
+    a.download = title.replace(/[^a-zA-Z0-9_\u4e00-\u9fff-]/g, '_') + '.pdf';
+    a.click();
+    URL.revokeObjectURL(url);
+    showToast('PDF 导出成功', 'success');
+  } catch(e) {
+    showToast('PDF 导出失败: ' + e.message, 'error');
+    console.error('exportPdf:', e);
+  }
+  if (btn) { btn.disabled = false; btn.textContent = '导出PDF'; }
+}
+
 function printReport() {
   if (!currentReport) { showToast('没有可打印的内容', 'warning'); return; }
   window.print();
@@ -2203,8 +2234,8 @@ function prefillFromURL() {
   return false;
 }
 
-// ==================== Save on unload ====================
-window.addEventListener('beforeunload', function() {
+// ==================== Save on pagehide (beforeunload triggers Permissions Policy violation) ====================
+window.addEventListener('pagehide', function() {
   if (currentReport) {
     try {
       sessionStorage.setItem('ai_berkshire_report', currentReport);

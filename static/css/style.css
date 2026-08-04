@@ -188,6 +188,10 @@ body {
   font-family: inherit;
   transition: border-color 0.2s;
   letter-spacing: 0.03em;
+  resize: none;
+  line-height: 1.5;
+  overflow-y: auto;
+  box-sizing: border-box;
 }
 #arg-field:focus { border-bottom-color: var(--accent); }
 #arg-field::placeholder { color: var(--text-secondary); opacity: 0.5; }

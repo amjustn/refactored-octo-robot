@@ -26,7 +26,8 @@ class SkillInfo(BaseModel):
 
 class ResearchRequest(BaseModel):
     skill_name: str = Field(..., description="Skill name (e.g. investment-team)")
-    arguments: str = Field(..., max_length=2000, description="Target company/topic/parameters")
+    arguments: str = Field(..., max_length=10000, description="Target company/topic/parameters or a free-form analysis goal")
+    attachments: Optional[str] = Field(default=None, max_length=30000, description="Extracted text from user-uploaded reference files (travels separately from arguments)")
     stream: bool = Field(default=False, description="Stream the response")
     llm_config: Optional[dict] = Field(default=None, description="Per-request LLM override: {api_key, base_url, model, synthesis_model}（synthesis_model 为 Team Lead 综合环节可选的独立模型）")
 

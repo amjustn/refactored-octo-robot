@@ -101,19 +101,24 @@ async def run_case(case: dict, stub_llm: bool, playback: dict, scratch: Path) ->
                     yield piece
             return gen()
 
-        async def stub_full_context(arguments="", skill_name=""):
+        async def stub_full_context(arguments="", skill_name="", goal_hints=None):
             return "## 当前时间上下文\n\n**当前日期**：2026年07月31日\n\n## 最新市场指数\n\n- 上证指数: 3,500.12 (🔴+0.45%)\n\n*stub context*"
+
+        async def stub_parse_goal(arguments, llm_config=None):
+            return None
 
         restore = {
             (runner_mod, "chat_stream"): runner_mod.chat_stream,
             (runner_mod, "chat_complete"): runner_mod.chat_complete,
             (runner_mod, "chat_complete_with_tools"): runner_mod.chat_complete_with_tools,
             (context_mod, "build_full_context"): context_mod.build_full_context,
+            (context_mod, "parse_goal"): context_mod.parse_goal,
         }
         runner_mod.chat_stream = stub_chat_stream
         runner_mod.chat_complete = stub_chat_complete
         runner_mod.chat_complete_with_tools = stub_chat_with_tools
         context_mod.build_full_context = stub_full_context
+        context_mod.parse_goal = stub_parse_goal
         get_gateway().playback = playback
 
     bus = get_bus()

@@ -8,7 +8,10 @@
 | length    | ≤ MAX_REPORT_LENGTH (50k; series 200k)                      | truncate|
 
 Every warning becomes a guard_warning event (auditable) and is persisted
-to tasks.guard_warnings via the Repository.
+to tasks.guard_warnings via the Repository. Warnings never alter the
+report body (no banner injection); only disclaimer append and length
+truncation modify it. OutputGuard is the sole owner of length truncation
+for all strategies (runner no longer truncates).
 """
 from __future__ import annotations
 
@@ -22,7 +25,7 @@ from .events import EventBus, EventType
 
 logger = logging.getLogger("ai_berkshire.harness.guards")
 
-# Series reports legitimately run long (mirrors runner.MAX_SERIES_REPORT_LENGTH)
+# Series reports legitimately run long; single definition, re-exported by runner
 MAX_SERIES_REPORT_LENGTH = 200000
 
 DISCLAIMER = "\n\n---\n*以上分析由AI基于公开数据生成，仅供参考，不构成投资建议。投资有风险，决策需谨慎。*"
@@ -98,7 +101,6 @@ class OutputGuard:
         if missing:
             shown = "、".join(missing[:5])
             self._warn("structure", f"必备章节缺失（{len(missing)}/{len(required)}）：{shown}")
-            report = f"> ⚠️ 结构闸门：以下必备章节缺失：{shown}\n\n" + report
         return report
 
     def _gate_citation(self, report: str):

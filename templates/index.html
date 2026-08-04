@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>AI Berkshire Web - 价值投资研究工作站</title>
 <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
-<link rel="stylesheet" href="/static/css/style.css?v=20260801j">
+<link rel="stylesheet" href="/static/css/style.css?v=20260804a">
 </head>
 <body>
 <div id="toast-container"></div>
@@ -54,10 +54,9 @@
         </div>
         <div class="arg-input">
           <label for="arg-field">分析目标</label>
-          <input type="text" id="arg-field" list="arg-history" placeholder="输入公司名或股票代码，如：腾讯 / PDD / 贵州茅台" autocomplete="off">
-          <datalist id="arg-history"></datalist>
+          <textarea id="arg-field" rows="2" placeholder="用自然语言描述你的分析目标，如：分析腾讯2025年游戏业务的增长可持续性，并与网易对比" autocomplete="off"></textarea>
           <span class="hint" id="input-hint"></span>
-          <div id="file-upload-row" class="file-upload" style="display:none">
+          <div id="file-upload-row" class="file-upload">
             <input type="file" id="file-input" accept="image/*,.pdf,.xlsx,.xls,.csv,.txt,.docx,.doc,.pptx,.ppt,.md,.json" multiple onchange="handleFileUpload(this.files)" style="display:none">
             <button type="button" class="btn-upload" onclick="document.getElementById('file-input').click()">📎 上传文件（图片/PDF/Excel）</button>
             <span class="file-status" id="file-status"></span>
@@ -96,7 +95,8 @@
         <button onclick="copyReport()">复制报告</button>
         <button onclick="downloadReport()">下载MD</button>
         <button onclick="exportHtml()">导出HTML</button>
-        <button onclick="printReport()">打印/PDF</button>
+        <button onclick="exportPdf()">导出PDF</button>
+        <button onclick="printReport()">打印</button>
         <button onclick="toggleToc()" id="btn-toc">目录</button>
         <button onclick="clearResult()">清除</button>
       </div>
@@ -188,6 +188,9 @@
       <input type="password" id="llm-api-key" placeholder="sk-..." autocomplete="off">
     </div>
 
+    <label>视觉模型（可选，用于图片识别）</label>
+    <input type="text" id="llm-vision-model" placeholder="如 gpt-4o / qwen-vl-max" autocomplete="off">
+
     <div id="llm-per-agent-block" style="display:none">
       <label class="llm-synthesis-toggle">
         <input type="checkbox" id="llm-per-agent-enabled" onchange="onPerAgentToggle()">
@@ -211,6 +214,6 @@
 <script src="/static/js/marked.min.js"></script>
 <script src="/static/js/echarts.min.js"></script>
 <script src="https://cdn.bootcdn.net/ajax/libs/dompurify/3.0.6/purify.min.js"></script>
-<script src="/static/js/app.js?v=20260802b"></script>
+<script src="/static/js/app.js?v=20260804a"></script>
 </body>
 </html>

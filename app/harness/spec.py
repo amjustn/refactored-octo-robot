@@ -144,6 +144,7 @@ class TaskSpec:
     task_id: str
     skill_name: str
     arguments: str
+    attachments: str = ""               # uploaded reference text; never merged into arguments
     llm: LLMConfig = field(default_factory=LLMConfig)
     strategy: Literal["single", "multi", "series"] = "single"
     agent_names: tuple = ("default",)
@@ -159,6 +160,7 @@ class TaskSpec:
         caller: str = "ws",
         stream: bool = True,
         task_id: Optional[str] = None,
+        attachments: str = "",
     ) -> "TaskSpec":
         """Derive strategy + agent roster from skill metadata."""
         is_multi = skill.get("is_multi_agent", False)
@@ -180,6 +182,7 @@ class TaskSpec:
             task_id=task_id or str(uuid.uuid4())[:8],
             skill_name=skill["name"],
             arguments=arguments,
+            attachments=attachments or "",
             llm=LLMConfig.from_override(llm_override),
             strategy=strategy,
             agent_names=agent_names,

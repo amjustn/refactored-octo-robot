@@ -19,15 +19,20 @@ they patched ``app.agents.orchestrator.chat_*``.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import time
+from pathlib import Path
 from typing import Optional
 
 from ..core.llm import chat_stream, chat_complete, chat_complete_with_tools
 from .context import ContextBuilder
-from ..core.config import MAX_PARALLEL_AGENTS, MAX_REPORT_LENGTH, AGENT_TIMEOUT
+from ..core.config import MAX_PARALLEL_AGENTS, AGENT_TIMEOUT
 from ..models.schemas import AgentProgress
 from ..skills import get_skill, build_user_prompt
 from .events import EventBus, EventType
+from .guards import MAX_SERIES_REPORT_LENGTH  # re-export (sole definition lives in guards)
+from .persist import get_repository
 from .prompts import (
     AGENT_ROLE_PROMPTS, TEAM_LEAD_PROMPT, SERIES_SYSTEM_PROMPT,
     get_default_system_prompt, get_role_label,
@@ -35,10 +40,47 @@ from .prompts import (
 from .spec import TaskSpec
 from .tools import ALL_TOOL_SCHEMAS, TOOL_ENABLED_AGENTS, get_gateway
 
+# P3: decision log
+from .decision_log import save_decision as _save_decision, load_decisions as _load_decisions
+
 logger = logging.getLogger("ai_berkshire.harness.runner")
 
-# Series reports can be much longer (8 articles × 3000-5000 words each)
-MAX_SERIES_REPORT_LENGTH = 200000  # 200k chars for series mode
+# ── P1: soft loop limits ────────────────────────────────────────
+MAX_SAME_TOOL_CALLS = 3  # per agent per tool name within one task
+
+# ── P2: audit trail / scratchpad ─────────────────────────────────
+SCRATCHPAD_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "scratchpad"
+
+import re as _re
+
+_DSML_BLOCK_RE = _re.compile(
+    r'<\s*(?:｜｜DSML｜｜tool_calls|｜｜DSML｜｜invoke|｜｜DSML｜｜parameter|/｜｜DSML｜｜tool_calls|/｜｜DSML｜｜invoke|/｜｜DSML｜｜parameter)\s*[^>]*>',
+    _re.DOTALL,
+)
+_DSML_SELF_RE = _re.compile(
+    r'<\s*｜｜DSML｜｜(?:tool_calls|invoke|parameter)\b[^>]*?/>',
+    _re.DOTALL,
+)
+
+
+def _strip_dsml(text: str) -> str:
+    """Remove DSML tool-call artifacts from an agent result (idempotent)."""
+    text = _DSML_BLOCK_RE.sub("", text)
+    return _DSML_SELF_RE.sub("", text)
+
+
+def _with_attachments(prompt: str, attachments: str) -> str:
+    """Append the uploaded-reference section to an inline-built prompt.
+
+    Mirrors the block build_user_prompt adds; attachments never enter
+    context building, only agent-facing prompts.
+    """
+    if not attachments:
+        return prompt
+    return (
+        f"{prompt}\n\n## 用户上传的参考资料\n{attachments}\n\n"
+        "请将上述资料作为分析的重要依据。"
+    )
 
 
 class AgentRunner:
@@ -47,6 +89,10 @@ class AgentRunner:
     def __init__(self, bus: Optional[EventBus] = None, task_id: Optional[str] = None):
         self.bus = bus
         self.task_id = task_id or "adhoc"
+        # P1: per-agent per-tool call counts — reset each run()
+        self._tool_call_counts: dict[str, dict[str, int]] = {}
+        # P2: scratchpad path — written once on first tool call
+        self._scratchpad_path: Optional[Path] = None
 
     # ---------- event helpers ----------
 
@@ -64,35 +110,118 @@ class AgentRunner:
         else:
             self._emit(EventType.CHUNK, content=content)
 
+    async def _save_artifact(self, agent: str, content: str):
+        """Persist an intermediate agent result (non-fatal on failure).
+
+        Saved for both successful and ``[错误]`` results so cancelled /
+        failed runs can still surface completed work as a partial report.
+        """
+        try:
+            await get_repository().asave_artifact(self.task_id, agent, content)
+        except Exception as e:
+            logger.warning(f"artifact save failed ({self.task_id}/{agent}): {e}")
+
     # ---------- dispatch ----------
 
     async def run(self, spec: TaskSpec) -> str:
         """Execute a TaskSpec; returns the final report text."""
+        # P1: reset tool call counters at the start of each run
+        self._tool_call_counts.clear()
+        self._scratchpad_path = None
         llm_config = spec.llm.to_llm_config_dict()
+
+        report = ""
         if spec.strategy == "series":
-            return await self.run_series(spec.skill_name, spec.arguments, llm_config=llm_config)
-        if spec.strategy == "multi":
-            return await self.run_multi(
+            report = await self.run_series(
+                spec.skill_name, spec.arguments,
+                llm_config=llm_config, attachments=spec.attachments,
+            )
+        elif spec.strategy == "multi":
+            report = await self.run_multi(
                 spec.skill_name, spec.arguments,
                 llm_config=llm_config,
                 synthesis_llm_config=spec.llm.to_synthesis_config_dict(),
-                spec=spec,  # pass full spec for per-agent model lookup
+                spec=spec,
+                attachments=spec.attachments,
             )
-        return await self.run_single(
-            spec.skill_name, spec.arguments,
-            llm_config=llm_config, stream=spec.stream,
-        )
+        else:
+            report = await self.run_single(
+                spec.skill_name, spec.arguments,
+                llm_config=llm_config, stream=spec.stream,
+                attachments=spec.attachments,
+            )
+
+        # P3: save decision to cross-session log (non-blocking, best-effort)
+        if report and not report.startswith("[错误]"):
+            _save_decision(
+                spec.arguments, report,
+                skill_name=spec.skill_name,
+                task_id=self.task_id,
+            )
+
+        return report
 
     # ---------- tool execution ----------
 
+    async def _log_tool_call(self, agent: str, tool_name: str, args: dict, result: str):
+        """P2: append one JSONL line to the scratchpad file (non-fatal)."""
+        try:
+            if self._scratchpad_path is None:
+                SCRATCHPAD_DIR.mkdir(parents=True, exist_ok=True)
+                self._scratchpad_path = SCRATCHPAD_DIR / f"{self.task_id}.jsonl"
+            entry = json.dumps({
+                "ts": time.time(),
+                "agent": agent or "unknown",
+                "tool": tool_name,
+                "args": args,
+                "result": result[:2000],  # truncate long results
+                "task_id": self.task_id,
+            }, ensure_ascii=False)
+            with open(self._scratchpad_path, "a", encoding="utf-8") as f:
+                f.write(entry + "\n")
+        except Exception:
+            pass  # never let scratchpad failure block research
+
     def _tool_executor(self, agent: Optional[str] = None):
-        """Function-calling tool executor routed through the ToolGateway
-        (circuit breaking, caching, timeout/retry, TOOL_CALL events)."""
+        """P1: function-calling tool executor with soft loop limits.
+        Each agent can call the same tool at most MAX_SAME_TOOL_CALLS times.
+        Exceeding returns a limit message instead of executing.
+        P2: every call is logged to the scratchpad JSONL.
+
+        Routed through the ToolGateway (circuit breaking, caching,
+        timeout/retry, TOOL_CALL events)."""
         gateway = get_gateway()
         bus, task_id = self.bus, self.task_id
+        runner = self
+
+        # Ensure agent-level tracking dict exists
+        agent_key = agent or "__single__"
+        if agent_key not in runner._tool_call_counts:
+            runner._tool_call_counts[agent_key] = {}
 
         async def _exec(name: str, args: dict) -> str:
-            return await gateway.execute(name, args, task_id=task_id, agent=agent, bus=bus)
+            counts = runner._tool_call_counts[agent_key]
+            current = counts.get(name, 0)
+
+            # P1: soft loop limit check
+            if current >= MAX_SAME_TOOL_CALLS:
+                limit_msg = json.dumps({
+                    "error": "TOOL_LOOP_LIMIT",
+                    "message": f"已调用 {name} {current} 次，达到上限 {MAX_SAME_TOOL_CALLS} 次。"
+                               f"请基于已有数据直接输出结论，不要再调用此工具。",
+                }, ensure_ascii=False)
+                # Log the limit hit to scratchpad
+                await runner._log_tool_call(agent_key, f"{name}__LIMIT_HIT", {}, limit_msg)
+                return limit_msg
+
+            # Execute the actual tool
+            result = await gateway.execute(name, args, task_id=task_id, agent=agent, bus=bus)
+            counts[name] = current + 1
+
+            # P2: log to scratchpad
+            await runner._log_tool_call(agent_key, name, args, result)
+
+            return result
 
         return _exec
 
@@ -106,6 +235,7 @@ class AgentRunner:
         context: str = "",
         llm_config: dict = None,
         stream: bool = False,
+        attachments: str = "",
     ) -> str:
         """Run a single agent analysis.
 
@@ -115,14 +245,14 @@ class AgentRunner:
         """
         if agent_role and agent_role in AGENT_ROLE_PROMPTS:
             system_prompt = AGENT_ROLE_PROMPTS[agent_role]
-            user_msg = f"请分析以下目标：{arguments}"
+            user_msg = _with_attachments(f"请分析以下目标：{arguments}", attachments)
         else:
             system_prompt = get_default_system_prompt(skill_name)
-            user_msg = build_user_prompt(skill_name, arguments)
+            user_msg = build_user_prompt(skill_name, arguments, attachments=attachments)
 
         if not context:
             bundle = await ContextBuilder(bus=self.bus, task_id=self.task_id).build(
-                arguments, skill_name=skill_name,
+                arguments, skill_name=skill_name, llm_config=llm_config,
             )
             context = bundle.context
 
@@ -159,6 +289,7 @@ class AgentRunner:
         llm_config: dict = None,
         synthesis_llm_config: dict = None,
         spec: "TaskSpec" = None,
+        attachments: str = "",
     ) -> str:
         """Run multi-agent parallel analysis and synthesize.
 
@@ -180,12 +311,12 @@ class AgentRunner:
         post_synthesis_agents = skill.get("post_synthesis_agents", [])
 
         if not agent_names:
-            return await self.run_single(skill_name, arguments, llm_config=llm_config)
+            return await self.run_single(skill_name, arguments, llm_config=llm_config, attachments=attachments)
 
         self._progress("system", "running", "正在获取实时市场数据...")
 
         bundle = await ContextBuilder(bus=self.bus, task_id=self.task_id).build(
-            arguments, skill_name=skill_name,
+            arguments, skill_name=skill_name, llm_config=llm_config,
         )
         context = bundle.context
 
@@ -219,6 +350,7 @@ class AgentRunner:
                 result = await self.run_single(
                     skill_name, arguments, agent_role=name,
                     context=context, llm_config=agent_cfg, stream=True,
+                    attachments=attachments,
                 )
                 self._progress(name, "completed", "分析完成", 1.0)
                 return name, result
@@ -226,22 +358,36 @@ class AgentRunner:
                 self._progress(name, "failed", str(e))
                 return name, f"[错误] {str(e)}"
 
-        # Phase 1: research agents in batches
-        results = []
-        for i in range(0, len(research_agents), MAX_PARALLEL_AGENTS):
-            batch = research_agents[i:i + MAX_PARALLEL_AGENTS]
-            batch_tasks = [agent_task(name) for name in batch]
-            try:
-                batch_results = await asyncio.wait_for(
-                    asyncio.gather(*batch_tasks),
-                    timeout=AGENT_TIMEOUT,
-                )
-            except asyncio.TimeoutError:
-                batch_results = []
-                for name in batch:
-                    batch_results.append((name, f"[错误] Agent 超时 ({AGENT_TIMEOUT}s)"))
+        # Phase 1: all research agents scheduled at once behind a semaphore;
+        # each agent gets its own timeout so one slow/failed agent never
+        # discards its siblings' results. Result order follows the roster
+        # regardless of completion order (appendix ordering contract).
+        sem = asyncio.Semaphore(MAX_PARALLEL_AGENTS)
+
+        async def _run_agent(name: str) -> tuple[str, str]:
+            async with sem:
+                try:
+                    name, result = await asyncio.wait_for(agent_task(name), timeout=AGENT_TIMEOUT)
+                except asyncio.TimeoutError:
                     self._progress(name, "failed", "超时")
-            results.extend(batch_results)
+                    result = f"[错误] Agent 超时 ({AGENT_TIMEOUT}s)"
+            # Strip DSML noise BEFORE persisting so partial reports are clean.
+            clean = result if result.startswith("[错误]") else _strip_dsml(result)
+            await self._save_artifact(name, clean)
+            return name, clean
+
+        gathered = await asyncio.gather(
+            *(_run_agent(name) for name in research_agents),
+            return_exceptions=True,
+        )
+        results = []
+        for name, res in zip(research_agents, gathered):
+            if isinstance(res, BaseException):
+                # Unreachable in practice (agent_task catches Exception and
+                # timeouts are handled above) — keep siblings safe anyway.
+                results.append((name, f"[错误] {res}"))
+            else:
+                results.append(res)
 
         agent_reports = ""
         success_count = 0
@@ -267,6 +413,65 @@ class AgentRunner:
 
         if success_count == 0:
             return f"# AI Berkshire 投研报告\n\n**目标**：{arguments}\n\n## 错误\n\n所有 {failed_count} 个 Agent 均执行失败，无法生成报告。\n\n请检查 LLM API 配置和网络连接。"
+
+        # ── P5: Phase 1.5 — Agent peer debate ──────────────────
+        # Each successful agent reviews another's work and provides:
+        # agree/disagree + specific challenge points + confidence vote.
+        # Only triggered when ≥2 agents succeed.
+        debate_output = ""
+        if success_count >= 2:
+            self._progress("system", "running", "Agent 交叉辩论中...")
+            success_results = [(n, r) for n, r in results if not r.startswith("[错误]")]
+
+            async def _debate_one(idx: int) -> tuple[str, str]:
+                """Agent idx reviews agent (idx+1)%n's work."""
+                reviewer_name, _ = success_results[idx]
+                target_idx = (idx + 1) % len(success_results)
+                target_name, target_report = success_results[target_idx]
+                target_role = get_role_label(target_name)
+                reviewer_role = get_role_label(reviewer_name)
+
+                # Truncate target report to avoid token issues
+                _max_debate_input = 3000
+                _short = target_report[:_max_debate_input] if len(target_report) > _max_debate_input else target_report
+
+                debate_prompt = (
+                    f"你是{reviewer_role}。以下是{target_role}的分析报告（已截取关键部分）。\n\n"
+                    f"## {target_role}的报告\n{_short}\n\n"
+                    "请从你的专业角度审视这份报告，完成以下三项：\n"
+                    "1. **同意/反对**：你同意还是反对其核心结论？（一句话）\n"
+                    "2. **质疑点**：列出1-2个最关键的质疑或补充（具体、可操作）\n"
+                    "3. **投票**：BUY / HOLD / SELL（基于这份报告的逻辑，不是你的个人观点）\n\n"
+                    "请用中文回复，保持简洁。"
+                )
+
+                # Use reviewer's own LLM config for debate
+                dcfg = llm_config
+                if per_agent_enabled and spec is not None:
+                    dcfg = spec.llm.to_agent_config_dict(reviewer_name)
+
+                try:
+                    review_text = await asyncio.wait_for(
+                        chat_complete(debate_prompt, "请给出你的交叉评审意见。", llm_config=dcfg),
+                        timeout=60,  # shorter timeout for debate
+                    )
+                    return f"{reviewer_name}→{target_name}", review_text[:800]
+                except Exception as e:
+                    logger.warning(f"Debate {reviewer_name}→{target_name} failed: {e}")
+                    return f"{reviewer_name}→{target_name}", f"[评审失败: {e}]"
+
+            debates = await asyncio.gather(
+                *(_debate_one(i) for i in range(len(success_results))),
+                return_exceptions=True,
+            )
+
+            for item in debates:
+                if isinstance(item, Exception):
+                    continue
+                pair, text = item
+                debate_output += f"\n\n### 交叉评审：{pair}\n{text}\n"
+
+            self._progress("system", "completed", f"{len(success_results)} 位 Agent 交叉辩论完成", 1.0)
 
         # Phase 2: Team Lead synthesis (streamed as agent="team-lead")
         # When per_agent_enabled, the Team Lead model comes from agent_models["team-lead"];
@@ -294,15 +499,27 @@ class AgentRunner:
         if context:
             synthesis_prompt += f"\n\n{context}"
         synthesis_prompt += f"\n\n以下是{agent_label}的独立研究报告：\n{agent_reports}"
+        # P5: inject debate results
+        if debate_output:
+            synthesis_prompt += f"\n\n## Agent 交叉辩论记录\n以下是各分析师交叉评审对方报告的结果，请在综合时重点考虑质疑和反对意见：{debate_output}"
 
-        synthesis = ""
-        async for chunk in chat_stream(
-            synthesis_prompt,
-            f"请综合以上报告，输出最终投研报告。目标：{arguments}",
-            llm_config=synthesis_config,
-        ):
-            synthesis += chunk
-            self._chunk(chunk, agent="team-lead")
+        async def _synthesize() -> str:
+            text = ""
+            async for chunk in chat_stream(
+                synthesis_prompt,
+                _with_attachments(f"请综合以上报告，输出最终投研报告。目标：{arguments}", attachments),
+                llm_config=synthesis_config,
+            ):
+                text += chunk
+                self._chunk(chunk, agent="team-lead")
+            return text
+
+        try:
+            synthesis = await asyncio.wait_for(_synthesize(), timeout=AGENT_TIMEOUT)
+        except asyncio.TimeoutError:
+            logger.error(f"Team Lead synthesis timed out after {AGENT_TIMEOUT}s")
+            synthesis = f"[错误] 综合超时（超过 {AGENT_TIMEOUT}s），请直接参考附录中的各 Agent 独立研究报告。"
+            self._progress("team-lead", "failed", "综合超时")
 
         # Phase 3: post-synthesis agents (sequential, streamed)
         post_synthesis_output = ""
@@ -316,21 +533,35 @@ class AgentRunner:
                 if per_agent_enabled and spec is not None:
                     psa_cfg = spec.llm.to_agent_config_dict(agent_name)
                 self._progress(agent_name, "running", "处理中...")
+                post_result = ""
                 try:
                     role_prompt = AGENT_ROLE_PROMPTS.get(agent_name, "你是一位专业的财经编辑。")
                     # Only include minimal context for post-synthesis (time only, not full market data)
                     post_input = f"以下是投研团队的综合研究报告（已截取关键部分），请基于此进行你的工作：\n\n{_synth_trimmed}"
-                    post_result = ""
-                    async for chunk in chat_stream(role_prompt, post_input, llm_config=psa_cfg):
-                        post_result += chunk
-                        self._chunk(chunk, agent=agent_name)
+
+                    async def _run_post() -> str:
+                        text = ""
+                        async for chunk in chat_stream(role_prompt, post_input, llm_config=psa_cfg):
+                            text += chunk
+                            self._chunk(chunk, agent=agent_name)
+                        return text
+
+                    post_result = await asyncio.wait_for(_run_post(), timeout=AGENT_TIMEOUT)
                     post_synthesis_output += f"\n\n---\n## {agent_name}\n\n{post_result}\n"
                     self._progress(agent_name, "completed", "完成", 1.0)
+                except asyncio.TimeoutError:
+                    # Post-synthesis failure must never kill the completed synthesis
+                    logger.error(f"Post-synthesis agent {agent_name} timed out after {AGENT_TIMEOUT}s")
+                    post_result = f"[错误] 超时（超过 {AGENT_TIMEOUT}s）"
+                    post_synthesis_output += f"\n\n---\n## {agent_name}\n\n{post_result}\n"
+                    self._progress(agent_name, "failed", "超时")
                 except Exception as e:
                     logger.error(f"Post-synthesis agent {agent_name} failed: {e}", exc_info=True)
                     _err_msg = str(e)[:200]
-                    post_synthesis_output += f"\n\n---\n## {agent_name}\n\n[错误] {_err_msg}\n"
+                    post_result = f"[错误] {_err_msg}"
+                    post_synthesis_output += f"\n\n---\n## {agent_name}\n\n{post_result}\n"
                     self._progress(agent_name, "failed", _err_msg)
+                await self._save_artifact(agent_name, post_result)
 
         all_agent_count = len(agent_names)
         final_report = f"""# AI Berkshire 投研报告
@@ -351,9 +582,7 @@ class AgentRunner:
         if post_synthesis_output:
             final_report += f"\n---\n## 后期处理（编辑/评审）\n{post_synthesis_output}\n"
 
-        if len(final_report) > MAX_REPORT_LENGTH:
-            final_report = final_report[:MAX_REPORT_LENGTH] + "\n\n---\n*报告已截断（超过最大长度限制）*\n"
-
+        # Length truncation is owned solely by OutputGuard (harness run flow).
         return final_report
 
     # ---------- series ----------
@@ -363,16 +592,17 @@ class AgentRunner:
         skill_name: str,
         arguments: str,
         llm_config: dict = None,
+        attachments: str = "",
     ) -> str:
         """Run a series generation: multiple long-form articles sequentially."""
         skill = get_skill(skill_name)
         topics = skill.get("series_topics", [])
 
         if not topics:
-            return await self.run_single(skill_name, arguments, llm_config=llm_config)
+            return await self.run_single(skill_name, arguments, llm_config=llm_config, attachments=attachments)
 
         bundle = await ContextBuilder(bus=self.bus, task_id=self.task_id).build(
-            arguments, skill_name=skill_name,
+            arguments, skill_name=skill_name, llm_config=llm_config,
         )
         context = bundle.context
 
@@ -404,6 +634,8 @@ class AgentRunner:
 
 请直接输出文章正文，以 Markdown 格式排版。"""
 
+            user_msg = _with_attachments(user_msg, attachments)
+
             system_prompt = SERIES_SYSTEM_PROMPT
             if context:
                 system_prompt += f"\n\n{context}"
@@ -427,11 +659,14 @@ class AgentRunner:
                     f"第{i + 1}/{total}篇完成", (i + 1) / total,
                 )
             except asyncio.TimeoutError:
-                articles.append((topic, f"[错误] 第{i + 1}篇生成超时"))
+                article = f"[错误] 第{i + 1}篇生成超时"
+                articles.append((topic, article))
                 self._progress(f"article-{i + 1}", "failed", "超时")
             except Exception as e:
-                articles.append((topic, f"[错误] {str(e)}"))
+                article = f"[错误] {str(e)}"
+                articles.append((topic, article))
                 self._progress(f"article-{i + 1}", "failed", str(e))
+            await self._save_artifact(topic, article)
 
         success_count = sum(1 for _, a in articles if not a.startswith("[错误]"))
         failed_count = total - success_count
@@ -455,9 +690,7 @@ class AgentRunner:
 
         final_report = "\n".join(report_parts)
 
-        if len(final_report) > MAX_SERIES_REPORT_LENGTH:
-            final_report = final_report[:MAX_SERIES_REPORT_LENGTH] + "\n\n---\n*报告已截断（超过最大长度限制）*\n"
-
+        # Length truncation is owned solely by OutputGuard (harness run flow).
         return final_report
 
 

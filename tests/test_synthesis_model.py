@@ -54,7 +54,7 @@ def chat_calls(monkeypatch):
     class _FakeBundle:
         context = ""
 
-    async def _fake_build(self, arguments, skill_name=None):
+    async def _fake_build(self, arguments, skill_name=None, llm_config=None):
         return _FakeBundle()
 
     monkeypatch.setattr(ContextBuilder, "build", _fake_build)

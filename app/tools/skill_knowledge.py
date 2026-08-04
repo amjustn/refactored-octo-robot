@@ -202,6 +202,24 @@ DEFAULT_SKILL_KNOWLEDGE = {
         "update_notes": "关注交易制度变化(如涨跌幅限制调整)与北向资金披露口径变化",
         "last_updated": "default_bootstrap",
     },
+    "global-macro-analysis": {
+        "skill_name": "global-macro-analysis",
+        "display_name": "全球宏观分析",
+        "latest_frameworks": "3 Agent并行：1)制度与政治经济视角(Acemoglu/Shleifer方法:制度根源+激励+政策可信度) 2)数据驱动预测(FocusEconomics获奖团队/Barraud方法:nowcasting+分项自下而上+点预测带区间+对照一致预期) 3)宏观到资产映射(Berezin/McVey方法:regime识别+price in反推+五类资产+改判路标)",
+        "key_criteria": "先框架后结论；点预测必须带置信区间；情景概率合计100%；每个判断注明证伪条件与改判路标(指标+阈值)",
+        "data_sources": "高频宏观数据与一致预期via web_search/read_webpage，市场定价via fetch_market_indices",
+        "update_notes": "关注主要央行政策框架评估(如美联储框架审查)与一致预期数据源口径变化",
+        "last_updated": "default_bootstrap",
+    },
+    "china-macro-analysis": {
+        "skill_name": "china-macro-analysis",
+        "display_name": "中国宏观分析",
+        "latest_frameworks": "4 Agent并行：1)政策反应函数(彭文生/黄益平/伍戈/邢自强:宽货币vs宽信用+金融周期+政策put/call阈值) 2)高频数据与周期(陆挺/郭磊/陶川·李超/高善文:高频证据链+去季节性+宏微观交叉验证+库存/产能/地产周期定位) 3)汇率与国际收支(管涛/张明/张斌:BOP拆解+利差/结售汇/预期管理+政策工具箱) 4)中长期结构(李迅雷/徐高/樊纲/殷剑峰/苗建军:潜在增长分解+r-g债务算术+结构vs周期拆分)",
+        "key_criteria": "区分宽货币与宽信用传导；高频数据先剔除春节错位等季节噪音；结构判断须逻辑闭环(徐高检验)；政策判断须给出触发阈值与证伪条件",
+        "data_sources": "政策文件与高频数据via web_search/read_webpage，行情via fetch_market_indices",
+        "update_notes": "关注货币政策框架演进(如利率走廊与买卖国债操作)与高频数据口径变化",
+        "last_updated": "default_bootstrap",
+    },
 }
 
 

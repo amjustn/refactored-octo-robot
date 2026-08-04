@@ -16,18 +16,30 @@ logger = logging.getLogger("ai_berkshire.llm")
 
 _client: Optional[AsyncOpenAI] = None
 _clients: dict[tuple, AsyncOpenAI] = {}
+_MAX_CLIENTS = 32  # FIFO bound: per-user base_url/api_key combos are unbounded
 
 
 def get_client(base_url: str = None, api_key: str = None) -> AsyncOpenAI:
     """Get (or create) an OpenAI client for the given config.
 
     Clients are cached per (base_url, api_key) so per-user model configs
-    each get their own connection pool without recreating clients.
+    each get their own connection pool without recreating clients. The
+    cache is FIFO-bounded at _MAX_CLIENTS; evicted clients are closed
+    best-effort (sync close only, never awaited in this path).
     """
     base_url = base_url or LLM_BASE_URL
     api_key = api_key or LLM_API_KEY
     key = (base_url, api_key)
     if key not in _clients:
+        if len(_clients) >= _MAX_CLIENTS:
+            oldest_key = next(iter(_clients))
+            evicted = _clients.pop(oldest_key)
+            try:
+                close = getattr(evicted, "close", None)
+                if close is not None and not asyncio.iscoroutinefunction(close):
+                    close()
+            except Exception:
+                pass  # best-effort; dropping the reference is enough
         _clients[key] = AsyncOpenAI(
             api_key=api_key,
             base_url=base_url,
@@ -246,8 +258,28 @@ async def chat_complete_with_tools(
         try:
             response = await _retry_async(_create)
         except Exception as e:
-            logger.warning(f"Tool-enabled chat failed (round {round_num}): {e}, falling back to plain chat")
-            return await chat_complete(system_prompt, user_message, model, temperature, llm_config)
+            logger.warning(
+                f"Tool-enabled chat failed (round {round_num}): {e}, "
+                "falling back to a no-tools completion over existing messages"
+            )
+            # Preserve prior tool results: retry without tools over the SAME
+            # message list instead of discarding them in a fresh plain chat.
+            async def _create_no_tools():
+                return await _create_completion(
+                    client,
+                    model=model,
+                    messages=messages,
+                    temperature=temperature,
+                )
+
+            try:
+                response = await _retry_async(_create_no_tools)
+                if response.usage:
+                    _record_usage(response.usage)
+                return response.choices[0].message.content or ""
+            except Exception as e2:
+                logger.warning(f"No-tools fallback failed: {e2}, falling back to plain chat")
+                return await chat_complete(system_prompt, user_message, model, temperature, llm_config)
 
         if response.usage:
             _record_usage(response.usage)
