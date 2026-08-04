@@ -5,5 +5,6 @@ __pycache__/
 logs/
 data/*.db
 .pytest_cache/
+.ruff_cache/
 _archive/
 eval/runs/

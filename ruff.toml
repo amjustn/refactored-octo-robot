@@ -1,0 +1,18 @@
+target-version = "py311"
+line-length = 120
+
+[lint]
+select = ["E", "F", "W", "I"]
+ignore = [
+    "E501", # line too long: many long log/message strings; not enforced
+]
+
+[lint.per-file-ignores]
+# Script-style tests and utility scripts: allow import-time side effects patterns
+"tests/**" = ["E402", "F401", "F841"]
+"eval/**" = ["E402"]
+# Imports intentionally placed after dotenv/env setup or inside try blocks;
+# reordering them would change startup behavior.
+"app/main.py" = ["E402"]
+"app/harness/runner.py" = ["E402"]
+"app/harness/tools.py" = ["E402"]
