@@ -2500,40 +2500,48 @@ async function loadReport(filename) {
   }
 }
 
-// ==================== URL Pre-fill ====================
-// ?skill=industry-research&arguments=商业航天 → pre-fill skill + argument
-// ?company=宁德时代 → pre-fill argument field only
+// ==================== URL Pre-fill (deep links) ====================
+// Supported query params, e.g. /app?skill=investment-team&arguments=600519&autorun=1
+//   skill      → select that skill via the normal selectSkill() path
+//   arguments  → pre-fill the argument textarea (legacy alias: company)
+//   autorun=1  → also start research (requires valid skill + non-empty arguments)
+// Unknown skill names are ignored silently; arguments are capped at 500 chars.
+// Consumed params are stripped from the URL via history.replaceState so a
+// refresh never re-triggers the deep link (important for autorun).
+var DEEPLINK_MAX_ARGS = 500;
 function prefillFromURL() {
   var params = new URLSearchParams(window.location.search);
   var skill = params.get('skill') || '';
   var args = params.get('arguments') || params.get('company') || '';
+  var autorun = params.get('autorun') === '1';
 
   if (!skill && !args) return false;
+  if (args.length > DEEPLINK_MAX_ARGS) args = args.slice(0, DEEPLINK_MAX_ARGS);
 
+  var skillOk = false;
   if (skill) {
-    var found = allSkills.find(function(s) { return s.name === skill; });
-    if (found) {
-      selectSkill(skill);
-      if (args) document.getElementById('arg-field').value = args;
-      if (window.history && window.history.replaceState) {
-        window.history.replaceState({}, '', window.location.pathname);
-      }
-      if (args && params.get('auto') !== '0' && params.get('noauto') !== '1') {
-        setTimeout(function() { startResearch(); }, 600);
-      }
-      return true;
-    }
+    // Unknown skill → ignore the whole deep link silently, stay on default view
+    if (!allSkills.some(function(s) { return s.name === skill; })) return false;
+    selectSkill(skill);
+    skillOk = true;
   }
 
   if (args) {
-    document.getElementById('arg-field').value = args;
-    if (window.history && window.history.replaceState) {
-      window.history.replaceState({}, '', window.location.pathname);
-    }
-    return true;
+    var field = document.getElementById('arg-field');
+    field.value = args;
+    // Fire the normal input listeners (char count, hint, textarea auto-grow)
+    field.dispatchEvent(new Event('input', { bubbles: true }));
   }
 
-  return false;
+  if (window.history && window.history.replaceState) {
+    window.history.replaceState({}, '', window.location.pathname);
+  }
+
+  if (autorun && skillOk && args.trim()) {
+    // Same flow as a manual click — startResearch() does its own validation
+    setTimeout(function() { startResearch(); }, 600);
+  }
+  return true;
 }
 
 // ==================== Save on pagehide (beforeunload triggers Permissions Policy violation) ====================
