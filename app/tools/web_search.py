@@ -82,38 +82,39 @@ async def web_search(query: str, max_results: int = 10) -> list:
     query = query.strip()
     logger.info(f"Web search: {query}")
 
-    # Use Bing as primary search engine (works in China)
-    results = await _bing_search(query, max_results)
+    # 相关性守卫: 结果标题/摘要与查询关键词零重叠视为"假命中"(搜索引擎反爬投毒),继续回退
+    def _relevant(rs):
+        import re as _re
+        tokens = [t for t in _re.findall(r"[一-鿿]{2,}|[A-Za-z0-9]{3,}", query)
+                  if t not in ("最新", "分析", "预测", "怎么样", "如何")]
+        if not tokens:
+            return True
+        for r in rs:
+            blob = (r.get("title", "") + r.get("snippet", ""))
+            if any(t in blob for t in tokens):
+                return True
+        return False
 
-    # If Bing fails, try DuckDuckGo as fallback
-    if not results:
-        logger.info("Bing search failed, trying DuckDuckGo...")
+    # 国内可用性优先的多源回退链: Bing → 搜狗 → 360 → DuckDuckGo(常被墙,垫底)
+    results = []
+    for name, fn in (
+        ("Bing", _bing_search),
+        ("Sogou", _sogou_search),
+        ("360", _so360_search),
+        ("DuckDuckGo", _ddg_search),
+    ):
         try:
-            client = await _get_client()
-            # Short timeout — DuckDuckGo is often blocked in China
-            resp = await asyncio.wait_for(
-                client.get(
-                    "https://html.duckduckgo.com/html/",
-                    params={"q": query, "kl": "cn-zh"},
-                ),
-                timeout=8.0,
-            )
-            if resp.status_code == 200:
-                soup = BeautifulSoup(resp.text, "html.parser")
-                for item in soup.select(".result")[:max_results]:
-                    title_elem = item.select_one(".result__a")
-                    snippet_elem = item.select_one(".result__snippet")
-                    title = title_elem.get_text(strip=True) if title_elem else ""
-                    url = title_elem.get("href", "") if title_elem else ""
-                    snippet = snippet_elem.get_text(strip=True) if snippet_elem else ""
-                    if url and "//duckduckgo.com/l/?uddg=" in url:
-                        import urllib.parse
-                        parsed = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
-                        url = parsed.get("uddg", [url])[0]
-                    if title and url:
-                        results.append({"title": title, "url": url, "snippet": snippet})
+            results = await fn(query, max_results)
         except Exception as e:
-            logger.debug(f"DuckDuckGo fallback failed: {e}")
+            logger.debug(f"{name} search error: {e}")
+            results = []
+        if results and _relevant(results):
+            if name != "Bing":
+                logger.info(f"Web search via fallback: {name}")
+            break
+        if results:
+            logger.info(f"{name} results rejected by relevance guard, trying next source")
+            results = []
 
     if not results:
         logger.warning(f"No web search results for: {query}")
@@ -125,6 +126,80 @@ async def web_search(query: str, max_results: int = 10) -> list:
         }]
 
     logger.info(f"Web search found {len(results)} results for '{query}'")
+    return results
+
+
+async def _sogou_search(query: str, max_results: int = 10) -> list:
+    """搜狗网页搜索(国内可用) — HTML 解析回退源"""
+    client = await _get_client()
+    resp = await asyncio.wait_for(
+        client.get("https://www.sogou.com/web", params={"query": query},
+                   headers={"Referer": "https://www.sogou.com/"}),
+        timeout=8.0,
+    )
+    if resp.status_code != 200:
+        return []
+    soup = BeautifulSoup(resp.text, "html.parser")
+    results = []
+    for item in soup.select(".vrwrap, .rb")[:max_results]:
+        t = item.select_one("h3 a, .vr-title a")
+        sn = item.select_one(".fz-mid, .space-txt, .text-layout")
+        title = t.get_text(strip=True) if t else ""
+        url = t.get("href", "") if t else ""
+        snippet = sn.get_text(strip=True) if sn else ""
+        if url.startswith("/"):
+            url = "https://www.sogou.com" + url
+        if title and url:
+            results.append({"title": title, "url": url, "snippet": snippet})
+    return results
+
+
+async def _so360_search(query: str, max_results: int = 10) -> list:
+    """360 搜索(国内可用) — HTML 解析回退源"""
+    client = await _get_client()
+    resp = await asyncio.wait_for(
+        client.get("https://www.so.com/s", params={"q": query},
+                   headers={"Referer": "https://www.so.com/"}),
+        timeout=8.0,
+    )
+    if resp.status_code != 200:
+        return []
+    soup = BeautifulSoup(resp.text, "html.parser")
+    results = []
+    for item in soup.select(".res-list")[:max_results]:
+        t = item.select_one("h3 a")
+        sn = item.select_one(".res-desc")
+        title = t.get_text(strip=True) if t else ""
+        url = t.get("href", "") if t else ""
+        snippet = sn.get_text(strip=True) if sn else ""
+        if title and url and url.startswith("http"):
+            results.append({"title": title, "url": url, "snippet": snippet})
+    return results
+
+
+async def _ddg_search(query: str, max_results: int = 10) -> list:
+    """DuckDuckGo HTML(中国常被阻断,短超时垫底)"""
+    client = await _get_client()
+    resp = await asyncio.wait_for(
+        client.get("https://html.duckduckgo.com/html/", params={"q": query, "kl": "cn-zh"}),
+        timeout=8.0,
+    )
+    if resp.status_code != 200:
+        return []
+    soup = BeautifulSoup(resp.text, "html.parser")
+    results = []
+    for item in soup.select(".result")[:max_results]:
+        title_elem = item.select_one(".result__a")
+        snippet_elem = item.select_one(".result__snippet")
+        title = title_elem.get_text(strip=True) if title_elem else ""
+        url = title_elem.get("href", "") if title_elem else ""
+        snippet = snippet_elem.get_text(strip=True) if snippet_elem else ""
+        if url and "//duckduckgo.com/l/?uddg=" in url:
+            import urllib.parse
+            parsed = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+            url = parsed.get("uddg", [url])[0]
+        if title and url:
+            results.append({"title": title, "url": url, "snippet": snippet})
     return results
 
 
