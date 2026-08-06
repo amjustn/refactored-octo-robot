@@ -1319,7 +1319,7 @@ async function startResearch() {
     return '<div class="agent-row" id="agent-' + i + '">' +
       '<div class="agent-dot pending"></div>' +
       '<span>' + escHtml(name) + topic + '</span>' +
-      '<span style="color:var(--text-secondary);font-size:0.7rem">等待中</span>' +
+      '<span class="agent-status" style="color:var(--text-secondary);font-size:0.7rem">等待中</span>' +
       '<button class="agent-retry" onclick="retryFailedTask()" title="重试">⟳ 重试</button></div>';
   }).join('');
 
@@ -1607,9 +1607,10 @@ function updateAgentProgress(name, status, message) {
   if (!row) return;
 
   var dot = row.querySelector('.agent-dot');
-  var statusText = row.querySelector('span:last-child');
+  var statusText = row.querySelector('.agent-status');
 
   dot.className = 'agent-dot ' + status;
+  if (!statusText) return;
   if (status === 'completed') {
     statusText.textContent = '完成';
     statusText.style.color = 'var(--accent-green)';
@@ -1635,7 +1636,7 @@ function updateAllAgents(status) {
     var row = document.getElementById('agent-' + i);
     if (!row) return;
     row.querySelector('.agent-dot').className = 'agent-dot ' + status;
-    row.querySelector('span:last-child').textContent = status === 'completed' ? '完成' : '';
+    row.querySelector('.agent-status').textContent = status === 'completed' ? '完成' : '';
   });
 }
 
