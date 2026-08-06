@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>AI Berkshire Web - 价值投资研究工作站</title>
 <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
-<link rel="stylesheet" href="/static/css/style.css?v=20260804b">
+<link rel="stylesheet" href="/static/css/style.css?v=20260806a">
 </head>
 <body>
 <div id="toast-container"></div>
@@ -164,6 +164,12 @@
         <div class="costs-header">
           <button onclick="closeCosts()" class="btn-back">← 返回</button>
           <h2>成本统计</h2>
+          <div class="costs-model-bar">
+            <label for="cost-model-sel">模型：</label>
+            <select id="cost-model-sel" onchange="setCostModel(this.value)">
+              <option value="">全部模型</option>
+            </select>
+          </div>
           <div class="costs-days" id="costs-days">
             <button data-days="7" onclick="setCostDays(7)">近7天</button>
             <button data-days="30" class="active" onclick="setCostDays(30)">近30天</button>
@@ -176,6 +182,8 @@
           <div class="cost-card"><div class="cost-card-label">总费用</div><div class="cost-card-value" id="cost-total-yuan">-</div></div>
           <div class="cost-card"><div class="cost-card-label">平均耗时</div><div class="cost-card-value" id="cost-avg-duration">-</div></div>
         </div>
+        <h3 class="costs-section-title">按模型统计</h3>
+        <div id="cost-model-table"></div>
         <h3 class="costs-section-title">每日费用（¥）</h3>
         <div id="cost-chart-daily" class="cost-chart"></div>
         <h3 class="costs-section-title">按技能费用（¥）</h3>

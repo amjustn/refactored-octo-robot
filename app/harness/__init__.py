@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from time import time
 from typing import Optional
 
-from ..core.config import MAX_CONCURRENT_RUNS
+from ..core.config import LLM_MODEL, MAX_CONCURRENT_RUNS
 from ..core.llm import chat_complete, clear_usage, get_usage, set_usage_context
 from ..models.schemas import AgentProgress, ResearchStatus
 from .events import EventBus, EventType, get_bus
@@ -169,12 +169,18 @@ async def _summarize_report(report: str, spec: TaskSpec) -> str:
 
 # ==================== execution ====================
 
-async def _execute(spec: TaskSpec, bus: EventBus) -> str:
-    """Dispatch to AgentRunner (single / multi / series unified)."""
+async def _execute(spec: TaskSpec, bus: EventBus) -> tuple[str, list]:
+    """Dispatch to AgentRunner (single / multi / series unified).
+
+    Returns (report, extra_warnings) — extra_warnings carries llm_fallback
+    events raised when a custom model couldn't function-call and an agent
+    was retried with the server default model.
+    """
     from .runner import AgentRunner
 
     runner = AgentRunner(bus=bus, task_id=spec.task_id)
-    return await runner.run(spec)
+    report = await runner.run(spec)
+    return report, runner.extra_warnings
 
 
 async def _save_partial_report(spec: TaskSpec, repo: Repository, reason: str):
@@ -258,12 +264,16 @@ async def run(spec: TaskSpec, bus: Optional[EventBus] = None) -> RunResult:
                 a.status = "running"
             await _persist_active(spec.task_id, spec.arguments, repo)
 
-            report = await _execute(spec, bus)
+            report, extra_warnings = await _execute(spec, bus)
 
             # OutputGuard: four quality gates before persistence
             from .guards import OutputGuard
             guard = OutputGuard(bus=bus, task_id=spec.task_id)
             report, guard_warnings = guard.check(report, spec.skill_name, spec.strategy)
+            if extra_warnings:
+                guard_warnings.extend(extra_warnings)
+                notes = "；".join(w["detail"] for w in extra_warnings[:2])
+                report = f"> ⚠️ 模型告警：{notes}\n\n" + report
 
             # One-line conclusion for the reports list (before get_usage so
             # its tokens flow into the existing usage accounting).
@@ -273,7 +283,10 @@ async def run(spec: TaskSpec, bus: Optional[EventBus] = None) -> RunResult:
             tokens = get_usage(spec.task_id)
             billing = await repo.asave_billing(
                 spec.task_id, tokens, duration,
-                guard_warnings=guard_warnings, model=spec.llm.model,
+                guard_warnings=guard_warnings,
+                # Effective primary model: user override or server default,
+                # so the cost dashboard can break stats down by model.
+                model=spec.llm.model or LLM_MODEL,
             )
             usage = {
                 "prompt_tokens": billing["tokens_prompt"],

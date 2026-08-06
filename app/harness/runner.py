@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Optional
 
 from ..core.config import AGENT_TIMEOUT, MAX_PARALLEL_AGENTS
-from ..core.llm import chat_complete, chat_complete_with_tools, chat_stream
+from ..core.llm import chat_complete, chat_complete_with_tools, chat_stream, pop_tool_fallback
 from ..models.schemas import AgentProgress
 from ..skills import build_user_prompt, get_skill
 from .context import ContextBuilder
@@ -96,12 +96,27 @@ class AgentRunner:
         self._tool_call_counts: dict[str, dict[str, int]] = {}
         # P2: scratchpad path — written once on first tool call
         self._scratchpad_path: Optional[Path] = None
+        # Custom-model tool fallbacks — merged into guard_warnings by harness run()
+        self.extra_warnings: list[dict] = []
 
     # ---------- event helpers ----------
 
     def _emit(self, type_: EventType, **payload):
         if self.bus is not None:
             self.bus.emit(self.task_id, type_, **payload)
+
+    def _note_tool_fallback(self, agent_label: str):
+        """Record + broadcast when a custom model couldn't function-call and
+        the harness retried the agent with the server default model."""
+        event = pop_tool_fallback()
+        if not event:
+            return
+        detail = (
+            f"Agent「{agent_label}」配置的模型 {event['from_model']} 未发起工具调用"
+            f"（疑似不支持 function calling），已自动回退默认模型 {event['to_model']} 完成取数"
+        )[:300]
+        self.extra_warnings.append({"gate": "llm_fallback", "detail": detail})
+        self._emit(EventType.GUARD_WARNING, gate="llm_fallback", detail=detail)
 
     def _progress(self, agent: str, status: str, message: str = "", progress: float = 0.0):
         self._emit(EventType.PROGRESS, agent=agent, status=status,
@@ -270,6 +285,7 @@ class AgentRunner:
                 tool_executor=self._tool_executor(agent_role),
                 llm_config=llm_config,
             )
+            self._note_tool_fallback(agent_role)
             if stream:
                 self._chunk(result, agent=agent_role)
             return result
@@ -655,6 +671,7 @@ class AgentRunner:
                     ),
                     timeout=AGENT_TIMEOUT,
                 )
+                self._note_tool_fallback(f"article-{i + 1}")
                 articles.append((topic, article))
                 self._chunk(article, agent=f"article-{i + 1}")
                 self._progress(

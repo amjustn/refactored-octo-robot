@@ -205,7 +205,7 @@ class TaskStore:
             finally:
                 conn.close()
 
-    def get_cost_stats(self, days: int = 30) -> dict:
+    def get_cost_stats(self, days: int = 30, model: str = None) -> dict:
         """Aggregate LLM billing stats over the last `days` calendar days
         (including today, local time).
 
@@ -215,15 +215,22 @@ class TaskStore:
         a run — including their partial/zero billing would skew the
         totals and averages, so both are excluded.
 
-        Returns totals / by_day (missing days zero-filled) / by_skill
-        (sorted by cost desc). `days` is clamped to [1, 365].
+        `model`（可选）按模型过滤所有聚合；模型名为空的旧记录归入
+        'unknown' 分组。返回 totals / by_day（缺日补零）/ by_skill /
+        by_model（均按费用降序）。`days` 被钳制到 [1, 365]。
         """
         days = max(1, min(int(days), 365))
         today = datetime.now().date()
         start = today - timedelta(days=days - 1)
         cutoff = datetime(start.year, start.month, start.day).isoformat()
+        # 空的 model 列（旧数据）统一归入 'unknown' 分组，前端以此值回传过滤
+        model_expr = "COALESCE(NULLIF(model, ''), 'unknown')"
         where = ("WHERE status IN ('completed', 'failed', 'cancelled') "
                  "AND created_at >= ?")
+        params: tuple = (cutoff,)
+        if model:
+            where += f" AND {model_expr} = ?"
+            params = (cutoff, model)
         with self._lock:
             conn = self._get_conn()
             try:
@@ -234,7 +241,7 @@ class TaskStore:
                            COALESCE(SUM(cost_yuan), 0) AS cost_yuan,
                            COALESCE(AVG(COALESCE(duration_s, 0)), 0) AS avg_duration_s
                     FROM tasks {where}
-                """, (cutoff,)).fetchone()
+                """, params).fetchone()
                 day_rows = conn.execute(f"""
                     SELECT substr(created_at, 1, 10) AS day,
                            COUNT(*) AS runs,
@@ -242,7 +249,7 @@ class TaskStore:
                            COALESCE(SUM(tokens_prompt + tokens_completion), 0) AS tokens
                     FROM tasks {where}
                     GROUP BY day
-                """, (cutoff,)).fetchall()
+                """, params).fetchall()
                 skill_rows = conn.execute(f"""
                     SELECT skill_name,
                            COUNT(*) AS runs,
@@ -251,7 +258,17 @@ class TaskStore:
                     FROM tasks {where}
                     GROUP BY skill_name
                     ORDER BY cost_yuan DESC, runs DESC
-                """, (cutoff,)).fetchall()
+                """, params).fetchall()
+                model_rows = conn.execute(f"""
+                    SELECT {model_expr} AS model,
+                           COUNT(*) AS runs,
+                           COALESCE(SUM(cost_yuan), 0) AS cost_yuan,
+                           COALESCE(SUM(tokens_prompt + tokens_completion), 0) AS tokens,
+                           COALESCE(AVG(COALESCE(duration_s, 0)), 0) AS avg_duration_s
+                    FROM tasks {where}
+                    GROUP BY {model_expr}
+                    ORDER BY cost_yuan DESC, runs DESC
+                """, params).fetchall()
             finally:
                 conn.close()
 
@@ -275,6 +292,16 @@ class TaskStore:
             }
             for r in skill_rows
         ]
+        by_model = [
+            {
+                "model": r["model"],
+                "runs": r["runs"],
+                "cost_yuan": round(r["cost_yuan"], 4),
+                "tokens": r["tokens"],
+                "avg_duration_s": round(r["avg_duration_s"], 1),
+            }
+            for r in model_rows
+        ]
         return {
             "days": days,
             "totals": {
@@ -286,6 +313,7 @@ class TaskStore:
             },
             "by_day": by_day,
             "by_skill": by_skill,
+            "by_model": by_model,
         }
 
     def mark_running_as_interrupted(self):

@@ -189,7 +189,7 @@ async def api_llm_test(request: "Request"):
         return {"ok": False, "error": "配置为空或格式不正确（需要 api_key / base_url / model）"}
     if not llm_config.get("model"):
         return {"ok": False, "error": "请填写模型名称"}
-    from ..core.llm import chat_complete
+    from ..core.llm import chat_complete, probe_tool_calling
     try:
         reply = await asyncio.wait_for(
             chat_complete(
@@ -204,7 +204,26 @@ async def api_llm_test(request: "Request"):
         reply_text = (reply or "").strip()
         if not reply_text or len(reply_text) > 100:
             return {"ok": False, "error": f"收到异常回复: {reply_text[:50]}"}
-        return {"ok": True, "model": llm_config.get("model", ""), "reply": reply_text[:50], "using_server_key": not llm_config.get("api_key")}
+        # Second probe: research agents need structured function calling to
+        # fetch real market data. Surface unsupported models BEFORE the user
+        # runs a research task and gets a hollow "无法获取实时数据" report.
+        tools_supported, tools_detail = False, "工具调用探测未执行"
+        try:
+            tools_supported, tools_detail = await asyncio.wait_for(
+                probe_tool_calling(llm_config), timeout=30.0
+            )
+        except asyncio.TimeoutError:
+            tools_detail = "工具调用探测超时（30秒）"
+        except Exception as e:
+            tools_detail = f"工具调用探测失败: {str(e)[:120]}"
+        return {
+            "ok": True,
+            "model": llm_config.get("model", ""),
+            "reply": reply_text[:50],
+            "using_server_key": not llm_config.get("api_key"),
+            "tools_supported": tools_supported,
+            "tools_detail": tools_detail,
+        }
     except asyncio.TimeoutError:
         return {"ok": False, "error": "连接超时（30秒），请检查 base_url 是否可达"}
     except Exception as e:
@@ -603,16 +622,17 @@ async def api_export_pdf(request: Request):
         raise HTTPException(status_code=500, detail=f"PDF generation failed: {str(e)}")
 
 @router.get("/api/stats/costs")
-async def api_cost_stats(days: int = Query(default=30, ge=1, le=365)):
+async def api_cost_stats(days: int = Query(default=30, ge=1, le=365), model: str = Query(default=None, max_length=300)):
     """LLM cost/token aggregation for the cost dashboard.
 
     Counts only terminal tasks that actually ran (completed / failed /
     cancelled); running and interrupted tasks are excluded so partial
     or zero billing does not skew the averages. `by_day` covers the
     last `days` calendar days (including today) with zero-filled gaps.
+    `model`（可选）按模型过滤；`by_model` 始终返回模型维度分组。
     """
     repo = get_repository()
-    return await repo.aget_cost_stats(days)
+    return await repo.aget_cost_stats(days, model)
 
 @router.post("/api/tools/{tool_name}")
 async def api_run_tool(tool_name: str, params: dict = None):

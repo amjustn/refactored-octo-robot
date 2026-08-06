@@ -7,6 +7,7 @@ async function-calling support for financial + market data tools.
 import asyncio
 import json
 import logging
+import re
 from contextvars import ContextVar
 from typing import AsyncGenerator, Awaitable, Callable, Optional
 
@@ -98,6 +99,26 @@ def _record_usage(usage) -> None:
 _MAX_RETRIES = 3
 _RETRY_DELAYS = [2, 5, 10]  # seconds
 _MAX_TOOL_ROUNDS = 6  # Max back-and-forth rounds for function calling
+
+# ==================== Tool-fallback (custom model can't function-call) ====================
+# When a user-supplied model/endpoint never emits structured tool_calls and
+# answers with a "抱歉，我无法获取实时数据" style refusal, retry the same
+# prompt once with the server default model so agents can still fetch data.
+_tool_fallback_var: ContextVar[Optional[dict]] = ContextVar("llm_tool_fallback", default=None)
+
+_REFUSAL_RE = re.compile(r"(抱歉|对不起)[^。\n]{0,12}我无法|我无法[^。\n]{0,10}(实时|市场).{0,4}数据")
+
+
+def _looks_like_no_data_refusal(text: str) -> bool:
+    """Heuristic: first-round refusal claiming no access to real-time data."""
+    return bool(_REFUSAL_RE.search((text or "")[:200]))
+
+
+def pop_tool_fallback() -> Optional[dict]:
+    """Return (and clear) the fallback event recorded in this context, if any."""
+    event = _tool_fallback_var.get()
+    _tool_fallback_var.set(None)
+    return event
 
 
 def _is_retryable(exc: Exception) -> bool:
@@ -249,6 +270,8 @@ async def chat_complete_with_tools(
     cfg_base, cfg_key, cfg_model = resolve_llm_config(llm_config)
     client = get_client(cfg_base, cfg_key)
     model = cfg_model or model or LLM_MODEL
+    override_active = bool(cfg_base or cfg_key or cfg_model)
+    _tool_fallback_var.set(None)
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_message},
@@ -298,7 +321,24 @@ async def chat_complete_with_tools(
 
         # If no tool calls, we're done
         if not message.tool_calls:
-            return message.content or ""
+            content = message.content or ""
+            # A tool-enabled agent that refuses in round 0 ("我无法获取实时数据")
+            # almost always means the user-configured model/endpoint cannot do
+            # function calling. Retry once with the server default model so the
+            # run still fetches real data instead of writing an empty report.
+            if round_num == 0 and override_active and _looks_like_no_data_refusal(content):
+                logger.warning(
+                    f"Custom model '{model}' refused without any tool call; "
+                    f"retrying with server default model '{LLM_MODEL}'"
+                )
+                result = await chat_complete_with_tools(
+                    system_prompt, user_message, tools, tool_executor,
+                    model=None, temperature=temperature, llm_config=None,
+                )
+                # Set AFTER the recursive call — its own entry resets the var.
+                _tool_fallback_var.set({"from_model": model, "to_model": LLM_MODEL})
+                return result
+            return content
 
         # Add assistant message with tool calls
         messages.append({
@@ -339,6 +379,14 @@ async def chat_complete_with_tools(
 
     # Max rounds reached — get final response without tools
     logger.warning(f"Max tool rounds ({_MAX_TOOL_ROUNDS}) reached, requesting final summary")
+    # Nudge hard: some models (e.g. kimi-k3) otherwise answer the no-tools
+    # completion with another intent line, producing an empty report
+    # section despite a successful data-gathering loop.
+    messages.append({
+        "role": "user",
+        "content": "工具调用轮次已用完。请立即基于以上已经获取到的数据，输出完整的分析正文，禁止再请求调用任何工具。",
+    })
+
     async def _create_final():
         return await _create_completion(
             client,
@@ -355,3 +403,52 @@ async def chat_complete_with_tools(
     except Exception as e:
         logger.error(f"Final summary failed: {e}")
         return "（分析完成，但工具调用轮次已达上限，无法生成最终摘要）"
+
+
+# ==================== Capability probe (for /api/llm/test) ====================
+_PROBE_TOOL_SCHEMA = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_stock_price",
+            "description": "查询股票最新价格",
+            "parameters": {
+                "type": "object",
+                "properties": {"symbol": {"type": "string", "description": "股票代码"}},
+                "required": ["symbol"],
+            },
+        },
+    }
+]
+
+
+async def probe_tool_calling(llm_config: dict = None) -> tuple:
+    """Probe whether the configured model/endpoint performs function calling.
+
+    Returns (supported: bool, detail: str). Research agents depend on
+    structured tool_calls to fetch real market data; a model or relay that
+    drops the ``tools`` parameter produces hollow "无法获取实时数据" reports.
+    """
+    cfg_base, cfg_key, cfg_model = resolve_llm_config(llm_config)
+    client = get_client(cfg_base, cfg_key)
+    model = cfg_model or LLM_MODEL
+    try:
+        response = await _create_completion(
+            client,
+            model=model,
+            messages=[
+                {"role": "system", "content": "你是数据查询助手。需要数据时必须调用提供的工具，禁止直接回答。"},
+                {"role": "user", "content": "请查询贵州茅台(600519)的最新股价"},
+            ],
+            tools=_PROBE_TOOL_SCHEMA,
+            temperature=0,
+        )
+    except Exception as e:
+        return False, f"工具调用请求被端点拒绝: {str(e)[:120]}"
+    message = response.choices[0].message
+    if message.tool_calls:
+        return True, "工具调用正常"
+    content = message.content or ""
+    if "DSML" in content or "tool_call" in content:
+        return False, "模型以文本形式输出工具调用，非标准 function calling"
+    return False, "模型未发起工具调用（tools 参数可能被中转端点丢弃）"

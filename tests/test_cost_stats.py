@@ -157,13 +157,16 @@ def test_api_cost_stats_shape(api_repo):
     res = client.get("/api/stats/costs?days=7", headers=_auth_headers())
     assert res.status_code == 200
     data = res.json()
-    assert set(data.keys()) == {"days", "totals", "by_day", "by_skill"}
+    assert set(data.keys()) == {"days", "totals", "by_day", "by_skill", "by_model"}
     assert data["days"] == 7
     assert data["totals"]["runs"] == 4
     assert data["totals"]["cost_yuan"] == pytest.approx(0.036, abs=1e-9)
     assert len(data["by_day"]) == 7
     assert data["by_day"][0]["date"] <= data["by_day"][-1]["date"]
     assert data["by_skill"][0]["skill_name"] == "investment-team"
+    # 种子数据无模型列 → 全部归入 unknown 分组
+    assert [m["model"] for m in data["by_model"]] == ["unknown"]
+    assert data["by_model"][0]["runs"] == 4
 
 
 def test_api_cost_stats_default_days(api_repo):
@@ -177,3 +180,74 @@ def test_api_cost_stats_default_days(api_repo):
 def test_api_cost_stats_days_out_of_range(api_repo):
     assert client.get("/api/stats/costs?days=0", headers=_auth_headers()).status_code == 422
     assert client.get("/api/stats/costs?days=500", headers=_auth_headers()).status_code == 422
+
+
+# ==================== by_model 分组与 model 过滤 ====================
+
+def _seed_models(repo):
+    """插入带模型名的账单行（含一行无模型的旧数据）。"""
+    now = datetime.now().isoformat()
+    rows = [
+        # task_id, model, tok_p, tok_c, cost, duration
+        ("m1", "glm-4.7", 1000, 500, 0.01, 10.0),
+        ("m2", "glm-4.7", 2000, 1000, 0.02, 30.0),
+        ("m3", "kimi-k3", 500, 500, 0.04, 20.0),
+        ("m4", "", 100, 100, 0.001, 5.0),
+    ]
+    conn = sqlite3.connect(str(repo.store.db_path), timeout=10)
+    try:
+        for tid, mdl, tp, tc, cost, dur in rows:
+            conn.execute(
+                """INSERT INTO tasks
+                       (task_id, skill_name, status, arguments, agents_json,
+                        report, error, created_at, updated_at,
+                        tokens_prompt, tokens_completion, cost_yuan, duration_s, model)
+                   VALUES (?, 'investment-team', 'completed', '', '[]', '', '', ?, ?, ?, ?, ?, ?, ?)""",
+                (tid, now, now, tp, tc, cost, dur, mdl),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+@pytest.fixture
+def model_repo(tmp_path):
+    repo = persist_mod.Repository(TaskStore(db_path=tmp_path / "tasks.db"))
+    _seed_models(repo)
+    return repo
+
+
+def test_by_model_grouping(model_repo):
+    stats = model_repo.get_cost_stats(days=7)
+    by_model = stats["by_model"]
+    # 费用降序：kimi 0.04 > glm 0.03 > unknown 0.001
+    assert [m["model"] for m in by_model] == ["kimi-k3", "glm-4.7", "unknown"]
+    glm = by_model[1]
+    assert glm["runs"] == 2
+    assert glm["cost_yuan"] == pytest.approx(0.03, abs=1e-9)
+    assert glm["tokens"] == 4500
+    assert glm["avg_duration_s"] == pytest.approx(20.0, abs=1e-9)
+
+
+def test_model_filter(model_repo):
+    stats = model_repo.get_cost_stats(days=7, model="glm-4.7")
+    t = stats["totals"]
+    assert t["runs"] == 2
+    assert t["cost_yuan"] == pytest.approx(0.03, abs=1e-9)
+    assert t["avg_duration_s"] == pytest.approx(20.0, abs=1e-9)
+    assert [m["model"] for m in stats["by_model"]] == ["glm-4.7"]
+
+    # 旧数据（空 model 列）可通过 'unknown' 过滤出来
+    stats_unknown = model_repo.get_cost_stats(days=7, model="unknown")
+    assert stats_unknown["totals"]["runs"] == 1
+    assert stats_unknown["totals"]["cost_yuan"] == pytest.approx(0.001, abs=1e-9)
+
+
+def test_api_cost_stats_model_filter(model_repo, monkeypatch):
+    monkeypatch.setattr(persist_mod, "_repo", model_repo)
+    res = client.get("/api/stats/costs?days=7&model=kimi-k3", headers=_auth_headers())
+    assert res.status_code == 200
+    data = res.json()
+    assert data["totals"]["runs"] == 1
+    assert data["totals"]["cost_yuan"] == pytest.approx(0.04, abs=1e-9)
+    assert [m["model"] for m in data["by_model"]] == ["kimi-k3"]

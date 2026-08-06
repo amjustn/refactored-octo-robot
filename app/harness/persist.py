@@ -27,10 +27,13 @@ from ..models.schemas import ResearchStatus
 
 logger = logging.getLogger("ai_berkshire.harness.persist")
 
-# 元 / 百万 tokens。按 DeepSeek 公开价目估算，可按实际账单调整。
+# 元 / 百万 tokens。按各厂公开价目估算，可按实际账单调整。
 MODEL_PRICING = {
     "deepseek-v4-flash": {"prompt": 2.0, "completion": 8.0},
     "deepseek-v4-pro": {"prompt": 4.0, "completion": 16.0},
+    "glm-4.7": {"prompt": 2.0, "completion": 8.0},
+    "glm-4.5": {"prompt": 2.0, "completion": 8.0},
+    "kimi-k3": {"prompt": 4.0, "completion": 16.0},
     "default": {"prompt": 2.0, "completion": 8.0},
 }
 
@@ -41,6 +44,7 @@ _NEW_COLUMNS = {
     "cost_yuan": "cost_yuan REAL DEFAULT 0",
     "duration_s": "duration_s REAL",
     "guard_warnings": "guard_warnings TEXT DEFAULT '[]'",
+    "model": "model TEXT DEFAULT ''",
 }
 
 
@@ -108,8 +112,8 @@ class Repository:
     def mark_running_as_interrupted(self):
         return self.store.mark_running_as_interrupted()
 
-    def get_cost_stats(self, days: int = 30) -> dict:
-        return self.store.get_cost_stats(days)
+    def get_cost_stats(self, days: int = 30, model: str = None) -> dict:
+        return self.store.get_cost_stats(days, model)
 
     # ---------- artifacts (intermediate agent results) ----------
 
@@ -139,8 +143,8 @@ class Repository:
     async def aget_artifacts(self, task_id: str) -> list[tuple[str, str]]:
         return await asyncio.to_thread(self.get_artifacts, task_id)
 
-    async def aget_cost_stats(self, days: int = 30) -> dict:
-        return await asyncio.to_thread(self.get_cost_stats, days)
+    async def aget_cost_stats(self, days: int = 30, model: str = None) -> dict:
+        return await asyncio.to_thread(self.get_cost_stats, days, model)
 
     # ---------- billing ----------
 
@@ -159,18 +163,19 @@ class Repository:
             "cost_yuan": compute_cost_yuan(usage, model),
             "duration_s": round(duration_s, 1),
             "guard_warnings": json.dumps(guard_warnings or [], ensure_ascii=False),
+            "model": (model or "")[:300],
         }
         conn = sqlite3.connect(str(self.store.db_path), timeout=10)
         try:
             conn.execute(
                 """UPDATE tasks SET
                        tokens_prompt = ?, tokens_completion = ?,
-                       cost_yuan = ?, duration_s = ?, guard_warnings = ?
+                       cost_yuan = ?, duration_s = ?, guard_warnings = ?, model = ?
                    WHERE task_id = ?""",
                 (
                     record["tokens_prompt"], record["tokens_completion"],
                     record["cost_yuan"], record["duration_s"],
-                    record["guard_warnings"], task_id,
+                    record["guard_warnings"], record["model"], task_id,
                 ),
             )
             conn.commit()

@@ -390,7 +390,7 @@ var LLM_PROVIDER_PRESETS = {
   kimi: {
     label: 'Kimi（Moonshot）',
     base_url: 'https://api.moonshot.cn/v1',
-    models: ['kimi-k3', 'kimi-k3-0905-preview', 'kimi-k2-0905-preview']
+    models: ['kimi-k3']
   },
   ollama: {
     label: 'Ollama（本地）',
@@ -794,8 +794,13 @@ async function _onPaTest(btn) {
     }
     var data = await res.json();
     if (data.ok) {
-      resultEl.textContent = '✓ ' + (data.reply || '').slice(0, 30);
-      resultEl.className = 'pa-test-result ok';
+      if (data.tools_supported === false) {
+        resultEl.textContent = '⚠ 可连接但不支持工具调用，该Agent取数时将回退默认模型';
+        resultEl.className = 'pa-test-result err';
+      } else {
+        resultEl.textContent = '✓ ' + (data.reply || '').slice(0, 30);
+        resultEl.className = 'pa-test-result ok';
+      }
     } else {
       resultEl.textContent = '✗ ' + (data.error || '失败').slice(0, 40);
       resultEl.className = 'pa-test-result err';
@@ -978,6 +983,10 @@ async function testLlmConfig() {
       resultEl.className = 'llm-test-result ok';
       if (!data.model) {
         resultEl.textContent = '⚠ 连接成功但模型名为空，请填写模型名称';
+        resultEl.className = 'llm-test-result err';
+      } else if (data.tools_supported === false) {
+        resultEl.textContent = '⚠ 连接成功，但工具调用测试未通过：' + (data.tools_detail || '该模型/端点不支持 function calling')
+          + '。投研 Agent 依赖工具获取实时数据，用它会产出空泛报告（运行时系统将自动回退服务器默认模型取数）。';
         resultEl.className = 'llm-test-result err';
       }
     } else {
@@ -2319,6 +2328,8 @@ function closeCompare() {
 var _costDays = 30;
 var _costChartDaily = null;
 var _costChartSkill = null;
+var _costModel = '';          // '' = 全部模型；否则为 by_model 返回的模型名
+var _costModelOptions = null; // 未过滤响应里的模型清单，供下拉框保持完整
 
 async function showCosts() {
   document.getElementById('empty-state').style.display = 'none';
@@ -2408,12 +2419,37 @@ function setCostDays(days) {
   loadCostStats();
 }
 
+function setCostModel(model) {
+  _costModel = model || '';
+  loadCostStats();
+}
+
+function _renderCostModelOptions() {
+  var sel = document.getElementById('cost-model-sel');
+  if (!sel) return;
+  var opts = ['<option value="">全部模型</option>'];
+  (_costModelOptions || []).forEach(function(m) {
+    var label = m === 'unknown' ? '未知（旧数据）' : m;
+    var selected = (m === _costModel) ? ' selected' : '';
+    opts.push('<option value="' + escHtml(m) + '"' + selected + '>' + escHtml(label) + '</option>');
+  });
+  sel.innerHTML = opts.join('');
+  sel.value = _costModel;
+}
+
 async function loadCostStats() {
   try {
     var headers = {};
     Object.assign(headers, getAuthHeaders());
-    var res = await fetch('/api/stats/costs?days=' + _costDays, { headers: headers });
+    var url = '/api/stats/costs?days=' + _costDays;
+    if (_costModel) url += '&model=' + encodeURIComponent(_costModel);
+    var res = await fetch(url, { headers: headers });
     var data = await res.json();
+    // 只有未过滤的响应才刷新下拉框选项，避免选中某模型后选项塌缩
+    if (!_costModel) {
+      _costModelOptions = (data.by_model || []).map(function(r) { return r.model; });
+    }
+    _renderCostModelOptions();
     renderCostStats(data);
   } catch (e) {
     showToast('成本数据加载失败: ' + e.message, 'error');
@@ -2427,6 +2463,27 @@ function renderCostStats(data) {
   document.getElementById('cost-total-tokens').textContent = totalTokens.toLocaleString();
   document.getElementById('cost-total-yuan').textContent = '¥' + (t.cost_yuan || 0).toFixed(4);
   document.getElementById('cost-avg-duration').textContent = fmtDuration(t.avg_duration_s || 0);
+
+  // 按模型统计表：费用 / 次数 / Token / 平均耗时
+  var byModel = data.by_model || [];
+  var tbl = document.getElementById('cost-model-table');
+  if (!byModel.length) {
+    tbl.innerHTML = '<p style="color:var(--text-secondary);font-size:0.85rem">当前筛选条件下暂无模型数据</p>';
+  } else {
+    var rows = byModel.map(function(r) {
+      var label = r.model === 'unknown' ? '未知（旧数据）' : r.model;
+      return '<tr>' +
+        '<td>' + escHtml(label) + '</td>' +
+        '<td>' + (r.runs || 0) + '</td>' +
+        '<td>¥' + (r.cost_yuan || 0).toFixed(4) + '</td>' +
+        '<td>' + (r.tokens || 0).toLocaleString() + '</td>' +
+        '<td>' + fmtDuration(r.avg_duration_s || 0) + '</td>' +
+      '</tr>';
+    }).join('');
+    tbl.innerHTML = '<table class="cost-model-table"><thead><tr>' +
+      '<th>模型</th><th>运行次数</th><th>总费用</th><th>总Token</th><th>平均耗时</th>' +
+      '</tr></thead><tbody>' + rows + '</tbody></table>';
+  }
 
   var byDay = data.by_day || [];
   if (_costChartDaily) { _costChartDaily.dispose(); }

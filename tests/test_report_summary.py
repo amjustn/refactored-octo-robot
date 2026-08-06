@@ -124,7 +124,7 @@ class TestSummaryPipeline:
         from app.harness.events import EventBus
 
         async def fake_execute(spec, bus):
-            return "# 正式报告\n\n正文段落"
+            return "# 正式报告\n\n正文段落", []
 
         async def fake_chat_complete(system, user, **kw):
             return "LLM生成的一句话结论"
@@ -147,7 +147,7 @@ class TestSummaryPipeline:
         from app.harness.events import EventBus
 
         async def fake_execute(spec, bus):
-            return "# 兜底标题\n\n兜底正文段落"
+            return "# 兜底标题\n\n兜底正文段落", []
 
         async def boom_chat_complete(system, user, **kw):
             raise RuntimeError("LLM 不可用")
@@ -170,7 +170,7 @@ class TestSummaryPipeline:
         from app.harness.events import EventBus
 
         async def fake_execute(spec, bus):
-            return "# 报告\n\n正文"
+            return "# 报告\n\n正文", []
 
         async def boom_summarize(report, spec):
             raise RuntimeError("不应逃逸")

@@ -164,7 +164,7 @@ class TestConcurrencyGate:
         async def fake_execute(spec, bus):
             started.set()
             await release.wait()
-            return "# 报告\n\n正文"
+            return "# 报告\n\n正文", []
 
         monkeypatch.setattr(harness, "_execute", fake_execute)
 
@@ -291,7 +291,7 @@ class TestPartialReports:
 
         async def fake_execute(spec, bus):
             await persist_mod.get_repository().asave_artifact(spec.task_id, "agent-a", "成果")
-            return "# 正式报告\n\n正文"
+            return "# 正式报告\n\n正文", []
 
         monkeypatch.setattr(harness, "_execute", fake_execute)
 
