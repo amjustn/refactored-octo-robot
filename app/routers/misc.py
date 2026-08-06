@@ -500,6 +500,9 @@ async def api_list_reports():
                     item["duration_seconds"] = meta.get("duration_seconds", 0)
                     if meta.get("summary"):
                         item["summary"] = meta["summary"]
+                    if meta.get("partial"):
+                        # 失败/取消任务的部分成果 — 历史列表提供"继续任务"入口
+                        item["partial"] = True
                 except Exception:
                     pass
             if not item["skill_name"]:

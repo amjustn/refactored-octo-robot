@@ -1272,3 +1272,27 @@ body {
   letter-spacing: 0.04em;
 }
 .cost-model-table td { background: transparent; color: var(--ink); }
+.partial-badge {
+  display: inline-block;
+  background: rgba(196, 87, 71, 0.12);
+  color: var(--accent-red, #c45747);
+  font-size: 0.65rem;
+  padding: 1px 6px;
+  border-radius: 2px;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+.btn-continue-task {
+  align-self: center;
+  flex-shrink: 0;
+  background: none;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  font-size: 0.72rem;
+  padding: 4px 10px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-family: inherit;
+  margin-right: 6px;
+}
+.btn-continue-task:hover { background: var(--accent); color: var(--washi); }

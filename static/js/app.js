@@ -2229,18 +2229,30 @@ function renderHistory(reports) {
     if (r.duration_seconds) metaParts.push('耗时 ' + fmtDuration(r.duration_seconds));
     var checked = _compareSelection.has(r.name) ? ' checked' : '';
     var summary = (r.summary || '').trim();
-    return '<div class="history-item" onclick="loadReport(\'' + safeName.replace(/'/g, "\\'") + '\')">' +
+    return '<div class="history-item' + (r.partial ? ' partial' : '') + '" onclick="loadReport(\'' + safeName.replace(/'/g, "\\'") + '\')">' +
       '<input type="checkbox" class="compare-check" data-name="' + safeName + '"' + checked +
       ' onclick="event.stopPropagation();toggleCompareSelect(this)" title="选择两份报告进行对比">' +
       '<div class="history-item-body">' +
-      '<div class="report-name">' + escHtml(title) + '</div>' +
+      '<div class="report-name">' + (r.partial ? '<span class="partial-badge">未完成</span>' : '') + escHtml(title) + '</div>' +
       (summary ? '<div class="report-summary" title="' + escHtml(summary) + '">' + escHtml(summary) + '</div>' : '') +
       '<div class="report-meta">' + escHtml(metaParts.join(' | ')) + '</div>' +
       (args ? '<div class="report-filename">' + safeName + '</div>' : '') +
       '</div>' +
+      (r.partial ? '<button class="btn-continue-task" onclick="event.stopPropagation();continueTaskByName(\'' + safeName.replace(/'/g, "\\'") + '\')" title="以相同技能和目标重新运行">⟳ 继续任务</button>' : '') +
       '<button class="btn-delete-report" onclick="event.stopPropagation();deleteReport(\'' + safeName.replace(/'/g, "\\'") + '\')" title="删除报告">✕</button>' +
       '</div>';
   }).join('');
+}
+
+// 历史报告中的失败/中断任务：以相同技能+目标重新运行
+function continueTaskByName(name) {
+  var r = (_historyData || []).find(function(x) { return x.name === name; });
+  if (!r) { showToast('找不到该报告的记录', 'error'); return; }
+  if (!r.skill_name) { showToast('无法确定该报告的技能，请手动选择技能重跑', 'error'); return; }
+  selectSkill(r.skill_name);
+  document.getElementById('arg-field').value = r.arguments || '';
+  showToast('已载入「' + (r.arguments || r.skill_name) + '」，开始重新研究', 'info');
+  startResearch();
 }
 
 async function deleteReport(filename) {
