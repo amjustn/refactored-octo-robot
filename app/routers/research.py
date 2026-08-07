@@ -23,6 +23,9 @@ from ..harness import (
     is_active as harness_is_active,
 )
 from ..harness import (
+    prepare_resume as harness_prepare_resume,
+)
+from ..harness import (
     run as harness_run,
 )
 from ..harness.events import get_bus
@@ -71,6 +74,42 @@ async def api_start_research(request: "Request", req: ResearchRequest):
 async def api_cancel_research(task_id: str):
     """Cancel a running research task on the server side (stops LLM calls)."""
     return harness_cancel(task_id)
+
+
+@router.post("/api/tasks/{task_id}/resume")
+async def api_resume_task(request: "Request", task_id: str):
+    """断点续跑：复用上次成功的 Agent 成果，只重跑失败的 Agent。
+
+    校验通过后任务在后台启动（同一 task_id），前端随后用 WS
+    watch_task_id 跟随事件流。响应携带 skipped/rerun 名单供进度页即时展示。
+    """
+    if not _main._check_rate_limit(request.client.host if request.client else "unknown"):
+        raise HTTPException(status_code=429, detail="请求过于频繁，请稍后再试")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    llm_config = _validate_llm_config(body.get("llm_config") if isinstance(body, dict) else None)
+
+    plan, error = await harness_prepare_resume(task_id, llm_override=llm_config)
+    if error:
+        raise HTTPException(status_code=400, detail=error)
+
+    bus = get_bus()
+    asyncio.create_task(
+        harness_run(
+            plan["spec"], bus=bus,
+            prefill_results=plan["prefill_results"],
+            report_overwrite=plan["report_overwrite"],
+            billing_accumulate=True,
+        )
+    )
+    return {
+        "task_id": task_id,
+        "status": "resumed",
+        "skipped_agents": plan["skipped_agents"],
+        "rerun_agents": plan["rerun_agents"],
+    }
 
 @router.websocket("/ws/research/{skill_name}")
 async def ws_research(websocket: WebSocket, skill_name: str):

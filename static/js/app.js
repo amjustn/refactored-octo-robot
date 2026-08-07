@@ -1323,6 +1323,14 @@ async function startResearch() {
       '<button class="agent-retry" onclick="retryFailedTask()" title="重试">⟳ 重试</button></div>';
   }).join('');
 
+  // 断点续跑入口：历史报告"继续任务"带入了 task_id —— 只补跑失败 Agent
+  if (_pendingResumeTaskId) {
+    var _rid = _pendingResumeTaskId;
+    _pendingResumeTaskId = null;
+    await resumeAndWatch(_rid, args);
+    return;
+  }
+
   // Stream mode now works for ALL skills via WebSocket:
   // single-agent streams chunks; multi-agent/series stream per-agent progress.
   if (streamMode) {
@@ -2165,6 +2173,7 @@ function clearResult() {
 
 // ==================== History ====================
 function backToHome() {
+  if (currentTaskId) return;  // task running — don't hide progress
   document.getElementById('result-area').style.display = 'none';
   document.getElementById('progress-area').style.display = 'none';
   document.getElementById('history-area').style.display = 'none';
@@ -2176,8 +2185,10 @@ function backToHome() {
 
 async function showHistory() {
   document.getElementById('empty-state').style.display = 'none';
-  document.getElementById('result-area').style.display = 'none';
-  document.getElementById('progress-area').style.display = 'none';
+  if (!currentTaskId) {
+    document.getElementById('result-area').style.display = 'none';
+    document.getElementById('progress-area').style.display = 'none';
+  }
   document.getElementById('compare-area').style.display = 'none';
   document.getElementById('costs-area').style.display = 'none';
   document.getElementById('decisions-area').style.display = 'none';
@@ -2238,21 +2249,52 @@ function renderHistory(reports) {
       '<div class="report-meta">' + escHtml(metaParts.join(' | ')) + '</div>' +
       (args ? '<div class="report-filename">' + safeName + '</div>' : '') +
       '</div>' +
-      (r.partial ? '<button class="btn-continue-task" onclick="event.stopPropagation();continueTaskByName(\'' + safeName.replace(/'/g, "\\'") + '\')" title="以相同技能和目标重新运行">⟳ 继续任务</button>' : '') +
+      (r.partial ? '<button class="btn-continue-task" onclick="event.stopPropagation();continueTaskByName(\'' + safeName.replace(/'/g, "\\'") + '\')" title="' + (r.resumable ? '断点续跑：复用已完成成果，仅补跑失败的 Agent' : '以相同技能和目标重新运行') + '">⟳ 继续任务</button>' : '') +
       '<button class="btn-delete-report" onclick="event.stopPropagation();deleteReport(\'' + safeName.replace(/'/g, "\\'") + '\')" title="删除报告">✕</button>' +
       '</div>';
   }).join('');
 }
 
-// 历史报告中的失败/中断任务：以相同技能+目标重新运行
+// 历史报告中的失败/中断任务：可断点续跑（resumable）时只补跑失败 Agent，
+// 否则以相同技能+目标整局重跑
+var _pendingResumeTaskId = null;
+
 function continueTaskByName(name) {
   var r = (_historyData || []).find(function(x) { return x.name === name; });
   if (!r) { showToast('找不到该报告的记录', 'error'); return; }
   if (!r.skill_name) { showToast('无法确定该报告的技能，请手动选择技能重跑', 'error'); return; }
+  _pendingResumeTaskId = (r.resumable && r.task_id) ? r.task_id : null;
   selectSkill(r.skill_name);
   document.getElementById('arg-field').value = r.arguments || '';
-  showToast('已载入「' + (r.arguments || r.skill_name) + '」，开始重新研究', 'info');
   startResearch();
+}
+
+// 断点续跑：启动 resume 后台任务，随后用 WS watch 跟随进度
+async function resumeAndWatch(taskId, args) {
+  try {
+    var headers = { 'Content-Type': 'application/json' };
+    Object.assign(headers, getAuthHeaders());
+    var res = await fetch('/api/tasks/' + encodeURIComponent(taskId) + '/resume', {
+      method: 'POST', headers: headers,
+      body: JSON.stringify({ llm_config: getLlmConfig() || undefined })
+    });
+    var data = await res.json().catch(function() { return {}; });
+    if (!res.ok || data.error) {
+      throw new Error(data.detail || data.error || ('HTTP ' + res.status));
+    }
+    currentTaskId = data.task_id;
+    (data.skipped_agents || []).forEach(function(name) {
+      updateAgentProgress(name, 'completed', '复用上次成果');
+    });
+    showToast('断点续跑：跳过 ' + (data.skipped_agents || []).length +
+      ' 个已成功 Agent，补跑 ' + (data.rerun_agents || []).length + ' 个', 'info');
+    _wsShouldReconnect = true;
+    _wsReconnectAttempts = 0;
+    _streamResearchImpl(args, '', data.task_id);
+  } catch (e) {
+    showToast('续跑启动失败：' + e.message + '，改为整局重跑', 'warning');
+    streamResearch(args, '');
+  }
 }
 
 async function deleteReport(filename) {
@@ -2346,8 +2388,10 @@ var _costModelOptions = null; // 未过滤响应里的模型清单，供下拉�
 
 async function showCosts() {
   document.getElementById('empty-state').style.display = 'none';
-  document.getElementById('result-area').style.display = 'none';
-  document.getElementById('progress-area').style.display = 'none';
+  if (!currentTaskId) {
+    document.getElementById('result-area').style.display = 'none';
+    document.getElementById('progress-area').style.display = 'none';
+  }
   document.getElementById('history-area').style.display = 'none';
   document.getElementById('compare-area').style.display = 'none';
   document.getElementById('decisions-area').style.display = 'none';
@@ -2363,8 +2407,10 @@ function closeCosts() {
 // ── P3: decision log panel ──────────────────────────────
 async function showDecisions() {
   document.getElementById('empty-state').style.display = 'none';
-  document.getElementById('result-area').style.display = 'none';
-  document.getElementById('progress-area').style.display = 'none';
+  if (!currentTaskId) {
+    document.getElementById('result-area').style.display = 'none';
+    document.getElementById('progress-area').style.display = 'none';
+  }
   document.getElementById('history-area').style.display = 'none';
   document.getElementById('compare-area').style.display = 'none';
   document.getElementById('costs-area').style.display = 'none';

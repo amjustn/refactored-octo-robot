@@ -503,12 +503,34 @@ async def api_list_reports():
                     if meta.get("partial"):
                         # 失败/取消任务的部分成果 — 历史列表提供"继续任务"入口
                         item["partial"] = True
+                    if meta.get("task_id"):
+                        item["task_id"] = meta["task_id"]
                 except Exception:
                     pass
             if not item["skill_name"]:
                 # Legacy reports: derive skill from filename prefix
                 item["skill_name"] = f.name.rsplit("_", 2)[0] if "_" in f.name else ""
             reports.append(item)
+
+    # 断点续跑标记：partial + multi-agent 技能 + 有可复用的成功 artifact。
+    # meta 没有 task_id 的旧报告按 skill+arguments 模糊匹配最近的终态任务。
+    repo = get_repository()
+    for item in reports:
+        if not item.get("partial"):
+            continue
+        tid = item.get("task_id") or repo.find_terminal_task(item["skill_name"], item["arguments"])
+        if not tid:
+            continue
+        item["task_id"] = tid
+        skill = get_skill(item["skill_name"])
+        if not skill or not skill.get("is_multi_agent"):
+            continue
+        try:
+            artifacts = repo.get_artifacts(tid)
+        except Exception:
+            continue
+        if any(not c.startswith("[错误]") for _, c in artifacts):
+            item["resumable"] = True
     return {"reports": reports[:50]}
 
 

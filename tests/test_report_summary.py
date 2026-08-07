@@ -123,7 +123,7 @@ class TestSummaryPipeline:
         import app.harness.persist as persist_mod
         from app.harness.events import EventBus
 
-        async def fake_execute(spec, bus):
+        async def fake_execute(spec, bus, **kwargs):
             return "# 正式报告\n\n正文段落", []
 
         async def fake_chat_complete(system, user, **kw):
@@ -146,7 +146,7 @@ class TestSummaryPipeline:
         import app.harness.persist as persist_mod
         from app.harness.events import EventBus
 
-        async def fake_execute(spec, bus):
+        async def fake_execute(spec, bus, **kwargs):
             return "# 兜底标题\n\n兜底正文段落", []
 
         async def boom_chat_complete(system, user, **kw):
@@ -169,7 +169,7 @@ class TestSummaryPipeline:
         import app.harness.persist as persist_mod
         from app.harness.events import EventBus
 
-        async def fake_execute(spec, bus):
+        async def fake_execute(spec, bus, **kwargs):
             return "# 报告\n\n正文", []
 
         async def boom_summarize(report, spec):

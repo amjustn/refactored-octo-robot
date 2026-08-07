@@ -161,7 +161,7 @@ class TestConcurrencyGate:
         started = asyncio.Event()
         release = asyncio.Event()
 
-        async def fake_execute(spec, bus):
+        async def fake_execute(spec, bus, **kwargs):
             started.set()
             await release.wait()
             return "# 报告\n\n正文", []
@@ -240,7 +240,7 @@ class TestPartialReports:
         import app.harness.persist as persist_mod
         from app.harness.events import EventBus
 
-        async def fake_execute(spec, bus):
+        async def fake_execute(spec, bus, **kwargs):
             await persist_mod.get_repository().asave_artifact(spec.task_id, "agent-a", "已完成内容")
             raise asyncio.CancelledError
 
@@ -267,7 +267,7 @@ class TestPartialReports:
         import app.harness.persist as persist_mod
         from app.harness.events import EventBus
 
-        async def fake_execute(spec, bus):
+        async def fake_execute(spec, bus, **kwargs):
             await persist_mod.get_repository().asave_artifact(spec.task_id, "agent-b", "部分成果")
             raise RuntimeError("LLM 服务不可用")
 
@@ -289,7 +289,7 @@ class TestPartialReports:
         import app.harness.persist as persist_mod
         from app.harness.events import EventBus
 
-        async def fake_execute(spec, bus):
+        async def fake_execute(spec, bus, **kwargs):
             await persist_mod.get_repository().asave_artifact(spec.task_id, "agent-a", "成果")
             return "# 正式报告\n\n正文", []
 
@@ -311,7 +311,7 @@ class TestPartialReports:
         import app.harness.persist as persist_mod
         from app.harness.events import EventBus
 
-        async def fake_execute(spec, bus):
+        async def fake_execute(spec, bus, **kwargs):
             raise RuntimeError("context 构建失败")
 
         monkeypatch.setattr(harness, "_execute", fake_execute)

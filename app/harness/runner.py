@@ -141,8 +141,13 @@ class AgentRunner:
 
     # ---------- dispatch ----------
 
-    async def run(self, spec: TaskSpec) -> str:
-        """Execute a TaskSpec; returns the final report text."""
+    async def run(self, spec: TaskSpec, prefill_results: Optional[dict] = None) -> str:
+        """Execute a TaskSpec; returns the final report text.
+
+        prefill_results (resume flow): agent_name -> prior good artifact
+        content; those research agents are skipped and their previous
+        output is reused verbatim in the synthesis input.
+        """
         # P1: reset tool call counters at the start of each run
         self._tool_call_counts.clear()
         self._scratchpad_path = None
@@ -161,6 +166,7 @@ class AgentRunner:
                 synthesis_llm_config=spec.llm.to_synthesis_config_dict(),
                 spec=spec,
                 attachments=spec.attachments,
+                prefill_results=prefill_results,
             )
         else:
             report = await self.run_single(
@@ -309,6 +315,7 @@ class AgentRunner:
         synthesis_llm_config: dict = None,
         spec: "TaskSpec" = None,
         attachments: str = "",
+        prefill_results: Optional[dict] = None,
     ) -> str:
         """Run multi-agent parallel analysis and synthesize.
 
@@ -324,6 +331,11 @@ class AgentRunner:
         每个研究 Agent 使用 spec.llm.to_agent_config_dict(agent_name)
         获取自己的模型配置（未映射的 Agent 回退到 llm_config）。
         post_synthesis Agent 也遵循相同的 per-agent 规则。
+
+        prefill_results：断点续跑。agent_name → 上一次运行保存的成功
+        artifact；名单内在列的 Agent 直接复用旧成果（不重跑、不重存
+        artifact），其余 Agent 照常执行。Team Lead 综合与
+        post_synthesis Agent 始终重跑。
         """
         skill = get_skill(skill_name)
         agent_names = skill.get("agents", [])
@@ -358,6 +370,10 @@ class AgentRunner:
                 logger.info("Per-agent model enabled but no agent overrides set — all agents use global model")
 
         async def agent_task(name: str) -> tuple[str, str]:
+            # 断点续跑：上一次已有成功成果的 Agent 直接复用，不再执行
+            if prefill_results and name in prefill_results:
+                self._progress(name, "completed", "复用上次成果（断点续跑）", 1.0)
+                return name, prefill_results[name]
             # Resolve per-agent LLM config
             agent_cfg = llm_config
             if per_agent_enabled and spec is not None:
@@ -384,6 +400,9 @@ class AgentRunner:
         sem = asyncio.Semaphore(MAX_PARALLEL_AGENTS)
 
         async def _run_agent(name: str) -> tuple[str, str]:
+            # 续跑复用的 Agent：直接返回旧成果，不重存 artifact
+            if prefill_results and name in prefill_results:
+                return await agent_task(name)
             async with sem:
                 try:
                     name, result = await asyncio.wait_for(agent_task(name), timeout=AGENT_TIMEOUT)

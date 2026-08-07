@@ -128,6 +128,38 @@ class TaskStore:
             finally:
                 conn.close()
 
+    def get_task_brief(self, task_id: str) -> Optional[dict]:
+        """Lightweight row for resume decisions: skill/arguments/status."""
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                row = conn.execute(
+                    "SELECT task_id, skill_name, arguments, status FROM tasks WHERE task_id = ?",
+                    (task_id,),
+                ).fetchone()
+                return dict(row) if row else None
+            finally:
+                conn.close()
+
+    def find_terminal_task(self, skill_name: str, arguments: str) -> Optional[str]:
+        """Latest terminal task matching skill+arguments.
+
+        Fallback mapping for reports written before meta carried task_id.
+        """
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                row = conn.execute(
+                    """SELECT task_id FROM tasks
+                       WHERE skill_name = ? AND arguments = ?
+                         AND status IN ('completed', 'failed', 'cancelled', 'interrupted')
+                       ORDER BY created_at DESC LIMIT 1""",
+                    (skill_name, arguments),
+                ).fetchone()
+                return row["task_id"] if row else None
+            finally:
+                conn.close()
+
     def list_tasks(self, limit: int = 50, status_filter: str = None) -> list[ResearchStatus]:
         """List tasks, optionally filtered by status."""
         with self._lock:

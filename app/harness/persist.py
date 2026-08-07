@@ -100,6 +100,12 @@ class Repository:
     def get_task(self, task_id: str) -> Optional[ResearchStatus]:
         return self.store.get_task(task_id)
 
+    def get_task_brief(self, task_id: str) -> Optional[dict]:
+        return self.store.get_task_brief(task_id)
+
+    def find_terminal_task(self, skill_name: str, arguments: str) -> Optional[str]:
+        return self.store.find_terminal_task(skill_name, arguments)
+
     def list_tasks(self, limit: int = 50, status_filter: str = None):
         return self.store.list_tasks(limit=limit, status_filter=status_filter)
 
@@ -155,8 +161,14 @@ class Repository:
         duration_s: float,
         guard_warnings: Optional[list] = None,
         model: Optional[str] = None,
+        accumulate: bool = False,
     ) -> dict:
-        """Persist token usage + cost for a finished task. Returns the record."""
+        """Persist token usage + cost for a finished task. Returns the record.
+
+        accumulate=True (resume flow) ADDS this run's tokens/cost/duration to
+        the existing row instead of overwriting, so a resumed task's total
+        spend stays visible in the cost dashboard.
+        """
         record = {
             "tokens_prompt": usage.get("prompt_tokens", 0) or 0,
             "tokens_completion": usage.get("completion_tokens", 0) or 0,
@@ -167,17 +179,33 @@ class Repository:
         }
         conn = sqlite3.connect(str(self.store.db_path), timeout=10)
         try:
-            conn.execute(
-                """UPDATE tasks SET
-                       tokens_prompt = ?, tokens_completion = ?,
-                       cost_yuan = ?, duration_s = ?, guard_warnings = ?, model = ?
-                   WHERE task_id = ?""",
-                (
-                    record["tokens_prompt"], record["tokens_completion"],
-                    record["cost_yuan"], record["duration_s"],
-                    record["guard_warnings"], record["model"], task_id,
-                ),
-            )
+            if accumulate:
+                conn.execute(
+                    """UPDATE tasks SET
+                           tokens_prompt = tokens_prompt + ?,
+                           tokens_completion = tokens_completion + ?,
+                           cost_yuan = ROUND(cost_yuan + ?, 4),
+                           duration_s = COALESCE(duration_s, 0) + ?,
+                           guard_warnings = ?, model = ?
+                       WHERE task_id = ?""",
+                    (
+                        record["tokens_prompt"], record["tokens_completion"],
+                        record["cost_yuan"], record["duration_s"],
+                        record["guard_warnings"], record["model"], task_id,
+                    ),
+                )
+            else:
+                conn.execute(
+                    """UPDATE tasks SET
+                           tokens_prompt = ?, tokens_completion = ?,
+                           cost_yuan = ?, duration_s = ?, guard_warnings = ?, model = ?
+                       WHERE task_id = ?""",
+                    (
+                        record["tokens_prompt"], record["tokens_completion"],
+                        record["cost_yuan"], record["duration_s"],
+                        record["guard_warnings"], record["model"], task_id,
+                    ),
+                )
             conn.commit()
         except Exception as e:
             logger.error(f"Failed to save billing for {task_id}: {e}")
@@ -231,6 +259,8 @@ class Repository:
         tokens: Optional[dict] = None,
         partial: bool = False,
         summary: Optional[str] = None,
+        task_id: Optional[str] = None,
+        overwrite_name: Optional[str] = None,
     ) -> Path:
         """Save report markdown + a metadata sidecar (.meta.json).
 
@@ -238,10 +268,17 @@ class Repository:
         (cancelled/failed task); listings surface it via meta["partial"].
         summary is an optional one-line conclusion stored as meta["summary"]
         and shown on the reports list page.
+        task_id is stored in meta so a report can be traced back to its task
+        (resume flow). overwrite_name reuses an existing report filename —
+        a successful resume replaces the partial report in place instead of
+        adding a duplicate row to the history list.
         """
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         safe_skill = _sanitize_filename(skill_name)
-        report_path = REPORTS_DIR / f"{safe_skill}_{timestamp}.md"
+        if overwrite_name:
+            report_path = REPORTS_DIR / _sanitize_filename(overwrite_name)
+        else:
+            report_path = REPORTS_DIR / f"{safe_skill}_{timestamp}.md"
         report_path.write_text(report, encoding="utf-8")
         meta = {
             "skill_name": skill_name,
@@ -250,6 +287,8 @@ class Repository:
             "tokens": tokens or {},
             "created_at": datetime.now().isoformat(),
         }
+        if task_id:
+            meta["task_id"] = task_id
         if partial:
             meta["partial"] = True
         if summary:
@@ -261,6 +300,41 @@ class Repository:
         except Exception as e:
             logger.warning(f"Failed to write report meta: {e}")
         return report_path
+
+    def find_report_name_for_task(
+        self, task_id: str, skill_name: str = "", arguments: str = ""
+    ) -> Optional[str]:
+        """Locate the report filename belonging to a task.
+
+        Primary: meta["task_id"] exact match. Legacy fallback: newest
+        *partial* report with the same skill+arguments (written before
+        meta carried task_id). Returns None when nothing matches — the
+        caller then writes a fresh report file.
+        """
+        if not REPORTS_DIR.exists():
+            return None
+        legacy_candidate = None
+        metas = sorted(
+            REPORTS_DIR.glob("*.meta.json"),
+            key=lambda p: p.stat().st_mtime, reverse=True,
+        )
+        for meta_path in metas:
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            report_name = meta_path.name[: -len(".meta.json")] + ".md"
+            if meta.get("task_id") == task_id:
+                return report_name
+            if (
+                legacy_candidate is None
+                and meta.get("partial")
+                and skill_name
+                and meta.get("skill_name") == skill_name
+                and meta.get("arguments") == arguments
+            ):
+                legacy_candidate = report_name
+        return legacy_candidate
 
 
 _repo: Optional[Repository] = None

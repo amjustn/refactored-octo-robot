@@ -169,25 +169,28 @@ async def _summarize_report(report: str, spec: TaskSpec) -> str:
 
 # ==================== execution ====================
 
-async def _execute(spec: TaskSpec, bus: EventBus) -> tuple[str, list]:
+async def _execute(spec: TaskSpec, bus: EventBus, prefill_results: Optional[dict] = None) -> tuple[str, list]:
     """Dispatch to AgentRunner (single / multi / series unified).
 
     Returns (report, extra_warnings) — extra_warnings carries llm_fallback
     events raised when a custom model couldn't function-call and an agent
     was retried with the server default model.
+    prefill_results（断点续跑）：成功 artifact 直接复用，不重跑对应 Agent。
     """
     from .runner import AgentRunner
 
     runner = AgentRunner(bus=bus, task_id=spec.task_id)
-    report = await runner.run(spec)
+    report = await runner.run(spec, prefill_results=prefill_results)
     return report, runner.extra_warnings
 
 
-async def _save_partial_report(spec: TaskSpec, repo: Repository, reason: str):
+async def _save_partial_report(spec: TaskSpec, repo: Repository, reason: str,
+                               overwrite_name: Optional[str] = None):
     """Persist completed agent artifacts as a partial report.
 
     Called on cancelled/failed runs that never produced a final report so
     finished agent work still shows up on the reports page. Non-fatal.
+    overwrite_name（续跑再次失败时）覆盖同一份 partial 报告，避免历史列表堆积。
     """
     try:
         artifacts = await repo.aget_artifacts(spec.task_id)
@@ -208,6 +211,7 @@ async def _save_partial_report(spec: TaskSpec, repo: Repository, reason: str):
     try:
         path = await repo.asave_report(
             spec.skill_name, spec.arguments, "\n".join(parts), partial=True,
+            task_id=spec.task_id, overwrite_name=overwrite_name,
         )
         logger.info(f"partial report saved for {spec.task_id}: {path}")
     except Exception as e:
@@ -216,7 +220,13 @@ async def _save_partial_report(spec: TaskSpec, repo: Repository, reason: str):
 
 # ==================== public run() ====================
 
-async def run(spec: TaskSpec, bus: Optional[EventBus] = None) -> RunResult:
+async def run(
+    spec: TaskSpec,
+    bus: Optional[EventBus] = None,
+    prefill_results: Optional[dict] = None,
+    report_overwrite: Optional[str] = None,
+    billing_accumulate: bool = False,
+) -> RunResult:
     """Execute a TaskSpec; all progress flows through the EventBus.
 
     Persists task state transitions + billing to the Repository. Cancellation
@@ -228,6 +238,10 @@ async def run(spec: TaskSpec, bus: Optional[EventBus] = None) -> RunResult:
     error event and status="error" — it is never registered as running and
     never billed. Cancelled/failed runs that produced agent artifacts but no
     final report get a partial report persisted from those artifacts.
+
+    prefill_results（断点续跑）：agent_name → 上次成功 artifact，跳过重跑。
+    report_overwrite：成功后将报告写回该文件名（替换 partial 报告）。
+    billing_accumulate：本次 token/费用/耗时累加到既有任务记录而非覆盖。
     """
     bus = bus or get_bus()
     repo = get_repository()
@@ -264,7 +278,7 @@ async def run(spec: TaskSpec, bus: Optional[EventBus] = None) -> RunResult:
                 a.status = "running"
             await _persist_active(spec.task_id, spec.arguments, repo)
 
-            report, extra_warnings = await _execute(spec, bus)
+            report, extra_warnings = await _execute(spec, bus, prefill_results=prefill_results)
 
             # OutputGuard: four quality gates before persistence
             from .guards import OutputGuard
@@ -287,6 +301,7 @@ async def run(spec: TaskSpec, bus: Optional[EventBus] = None) -> RunResult:
                 # Effective primary model: user override or server default,
                 # so the cost dashboard can break stats down by model.
                 model=spec.llm.model or LLM_MODEL,
+                accumulate=billing_accumulate,
             )
             usage = {
                 "prompt_tokens": billing["tokens_prompt"],
@@ -296,6 +311,7 @@ async def run(spec: TaskSpec, bus: Optional[EventBus] = None) -> RunResult:
             report_path = await repo.asave_report(
                 spec.skill_name, spec.arguments, report, duration, tokens,
                 summary=summary,
+                task_id=spec.task_id, overwrite_name=report_overwrite,
             )
             report_saved = True
 
@@ -327,7 +343,7 @@ async def run(spec: TaskSpec, bus: Optional[EventBus] = None) -> RunResult:
             status.error = "已被用户取消"
             await _persist_active(spec.task_id, spec.arguments, repo)
             if not report_saved:
-                await _save_partial_report(spec, repo, "取消")
+                await _save_partial_report(spec, repo, "取消", overwrite_name=report_overwrite)
             # Legacy-compatible cancel frame + additive explicit type
             bus.emit(spec.task_id, EventType.ERROR, message="已被用户取消", cancelled=True)
             bus.emit(spec.task_id, EventType.CANCELLED)
@@ -338,7 +354,7 @@ async def run(spec: TaskSpec, bus: Optional[EventBus] = None) -> RunResult:
             status.error = str(e)
             await _persist_active(spec.task_id, spec.arguments, repo)
             if not report_saved:
-                await _save_partial_report(spec, repo, "失败")
+                await _save_partial_report(spec, repo, "失败", overwrite_name=report_overwrite)
             bus.emit(spec.task_id, EventType.ERROR, message=str(e))
             return RunResult(task_id=spec.task_id, status="failed", error=str(e))
 
@@ -348,3 +364,78 @@ async def run(spec: TaskSpec, bus: Optional[EventBus] = None) -> RunResult:
             asyncio.create_task(_forget_later(spec.task_id))
     finally:
         sem.release()
+
+
+# ==================== resume (断点续跑) ====================
+
+async def prepare_resume(task_id: str, llm_override: Optional[dict] = None) -> tuple:
+    """Validate a task for resume and assemble the execution plan.
+
+    Returns (plan, error). plan keys:
+      spec             — rebuilt TaskSpec with the SAME task_id
+      prefill_results  — agent_name → prior good artifact (skipped agents)
+      skipped_agents   — roster order, for UI display
+      rerun_agents     — agents that will actually execute
+      report_overwrite — prior partial report filename to replace, or None
+    error is a user-facing message when resume is not possible (caller then
+    falls back to a full re-run).
+    """
+    repo = get_repository()
+    brief = await asyncio.to_thread(repo.get_task_brief, task_id)
+    if not brief:
+        return None, "任务不存在"
+    if brief["status"] == "running" or is_active(task_id):
+        return None, "任务仍在运行中"
+
+    from ..skills import get_skill
+    skill = get_skill(brief["skill_name"])
+    if not skill:
+        return None, f"技能 {brief['skill_name']} 已不存在"
+    if not skill.get("is_multi_agent"):
+        return None, "该技能为单Agent/系列模式，不支持断点续跑，请整局重跑"
+
+    artifacts = await repo.aget_artifacts(task_id)
+    latest: dict[str, str] = {}
+    for name, content in artifacts:
+        latest[name] = content  # append-only log — last write wins
+
+    post = set(skill.get("post_synthesis_agents", []))
+    roster = [a for a in skill.get("agents", []) if a not in post]
+    prefill = {n: c for n, c in latest.items() if n in roster and not c.startswith("[错误]")}
+    if not prefill:
+        return None, "没有可复用的 Agent 成果，请整局重跑"
+
+    spec = TaskSpec.build(
+        skill, brief["arguments"], llm_override=llm_override,
+        caller="http", stream=True, task_id=task_id,
+    )
+    overwrite = await asyncio.to_thread(
+        repo.find_report_name_for_task, task_id, brief["skill_name"], brief["arguments"]
+    )
+    plan = {
+        "spec": spec,
+        "prefill_results": prefill,
+        "skipped_agents": [n for n in roster if n in prefill],
+        "rerun_agents": [n for n in roster if n not in prefill],
+        "report_overwrite": overwrite,
+    }
+    return plan, None
+
+
+async def resume(task_id: str, llm_override: Optional[dict] = None,
+                 bus: Optional[EventBus] = None) -> RunResult:
+    """Resume a terminal multi-agent task: reuse good artifacts, rerun the rest.
+
+    Team Lead synthesis and post-synthesis agents always rerun; billing is
+    accumulated onto the existing task row; a successful run overwrites the
+    partial report file in place.
+    """
+    plan, error = await prepare_resume(task_id, llm_override)
+    if error:
+        return RunResult(task_id=task_id, status="error", error=error)
+    return await run(
+        plan["spec"], bus=bus,
+        prefill_results=plan["prefill_results"],
+        report_overwrite=plan["report_overwrite"],
+        billing_accumulate=True,
+    )
