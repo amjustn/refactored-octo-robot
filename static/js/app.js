@@ -2173,7 +2173,6 @@ function clearResult() {
 
 // ==================== History ====================
 function backToHome() {
-  if (currentTaskId) return;  // task running — don't hide progress
   document.getElementById('result-area').style.display = 'none';
   document.getElementById('progress-area').style.display = 'none';
   document.getElementById('history-area').style.display = 'none';
