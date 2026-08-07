@@ -345,17 +345,15 @@ var LLM_PROVIDER_PRESETS = {
   openai: {
     label: 'OpenAI',
     base_url: 'https://api.openai.com/v1',
-    models: ['gpt-4.1', 'gpt-4.1-mini', 'gpt-4o', 'gpt-4o-mini', 'o4-mini', 'o3']
-  },
-  codex: {
-    label: 'Codex（OpenAI）',
-    base_url: 'https://api.openai.com/v1',
-    models: ['gpt-5.1-codex-max', 'gpt-5.1-codex', 'gpt-5-codex-mini', 'codex-2025-08-01']
+    models: ['gpt-4.1', 'gpt-4.1-mini', 'gpt-4o', 'gpt-4o-mini', 'o4-mini', 'o3',
+             'gpt-5.1-codex-max', 'gpt-5.1-codex', 'gpt-5-codex-mini', 'codex-2025-08-01']
   },
   anthropic: {
     label: 'Anthropic（Claude）',
     base_url: 'https://api.anthropic.com/v1',
-    models: ['claude-opus-4-20250514', 'claude-sonnet-4-20250514', 'claude-3.5-sonnet', 'claude-3.5-haiku']
+    models: ['claude-opus-4-20250514', 'claude-sonnet-4-20250514',
+             'claude-3.5-sonnet-20241022', 'claude-3.5-haiku-20241022',
+             'claude-3-opus-20240229']
   },
   google: {
     label: 'Google（Gemini）',
