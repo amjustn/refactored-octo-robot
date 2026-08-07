@@ -360,6 +360,7 @@ async def build_full_context(arguments: str = "", skill_name: str = "", goal_hin
     # independent of each other and run concurrently via asyncio.gather;
     # each branch degrades to empty on failure, exactly as before.
     symbol = None
+    _listing_status = None  # populated during symbol resolution block
     _md = None
     try:
         import re
@@ -424,6 +425,27 @@ async def build_full_context(arguments: str = "", skill_name: str = "", goal_hin
                         symbol = candidate
 
         _md = (fetch_market_indices, get_stock_price, fetch_company_news)
+
+        # ── Listing status check ──
+        _company_name = None
+        if goal_hints and goal_hints.get("company"):
+            _company_name = goal_hints["company"]
+        elif not symbol and arguments:
+            # If no symbol was resolved, try to extract a company name from arguments
+            _cn_match = _re.search(r'[\u4e00-\u9fff]{2,}(?:公司|集团|科技|控股|有限|股份|网络|平台)?', arguments)
+            if _cn_match:
+                _company_name = _cn_match.group(0)
+            else:
+                # Try English brand names
+                _en_match = _re.search(r'\b([A-Z][a-z]{2,}(?:\s[A-Z][a-z]+)?)\b', arguments)
+                if _en_match:
+                    _company_name = _en_match.group(1)
+        if _company_name:
+            try:
+                from ..tools.market_data import check_listing_status
+                _listing_status = check_listing_status(_company_name)
+            except Exception:
+                pass
     except ImportError:
         logger.debug("market_data module not available")
     except Exception as e:
@@ -507,6 +529,29 @@ async def build_full_context(arguments: str = "", skill_name: str = "", goal_hin
     # Inject any data validation warnings at the top
     if _data_warnings:
         parts.insert(1, "\n".join(_data_warnings))
+
+    # ── Inject listing status ──
+    if _listing_status:
+        _ls = _listing_status
+        if _ls["listed"] is False:
+            # Known unlisted company — clear guidance
+            parts.insert(1, (
+                "\n## ⚠️ 公司上市状态：未上市\n"
+                f"**确认信息**：{_ls.get('note', '该公司未上市')}\n\n"
+                "**研究方法要求**：\n"
+                "- 没有公开股价和财报数据，请使用侦探式研究方法\n"
+                "- 从新闻报道、行业报告、融资信息、高管访谈等公开来源拼凑分析\n"
+                "- 每项数据和结论必须标注置信度：[确认]/[推算]/[传闻]\n"
+                "- 估值只能估算，明确标注估算方法和假设\n"
+                "- 诚实标注信息不足的部分，不要假装有数据\n"
+            ))
+        elif _ls["listed"] is None:
+            # Uncertain status — cautious hint
+            parts.insert(1, (
+                "\n## ⚠️ 公司上市状态：不确定\n"
+                f"**{_ls.get('note', '无法确认是否为上市公司')}**\n"
+                f"{_ls.get('hint', '')}\n"
+            ))
 
     # ── Global instruction: prioritize user keywords over training data ──
     if arguments:

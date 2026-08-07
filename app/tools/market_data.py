@@ -168,6 +168,98 @@ COMPANY_NAME_MAP = {
     "博通": "AVGO",
 }
 
+# ── 已知未上市公司表（无股票代码的知名公司）──
+# 用于 context 注入：拉不到行情时对照此表确认"确实是未上市公司"
+# 不在表里的公司 → 只给模糊提示，不武断下结论
+KNOWN_UNLISTED_COMPANIES: dict[str, str] = {
+    "字节跳动": "全球最大未上市科技公司，旗下抖音/TikTok，估值约$200-300B，PE投资方包括软银、KKR等",
+    "bytedance": "ByteDance, world's largest unlisted tech company (TikTok/Douyin), est. valuation $200-300B",
+    "tiktok": "TikTok, owned by ByteDance (unlisted). See also: 字节跳动",
+    "小红书": "社交电商平台，红杉/腾讯/阿里投资，估值约$17B，未上市",
+    "xiaohongshu": "Xiaohongshu (RED), social-commerce platform, est. valuation ~$17B, unlisted",
+    "shein": "SHEIN, fast-fashion e-commerce, est. valuation $66B, filed for IPO but not yet listed",
+    "希音": "SHEIN/希音，快时尚跨境电商，估值约$66B，已提交IPO但尚未上市",
+    "discord": "Discord, gaming-focused chat platform, est. valuation ~$15B, unlisted",
+    "openai": "OpenAI, AI research company (ChatGPT), est. valuation $150B+, unlisted",
+    "蚂蚁集团": "蚂蚁集团，支付宝母公司，曾申请IPO被叫停(2020)，目前未上市",
+    "ant group": "Ant Group, Alipay parent, IPO suspended (2020), currently unlisted",
+    "华为": "华为技术，全球最大通信设备商，员工持股，明确不上市",
+    "huawei": "Huawei Technologies, employee-owned, has stated it will not go public",
+    "大疆": "大疆创新/DJI，全球无人机龙头，估值约$20B，未上市",
+    "dji": "DJI (大疆), global drone leader, est. valuation ~$20B, unlisted",
+    "滴滴": "滴滴出行/Didi，曾美股上市(2021)后私有化退市(2022)，目前已退市",
+    "didi": "Didi Chuxing, delisted from NYSE (2022), currently unlisted",
+    "米哈游": "米哈游/miHoYo，原神/崩坏开发商，未上市",
+    "mihoyo": "miHoYo/HoYoverse, developer of Genshin Impact, unlisted",
+    "spacex": "SpaceX, Elon Musk's space company, est. valuation $350B+, unlisted",
+    "stripe": "Stripe, online payment processor, est. valuation ~$70B, unlisted",
+    "databricks": "Databricks, data+AI platform, est. valuation $62B, unlisted",
+    "canva": "Canva, online design platform, est. valuation ~$32B, unlisted",
+    "epic games": "Epic Games, Fortnite/Unreal Engine, est. valuation ~$22B, unlisted",
+    "instacart": "Instacart, grocery delivery → went public Sep 2023 as CART — now LISTED",
+    "klarna": "Klarna, buy-now-pay-later, filed for IPO — check latest status",
+    "reddit": "Reddit, social media → went public Mar 2024 as RDDT — now LISTED",
+    "菜鸟网络": "菜鸟网络/Cainiao，阿里旗下物流，曾计划IPO后撤回，目前未上市",
+    "cainiao": "Cainiao (菜鸟), Alibaba logistics arm, IPO withdrawn, currently unlisted",
+}
+
+def check_listing_status(company_name: str) -> Optional[dict]:
+    """Check whether a company is listed, unlisted, or unknown.
+
+    Returns None if company_name is empty. Otherwise returns:
+      {listed: bool, confidence: 'high'|'low', note: str, hint: str}
+    - listed=True:  known listed company (found in COMPANY_NAME_MAP)
+    - listed=False: known unlisted company (found in KNOWN_UNLISTED_COMPANIES)
+    - listed=None:  status unknown — could be either
+    """
+    if not company_name or not company_name.strip():
+        return None
+    name = company_name.strip()
+
+    # 1. Check if it's in the listed companies map
+    symbol = _resolve_company_name(name)
+    if symbol:
+        return {
+            "listed": True,
+            "confidence": "high",
+            "note": f"已确认为上市公司，代码 {symbol}",
+            "hint": "",
+        }
+
+    # 2. Check if it's in the known unlisted companies map
+    name_lower = name.lower()
+    for uname, desc in KNOWN_UNLISTED_COMPANIES.items():
+        if name_lower == uname.lower() or uname.lower() in name_lower:
+            # Check for "now LISTED" overrides
+            if "now LISTED" in desc:
+                return {
+                    "listed": True,
+                    "confidence": "high",
+                    "note": desc,
+                    "hint": "",
+                }
+            return {
+                "listed": False,
+                "confidence": "high",
+                "note": desc,
+                "hint": "",
+            }
+
+    # 3. Heuristic: if name is Chinese or looks like a company name, 
+    #    but resolved to no symbol AND not in known-unlisted — flag uncertain
+    has_chinese = bool(re.search(r'[\u4e00-\u9fff]', name))
+    looks_like_brand = bool(re.match(r'^[A-Z][a-z]{2,}$', name))  # Capitalized word
+    if has_chinese or looks_like_brand:
+        return {
+            "listed": None,
+            "confidence": "low",
+            "note": "无法确认为上市公司或未上市公司",
+            "hint": ("请通过网络搜索确认该公司上市状态。如果是未上市公司，"
+                     "请使用侦探式研究方法，从公开信息拼凑分析，并标注每项信息的置信度。"),
+        }
+
+    return None
+
 
 def _resolve_company_name(query: str) -> Optional[str]:
     """Resolve a Chinese company name to stock code.
