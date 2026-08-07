@@ -1,0 +1,11 @@
+{
+  "skill_name": "industry-research",
+  "arguments": "商业航天产业链",
+  "duration_seconds": 74.0,
+  "tokens": {
+    "prompt_tokens": 4145,
+    "completion_tokens": 5396,
+    "total_tokens": 9541
+  },
+  "created_at": "2026-08-02T11:05:54.687975"
+}

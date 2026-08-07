@@ -1,0 +1,12 @@
+{
+  "skill_name": "investment-team",
+  "arguments": "调试",
+  "duration_seconds": 11.7,
+  "tokens": {
+    "prompt_tokens": 0,
+    "completion_tokens": 0,
+    "total_tokens": 0
+  },
+  "created_at": "2026-08-04T20:21:35.516658",
+  "summary": "AI Berkshire 投研报告：**目标**：调试"
+}

@@ -1,0 +1,11 @@
+{
+  "skill_name": "investment-research",
+  "arguments": "银行,石油,公用事业",
+  "duration_seconds": 95.2,
+  "tokens": {
+    "prompt_tokens": 4642,
+    "completion_tokens": 7477,
+    "total_tokens": 12119
+  },
+  "created_at": "2026-08-02T11:06:16.067991"
+}

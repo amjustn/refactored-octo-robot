@@ -28,8 +28,19 @@ DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 
 # Models the server's gateway actually supports (used to validate user overrides
 # when they rely on the server key, and to build the frontend model picker).
+# Each entry verified via /v1/models API + /chat/completions smoke test (2026-08-07).
+_DEFAULT_MODELS = (
+    # DeepSeek (api.deepseek.com)
+    "deepseek-v4-pro,deepseek-v4-flash,"
+    # Kimi / Moonshot (api.moonshot.cn)
+    "kimi-k2.5,kimi-k2.6,kimi-k2.7-code,kimi-k2.7-code-highspeed,kimi-k3,"
+    "moonshot-v1-8k,moonshot-v1-32k,moonshot-v1-128k,moonshot-v1-auto,"
+    "moonshot-v1-8k-vision-preview,moonshot-v1-32k-vision-preview,moonshot-v1-128k-vision-preview,"
+    # Zhipu / GLM (open.bigmodel.cn)
+    "glm-4.5,glm-4.5-air,glm-4.6,glm-4.7,glm-5,glm-5-turbo,glm-5.1,glm-5.2"
+)
 LLM_SUPPORTED_MODELS = [
-    m.strip() for m in os.getenv("LLM_SUPPORTED_MODELS", "deepseek-v4-pro,deepseek-v4-flash").split(",") if m.strip()
+    m.strip() for m in os.getenv("LLM_SUPPORTED_MODELS", _DEFAULT_MODELS).split(",") if m.strip()
 ]
 
 # Agent settings

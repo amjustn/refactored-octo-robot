@@ -1,0 +1,11 @@
+{
+  "skill_name": "industry-research",
+  "arguments": "半导体设备产业链",
+  "duration_seconds": 69.3,
+  "tokens": {
+    "prompt_tokens": 3902,
+    "completion_tokens": 5237,
+    "total_tokens": 9139
+  },
+  "created_at": "2026-08-02T11:05:50.137975"
+}

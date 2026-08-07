@@ -1,0 +1,3 @@
+{"ts": 1786033613.3734157, "agent": "business-analyst", "tool": "search_company", "args": {"query": "中际旭创"}, "result": "[]", "task_id": "2644df44"}
+{"ts": 1786033617.3266585, "agent": "financial-analyst", "tool": "web_search", "args": {"query": "中际讯创", "max_results": 10}, "result": "[\n  {\n    \"title\": \"搜索无结果\",\n    \"url\": \"\",\n    \"snippet\": \"未能找到关于 '中际讯创' 的搜索结果。可能是网络问题或搜索词需要调整。\",\n    \"_placeholder\": true\n  }\n]", "task_id": "2644df44"}
+{"ts": 1786033617.328741, "agent": "financial-analyst", "tool": "search_company", "args": {"query": "中际讯创"}, "result": "[]", "task_id": "2644df44"}

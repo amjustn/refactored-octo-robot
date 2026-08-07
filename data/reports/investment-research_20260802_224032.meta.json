@@ -1,0 +1,11 @@
+{
+  "skill_name": "investment-research",
+  "arguments": "/tmp/byd_reports_comparison.md。比亚迪",
+  "duration_seconds": 34.1,
+  "tokens": {
+    "prompt_tokens": 4778,
+    "completion_tokens": 1024,
+    "total_tokens": 5802
+  },
+  "created_at": "2026-08-02T22:40:32.724039"
+}

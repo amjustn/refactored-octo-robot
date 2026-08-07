@@ -1,0 +1,12 @@
+{
+  "skill_name": "investment-team",
+  "arguments": "调试",
+  "duration_seconds": 2.1,
+  "tokens": {
+    "prompt_tokens": 0,
+    "completion_tokens": 0,
+    "total_tokens": 0
+  },
+  "created_at": "2026-08-04T20:25:20.045335",
+  "summary": "完整输出"
+}

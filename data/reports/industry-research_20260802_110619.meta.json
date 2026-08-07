@@ -1,0 +1,11 @@
+{
+  "skill_name": "industry-research",
+  "arguments": "新能源材料产业链",
+  "duration_seconds": 98.3,
+  "tokens": {
+    "prompt_tokens": 4365,
+    "completion_tokens": 6651,
+    "total_tokens": 11016
+  },
+  "created_at": "2026-08-02T11:06:19.059630"
+}

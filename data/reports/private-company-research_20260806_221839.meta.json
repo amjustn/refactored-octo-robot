@@ -1,0 +1,12 @@
+{
+  "skill_name": "private-company-research",
+  "arguments": "研究长鑫科技",
+  "duration_seconds": 11.9,
+  "tokens": {
+    "prompt_tokens": 5129,
+    "completion_tokens": 497,
+    "total_tokens": 5626
+  },
+  "created_at": "2026-08-06T22:18:39.688922",
+  "summary": "长鑫科技作为国内存储芯片领域的重要参与者，预计2025年收入约10亿美元，估值约100亿美元，有望在2027年左右上市，投资需谨慎。"
+}

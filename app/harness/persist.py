@@ -29,11 +29,31 @@ logger = logging.getLogger("ai_berkshire.harness.persist")
 
 # 元 / 百万 tokens。按各厂公开价目估算，可按实际账单调整。
 MODEL_PRICING = {
+    # DeepSeek
     "deepseek-v4-flash": {"prompt": 2.0, "completion": 8.0},
     "deepseek-v4-pro": {"prompt": 4.0, "completion": 16.0},
-    "glm-4.7": {"prompt": 2.0, "completion": 8.0},
-    "glm-4.5": {"prompt": 2.0, "completion": 8.0},
+    # Kimi / Moonshot
+    "kimi-k2.5": {"prompt": 2.0, "completion": 8.0},
+    "kimi-k2.6": {"prompt": 2.0, "completion": 8.0},
+    "kimi-k2.7-code": {"prompt": 2.0, "completion": 8.0},
+    "kimi-k2.7-code-highspeed": {"prompt": 2.0, "completion": 8.0},
     "kimi-k3": {"prompt": 4.0, "completion": 16.0},
+    "moonshot-v1-8k": {"prompt": 2.0, "completion": 2.0},
+    "moonshot-v1-32k": {"prompt": 4.0, "completion": 4.0},
+    "moonshot-v1-128k": {"prompt": 12.0, "completion": 12.0},
+    "moonshot-v1-auto": {"prompt": 2.0, "completion": 8.0},
+    "moonshot-v1-8k-vision-preview": {"prompt": 2.0, "completion": 2.0},
+    "moonshot-v1-32k-vision-preview": {"prompt": 4.0, "completion": 4.0},
+    "moonshot-v1-128k-vision-preview": {"prompt": 12.0, "completion": 12.0},
+    # Zhipu / GLM
+    "glm-4.5": {"prompt": 2.0, "completion": 8.0},
+    "glm-4.5-air": {"prompt": 2.0, "completion": 8.0},
+    "glm-4.6": {"prompt": 2.0, "completion": 8.0},
+    "glm-4.7": {"prompt": 2.0, "completion": 8.0},
+    "glm-5": {"prompt": 4.0, "completion": 16.0},
+    "glm-5-turbo": {"prompt": 4.0, "completion": 16.0},
+    "glm-5.1": {"prompt": 4.0, "completion": 16.0},
+    "glm-5.2": {"prompt": 4.0, "completion": 16.0},
     "default": {"prompt": 2.0, "completion": 8.0},
 }
 

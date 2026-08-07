@@ -1,0 +1,11 @@
+{
+  "skill_name": "investment-research",
+  "arguments": "比亚迪_中外机构研报对比.md",
+  "duration_seconds": 32.0,
+  "tokens": {
+    "prompt_tokens": 4237,
+    "completion_tokens": 1024,
+    "total_tokens": 5261
+  },
+  "created_at": "2026-08-02T22:52:37.279355"
+}

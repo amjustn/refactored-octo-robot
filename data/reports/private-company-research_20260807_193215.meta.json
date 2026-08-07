@@ -1,0 +1,13 @@
+{
+  "skill_name": "private-company-research",
+  "arguments": "分析一下长鑫公司",
+  "duration_seconds": 117.9,
+  "tokens": {
+    "prompt_tokens": 4511,
+    "completion_tokens": 3742,
+    "total_tokens": 8253
+  },
+  "created_at": "2026-08-07T19:32:15.774569",
+  "task_id": "96228f4f",
+  "summary": "⚠️ 紧急状态更新：上市状态变更确认：**结论**：根据最新网络搜索结果，**长鑫科技（CXMT）已确认上市**，不再适用“未上市公司深度研究”框架。"
+}

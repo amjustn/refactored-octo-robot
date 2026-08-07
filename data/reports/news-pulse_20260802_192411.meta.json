@@ -1,0 +1,11 @@
+{
+  "skill_name": "news-pulse",
+  "arguments": "腾讯-50%",
+  "duration_seconds": 222.3,
+  "tokens": {
+    "prompt_tokens": 204689,
+    "completion_tokens": 16654,
+    "total_tokens": 221343
+  },
+  "created_at": "2026-08-02T19:24:11.686199"
+}

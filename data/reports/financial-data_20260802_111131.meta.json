@@ -1,0 +1,11 @@
+{
+  "skill_name": "financial-data",
+  "arguments": "腾讯",
+  "duration_seconds": 132.3,
+  "tokens": {
+    "prompt_tokens": 3578,
+    "completion_tokens": 4794,
+    "total_tokens": 8372
+  },
+  "created_at": "2026-08-02T11:11:31.488012"
+}

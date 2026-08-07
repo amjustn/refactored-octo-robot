@@ -1,0 +1,11 @@
+{
+  "skill_name": "investment-research",
+  "arguments": "美光",
+  "duration_seconds": 118.0,
+  "tokens": {
+    "prompt_tokens": 4123,
+    "completion_tokens": 8939,
+    "total_tokens": 13062
+  },
+  "created_at": "2026-08-02T17:00:18.795775"
+}

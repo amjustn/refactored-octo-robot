@@ -1,0 +1,11 @@
+{
+  "skill_name": "investment-team",
+  "arguments": "腾讯",
+  "duration_seconds": 163.9,
+  "tokens": {
+    "prompt_tokens": 288662,
+    "completion_tokens": 28592,
+    "total_tokens": 317254
+  },
+  "created_at": "2026-08-02T12:15:28.640020"
+}

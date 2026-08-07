@@ -1,0 +1,11 @@
+{
+  "skill_name": "private-company-research",
+  "arguments": "deepseek",
+  "duration_seconds": 94.6,
+  "tokens": {
+    "prompt_tokens": 3957,
+    "completion_tokens": 3798,
+    "total_tokens": 7755
+  },
+  "created_at": "2026-08-01T21:33:12.385004"
+}

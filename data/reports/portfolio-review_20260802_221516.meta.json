@@ -1,0 +1,11 @@
+{
+  "skill_name": "portfolio-review",
+  "arguments": "宁德时代25%，贵州茅台25%，工商银行25%，紫金矿业25%",
+  "duration_seconds": 150.0,
+  "tokens": {
+    "prompt_tokens": 4262,
+    "completion_tokens": 4997,
+    "total_tokens": 9259
+  },
+  "created_at": "2026-08-02T22:15:16.445653"
+}
