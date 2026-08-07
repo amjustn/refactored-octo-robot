@@ -345,34 +345,24 @@ var LLM_PROVIDER_PRESETS = {
   openai: {
     label: 'OpenAI',
     base_url: 'https://api.openai.com/v1',
-    models: ['gpt-4.1', 'gpt-4.1-mini', 'gpt-4.1-nano',
-             'gpt-4o', 'gpt-4o-mini',
-             'gpt-5', 'gpt-5-mini', 'gpt-5-nano', 'gpt-5-pro',
-             'gpt-5.1', 'gpt-5.1-codex', 'gpt-5.1-codex-max', 'gpt-5.1-codex-mini',
-             'gpt-5.2', 'gpt-5.2-codex', 'gpt-5.2-pro',
-             'gpt-5.3-codex', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.4-pro',
-             'gpt-5.5', 'gpt-5.5-pro', 'gpt-5.6',
-             'o1', 'o3', 'o3-mini', 'o4-mini', 'codex-mini-latest']
+    models: ['gpt-5.6', 'gpt-5.5-pro', 'gpt-5.4-pro', 'gpt-5.1-codex-max', 'o4-mini']
   },
   anthropic: {
     label: 'Anthropic（Claude）',
     base_url: 'https://api.anthropic.com/v1',
-    models: ['claude-opus-4-20250514', 'claude-opus-4-1-20250805',
-             'claude-opus-4-5-20251101', 'claude-opus-4-6-20260205',
-             'claude-opus-4-7-20260416', 'claude-opus-5',
-             'claude-sonnet-4-20250514', 'claude-sonnet-4-5-20250929',
-             'claude-sonnet-4-6', 'claude-sonnet-5',
-             'claude-haiku-4-5-20251001', 'claude-3-7-sonnet-20250219']
+    models: ['claude-opus-5', 'claude-opus-4-7-20260416', 'claude-sonnet-5',
+             'claude-sonnet-4-6', 'claude-opus-4-6-20260205']
   },
   google: {
     label: 'Google（Gemini）',
     base_url: 'https://generativelanguage.googleapis.com/v1beta/openai',
-    models: ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.0-flash-lite']
+    models: ['gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-2.5-pro',
+             'gemini-2.5-flash', 'gemini-2.0-flash']
   },
   zhipu: {
     label: '智谱（GLM）',
     base_url: 'https://open.bigmodel.cn/api/paas/v4',
-    models: ['glm-4.5', 'glm-4.5-air', 'glm-4.6', 'glm-4.7', 'glm-5', 'glm-5-turbo', 'glm-5.1', 'glm-5.2']
+    models: ['glm-5.2', 'glm-5.1', 'glm-5', 'glm-4.7', 'glm-4.6']
   },
   qwen: {
     label: '阿里（通义千问）',
@@ -397,7 +387,7 @@ var LLM_PROVIDER_PRESETS = {
   kimi: {
     label: 'Kimi（Moonshot）',
     base_url: 'https://api.moonshot.cn/v1',
-    models: ['kimi-k2.5', 'kimi-k2.6', 'kimi-k2.7-code', 'kimi-k2.7-code-highspeed', 'kimi-k3']
+    models: ['kimi-k3', 'kimi-k2.7-code', 'kimi-k2.6', 'kimi-k2.5', 'kimi-k2-thinking-251104']
   },
   ollama: {
     label: 'Ollama（本地）',
