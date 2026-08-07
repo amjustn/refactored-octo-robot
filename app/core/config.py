@@ -34,8 +34,6 @@ _DEFAULT_MODELS = (
     "deepseek-v4-pro,deepseek-v4-flash,"
     # Kimi / Moonshot (api.moonshot.cn)
     "kimi-k2.5,kimi-k2.6,kimi-k2.7-code,kimi-k2.7-code-highspeed,kimi-k3,"
-    "moonshot-v1-8k,moonshot-v1-32k,moonshot-v1-128k,moonshot-v1-auto,"
-    "moonshot-v1-8k-vision-preview,moonshot-v1-32k-vision-preview,moonshot-v1-128k-vision-preview,"
     # Zhipu / GLM (open.bigmodel.cn)
     "glm-4.5,glm-4.5-air,glm-4.6,glm-4.7,glm-5,glm-5-turbo,glm-5.1,glm-5.2"
 )

@@ -390,9 +390,7 @@ var LLM_PROVIDER_PRESETS = {
   kimi: {
     label: 'Kimi（Moonshot）',
     base_url: 'https://api.moonshot.cn/v1',
-    models: ['kimi-k2.5', 'kimi-k2.6', 'kimi-k2.7-code', 'kimi-k2.7-code-highspeed', 'kimi-k3',
-             'moonshot-v1-8k', 'moonshot-v1-32k', 'moonshot-v1-128k', 'moonshot-v1-auto',
-             'moonshot-v1-8k-vision-preview', 'moonshot-v1-32k-vision-preview', 'moonshot-v1-128k-vision-preview']
+    models: ['kimi-k2.5', 'kimi-k2.6', 'kimi-k2.7-code', 'kimi-k2.7-code-highspeed', 'kimi-k3']
   },
   ollama: {
     label: 'Ollama（本地）',
@@ -432,8 +430,13 @@ function _getAgentLabel(name) {
 
 // Called once on page load to pull the server's supported model list.
 function _initLlmDefaults(serverInfo) {
+  // DeepSeek models come from the server (owner may add/remove DeepSeek variants).
+  // Other providers' models are maintained in LLM_PROVIDER_PRESETS above.
   if (serverInfo && serverInfo.supported_models && serverInfo.supported_models.length) {
-    LLM_PROVIDER_PRESETS.deepseek.models = serverInfo.supported_models;
+    var dsModels = serverInfo.supported_models.filter(function(m) {
+      return m.indexOf('deepseek') === 0;
+    });
+    if (dsModels.length) LLM_PROVIDER_PRESETS.deepseek.models = dsModels;
   }
   _serverDefaultModel = (serverInfo && serverInfo.model) || '';
   updatePoweredBy();
