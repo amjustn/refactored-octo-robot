@@ -345,15 +345,24 @@ var LLM_PROVIDER_PRESETS = {
   openai: {
     label: 'OpenAI',
     base_url: 'https://api.openai.com/v1',
-    models: ['gpt-4.1', 'gpt-4.1-mini', 'gpt-4o', 'gpt-4o-mini', 'o4-mini', 'o3',
-             'gpt-5.1-codex-max', 'gpt-5.1-codex', 'gpt-5-codex-mini', 'codex-2025-08-01']
+    models: ['gpt-4.1', 'gpt-4.1-mini', 'gpt-4.1-nano',
+             'gpt-4o', 'gpt-4o-mini',
+             'gpt-5', 'gpt-5-mini', 'gpt-5-nano', 'gpt-5-pro',
+             'gpt-5.1', 'gpt-5.1-codex', 'gpt-5.1-codex-max', 'gpt-5.1-codex-mini',
+             'gpt-5.2', 'gpt-5.2-codex', 'gpt-5.2-pro',
+             'gpt-5.3-codex', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.4-pro',
+             'gpt-5.5', 'gpt-5.5-pro', 'gpt-5.6',
+             'o1', 'o3', 'o3-mini', 'o4-mini', 'codex-mini-latest']
   },
   anthropic: {
     label: 'Anthropic（Claude）',
     base_url: 'https://api.anthropic.com/v1',
-    models: ['claude-opus-4-20250514', 'claude-sonnet-4-20250514',
-             'claude-3.5-sonnet-20241022', 'claude-3.5-haiku-20241022',
-             'claude-3-opus-20240229']
+    models: ['claude-opus-4-20250514', 'claude-opus-4-1-20250805',
+             'claude-opus-4-5-20251101', 'claude-opus-4-6-20260205',
+             'claude-opus-4-7-20260416', 'claude-opus-5',
+             'claude-sonnet-4-20250514', 'claude-sonnet-4-5-20250929',
+             'claude-sonnet-4-6', 'claude-sonnet-5',
+             'claude-haiku-4-5-20251001', 'claude-3-7-sonnet-20250219']
   },
   google: {
     label: 'Google（Gemini）',
