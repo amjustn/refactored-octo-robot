@@ -32,7 +32,7 @@ from ..skills import build_user_prompt, get_skill
 from .context import ContextBuilder
 
 # P3: decision log
-from .decision_log import save_decision as _save_decision
+from .decision_log import asave_decision as _asave_decision
 from .events import EventBus, EventType
 from .guards import MAX_SERIES_REPORT_LENGTH  # noqa: F401  # re-export (sole definition lives in guards)
 from .persist import get_repository
@@ -86,6 +86,10 @@ def _with_attachments(prompt: str, attachments: str) -> str:
     )
 
 
+class AllAgentsFailedError(RuntimeError):
+    """Raised when every research agent in a multi-agent run failed."""
+
+
 class AgentRunner:
     """Unified agent execution. All observable progress goes to the bus."""
 
@@ -98,6 +102,12 @@ class AgentRunner:
         self._scratchpad_path: Optional[Path] = None
         # Custom-model tool fallbacks — merged into guard_warnings by harness run()
         self.extra_warnings: list[dict] = []
+        # E2: set by run_multi when every research agent failed — harness
+        # turns the run into a hard failure instead of a "completed" report.
+        self.fatal_error: Optional[str] = None
+        # E3: goal-parser hints captured during context build; run() passes
+        # the company name to save_decision as a trusted hint.
+        self._last_goal_hints: Optional[dict] = None
 
     # ---------- event helpers ----------
 
@@ -175,12 +185,15 @@ class AgentRunner:
                 attachments=spec.attachments,
             )
 
-        # P3: save decision to cross-session log (non-blocking, best-effort)
-        if report and not report.startswith("[错误]"):
-            _save_decision(
+        # P3: save decision to cross-session log (non-blocking, best-effort).
+        # Skipped for error reports and for E2 fatal runs — a run where every
+        # agent failed carries no trustworthy investment thesis.
+        if report and not report.startswith("[错误]") and not self.fatal_error:
+            await _asave_decision(
                 spec.arguments, report,
                 skill_name=spec.skill_name,
                 task_id=self.task_id,
+                company_hint=(self._last_goal_hints or {}).get("company") or "",
             )
 
         return report
@@ -279,6 +292,7 @@ class AgentRunner:
                 arguments, skill_name=skill_name, llm_config=llm_config,
             )
             context = bundle.context
+            self._last_goal_hints = getattr(bundle, "goal_hints", None)
 
         if context:
             system_prompt = f"{system_prompt}\n\n{context}"
@@ -350,6 +364,7 @@ class AgentRunner:
             arguments, skill_name=skill_name, llm_config=llm_config,
         )
         context = bundle.context
+        self._last_goal_hints = getattr(bundle, "goal_hints", None)
 
         self._progress("system", "completed", "市场数据获取完成", 1.0)
 
@@ -436,20 +451,14 @@ class AgentRunner:
                 continue
             success_count += 1
             role_label = get_role_label(name)
-            # Strip tool-call noise: remove entire XML blocks + function-call artifacts
-            import re as _strip_re
-            _clean = _strip_re.sub(
-                r'<\s*(?:｜｜DSML｜｜tool_calls|｜｜DSML｜｜invoke|｜｜DSML｜｜parameter|/｜｜DSML｜｜tool_calls|/｜｜DSML｜｜invoke|/｜｜DSML｜｜parameter)\s*[^>]*>',
-                '', result, flags=_strip_re.DOTALL
-            )
-            # Also catch self-closing forms: <｜｜DSML｜｜invoke ... />
-            _clean = _strip_re.sub(
-                r'<\s*｜｜DSML｜｜(?:tool_calls|invoke|parameter)\b[^>]*?/>',
-                '', _clean, flags=_strip_re.DOTALL
-            )
-            agent_reports += f"\n\n---\n## {role_label}\n\n{_clean}\n"
+            # Strip tool-call noise via the shared helper (same as artifact path)
+            agent_reports += f"\n\n---\n## {role_label}\n\n{_strip_dsml(result)}\n"
 
         if success_count == 0:
+            # E2: every research agent failed — flag a hard failure so harness
+            # marks the task failed (the generic exception path still persists
+            # a partial report built from the error artifacts).
+            self.fatal_error = f"所有 {failed_count} 个 Agent 均执行失败"
             return f"# AI Berkshire 投研报告\n\n**目标**：{arguments}\n\n## 错误\n\n所有 {failed_count} 个 Agent 均执行失败，无法生成报告。\n\n请检查 LLM API 配置和网络连接。"
 
         # ── P5: Phase 1.5 — Agent peer debate ──────────────────
@@ -541,12 +550,12 @@ class AgentRunner:
         if debate_output:
             synthesis_prompt += f"\n\n## Agent 交叉辩论记录\n以下是各分析师交叉评审对方报告的结果，请在综合时重点考虑质疑和反对意见：{debate_output}"
 
-        async def _synthesize() -> str:
+        async def _synthesize(cfg="__default__") -> str:
             text = ""
             async for chunk in chat_stream(
                 synthesis_prompt,
                 _with_attachments(f"请综合以上报告，输出最终投研报告。目标：{arguments}", attachments),
-                llm_config=synthesis_config,
+                llm_config=synthesis_config if cfg == "__default__" else cfg,
             ):
                 text += chunk
                 self._chunk(chunk, agent="team-lead")
@@ -558,6 +567,32 @@ class AgentRunner:
             logger.error(f"Team Lead synthesis timed out after {AGENT_TIMEOUT}s")
             synthesis = f"[错误] 综合超时（超过 {AGENT_TIMEOUT}s），请直接参考附录中的各 Agent 独立研究报告。"
             self._progress("team-lead", "failed", "综合超时")
+        except Exception as e:
+            # E1: non-timeout synthesis failure (typically a broken custom
+            # synthesis model).  Retry once with the server default model;
+            # if that also fails, degrade to an appendix-only report with an
+            # explicit warning instead of losing the whole run.
+            logger.error(f"Team Lead synthesis failed: {e}", exc_info=True)
+            synthesis = None
+            if synthesis_config is not None:
+                try:
+                    logger.warning("Retrying synthesis with the server default model")
+                    synthesis = await asyncio.wait_for(_synthesize(None), timeout=AGENT_TIMEOUT)
+                    self.extra_warnings.append({
+                        "gate": "synthesis_model_fallback",
+                        "detail": f"综合环节配置的模型调用失败（{str(e)[:100]}），已回退服务器默认模型完成综合"[:300],
+                    })
+                except Exception as e2:
+                    logger.error(f"Synthesis retry with default model failed: {e2}", exc_info=True)
+                    synthesis = None
+            if synthesis is None:
+                synthesis = (f"[错误] 综合环节失败（{str(e)[:150]}），本报告为无综合降级版本，"
+                             "请直接参考附录中的各 Agent 独立研究报告。")
+                self.extra_warnings.append({
+                    "gate": "synthesis_degraded",
+                    "detail": f"综合环节失败，报告降级为各 Agent 原始报告附录：{str(e)[:200]}"[:300],
+                })
+                self._progress("team-lead", "failed", "综合失败，已降级")
 
         # Phase 3: post-synthesis agents (sequential, streamed)
         post_synthesis_output = ""
@@ -643,6 +678,7 @@ class AgentRunner:
             arguments, skill_name=skill_name, llm_config=llm_config,
         )
         context = bundle.context
+        self._last_goal_hints = getattr(bundle, "goal_hints", None)
 
         total = len(topics)
         articles = []

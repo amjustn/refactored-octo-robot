@@ -43,6 +43,7 @@ class ContextBundle:
     grade: str = "C"                   # A / B / C
     injected: dict = field(default_factory=dict)
     truncated_tokens: int = 0
+    goal_hints: Optional[dict] = None  # goal-parser output (E3: decision company hint)
 
     def summary(self) -> dict:
         return {
@@ -140,6 +141,7 @@ class ContextBuilder:
             logger.debug(f"ContextBuilder: decision log injection skipped: {e}")
 
         bundle = self._trim_and_grade(raw)
+        bundle.goal_hints = goal_hints
 
         # Grade A: 信息充裕 → 提示对核心论点做反面检验
         if bundle.grade == "A":

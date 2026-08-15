@@ -198,10 +198,15 @@ async def _execute(spec: TaskSpec, bus: EventBus, prefill_results: Optional[dict
     was retried with the server default model.
     prefill_results（断点续跑）：成功 artifact 直接复用，不重跑对应 Agent。
     """
-    from .runner import AgentRunner
+    from .runner import AgentRunner, AllAgentsFailedError
 
     runner = AgentRunner(bus=bus, task_id=spec.task_id)
     report = await runner.run(spec, prefill_results=prefill_results)
+    if runner.fatal_error:
+        # E2: every research agent failed — surface as a hard failure so the
+        # task is marked failed.  The generic exception path still persists
+        # a partial report built from the error artifacts.
+        raise AllAgentsFailedError(runner.fatal_error)
     return report, runner.extra_warnings
 
 

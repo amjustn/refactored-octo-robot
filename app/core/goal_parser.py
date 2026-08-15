@@ -48,10 +48,11 @@ def _get_cache():
 
 
 def _cache_key(goal: str, llm_config: Optional[dict]) -> str:
-    """sha256 of the whitespace-normalized goal + model name (never the api key)."""
+    """sha256 of the whitespace-normalized goal + model + base_url (never the api key)."""
     normalized = " ".join(goal.split())
     model = ((llm_config or {}).get("model") or "").strip() or LLM_MODEL
-    return hashlib.sha256(f"{model}\n{normalized}".encode("utf-8")).hexdigest()
+    base_url = ((llm_config or {}).get("base_url") or "").strip()
+    return hashlib.sha256(f"{model}\n{base_url}\n{normalized}".encode("utf-8")).hexdigest()
 
 # Same shape as the legacy regex in core.context.build_full_context, plus
 # HK numeric tickers (0700.HK / 9988.HK are 1-5 digits, not 6)

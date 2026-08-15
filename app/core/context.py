@@ -430,16 +430,9 @@ async def build_full_context(arguments: str = "", skill_name: str = "", goal_hin
         _company_name = None
         if goal_hints and goal_hints.get("company"):
             _company_name = goal_hints["company"]
-        elif not symbol and arguments:
-            # If no symbol was resolved, try to extract a company name from arguments
-            _cn_match = _re.search(r'[\u4e00-\u9fff]{2,}(?:公司|集团|科技|控股|有限|股份|网络|平台)?', arguments)
-            if _cn_match:
-                _company_name = _cn_match.group(0)
-            else:
-                # Try English brand names
-                _en_match = _re.search(r'\b([A-Z][a-z]{2,}(?:\s[A-Z][a-z]+)?)\b', arguments)
-                if _en_match:
-                    _company_name = _en_match.group(1)
+        # F3: no regex fallback here — only the goal parser company
+        # extraction is trusted (the old fallback matched filenames like
+        # "Report.pdf" as English brand names → spurious "未上市" warnings).
         if _company_name:
             try:
                 from ..tools.market_data import check_listing_status

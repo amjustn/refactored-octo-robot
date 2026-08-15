@@ -6,6 +6,7 @@ so the LLM builds on prior work rather than starting from scratch.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from datetime import datetime, timezone
@@ -35,17 +36,28 @@ def _ensure_log() -> Path:
     return DECISION_LOG_PATH
 
 
+def _one_line(s) -> str:
+    """Collapse all whitespace (incl. newlines) to single spaces — log fields
+    must never carry a raw newline that could fake a section header."""
+    return " ".join(str(s or "").split())
+
+
 def save_decision(
     arguments: str,
     report: str,
     skill_name: str = "",
     task_id: str = "",
+    company_hint: str = "",
 ) -> bool:
     """Extract decision from a completed report and append to decision log.
 
     Looks for explicit decision markers in the report, then falls back to
     extracting the first strong opinion found. Appends one entry to
     decision-log.md.
+
+    company_hint: trusted company name from the goal parser — preferred over
+    heuristic extraction from arguments.  When no credible name (>= 2
+    chars after cleaning) can be determined, the entry is skipped entirely.
 
     Returns True if a decision was extracted and saved.
     """
@@ -58,17 +70,23 @@ def save_decision(
     try:
         log_path = _ensure_log()
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-        stock = _extract_stock_name(arguments)
+        # Prefer the goal parser's company hint; fall back to heuristic
+        # extraction.  Names too short to be credible are skipped rather
+        # than logged as garbage section headers.
+        stock = _one_line(company_hint) or _extract_stock_name(arguments)
+        if len(stock) < 2:
+            logger.debug(f"Skip decision save: no credible stock name in '{arguments[:60]}'")
+            return False
 
         entry = (
             f"\n## {stock} — {ts}\n\n"
-            f"- **技能**: {skill_name or '未指定'}\n"
-            f"- **结论**: {decision['conclusion']}\n"
-            f"- **置信度**: {decision['confidence']}\n"
-            f"- **关键假设**: {decision['assumptions']}\n"
-            f"- **目标价/信号**: {decision.get('target', '未指定')}\n"
+            f"- **技能**: {_one_line(skill_name) or '未指定'}\n"
+            f"- **结论**: {_one_line(decision['conclusion'])}\n"
+            f"- **置信度**: {_one_line(decision['confidence'])}\n"
+            f"- **关键假设**: {_one_line(decision['assumptions'])}\n"
+            f"- **目标价/信号**: {_one_line(decision.get('target', '未指定'))}\n"
             f"- **状态**: pending\n"
-            f"- **任务ID**: {task_id}\n"
+            f"- **任务ID**: {_one_line(task_id)}\n"
             f"\n---\n"
         )
 
@@ -81,6 +99,11 @@ def save_decision(
     except Exception as e:
         logger.warning(f"Failed to save decision: {e}")
         return False
+
+
+async def asave_decision(*args, **kwargs) -> bool:
+    """Async wrapper — decision-log file I/O runs off the event loop."""
+    return await asyncio.to_thread(save_decision, *args, **kwargs)
 
 
 def list_decisions(max_entries: int = 100) -> list:
@@ -184,8 +207,13 @@ def load_decisions(arguments: str, max_entries: int = 5) -> str:
 
 
 def _extract_stock_name(arguments: str) -> str:
-    """Extract a stock/company name from user input."""
-    arg = arguments.strip()
+    """Extract a stock/company name from user input.
+
+    Whitespace (incl. newlines) is collapsed first and leading markdown
+    heading/quote markers stripped, so a multi-line goal cannot inject a
+    section header into the log through the returned name.
+    """
+    arg = " ".join(arguments.split()).lstrip("#> ").strip()
     if not arg:
         return ""
 
