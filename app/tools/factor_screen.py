@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 from typing import Optional
 
 import pandas as pd
@@ -23,25 +24,21 @@ class FactorResult:
     score: float = 0.0
     rank: int = 0
 
-# Core factors — inspired by 觀瀾's 440+ but focused on the most predictive ones
+# Core factors — inspired by 觀瀾's 440+ but focused on the most predictive ones.
+# E4: every factor declared here IS computed in _calc_factors — declaring an
+# unimplemented factor would silently skew the composite score.
 FACTOR_DEFS = {
     # Value factors
     "pe_ratio": {"name": "市盈率", "category": "value", "lower_better": True},
     "pb_ratio": {"name": "市净率", "category": "value", "lower_better": True},
     "ps_ratio": {"name": "市销率", "category": "value", "lower_better": True},
-    "fcf_yield": {"name": "FCF收益率", "category": "value", "lower_better": False},
-    "dividend_yield": {"name": "股息率", "category": "value", "lower_better": False},
-    "ev_ebitda": {"name": "EV/EBITDA", "category": "value", "lower_better": True},
 
     # Quality factors
     "roe": {"name": "ROE", "category": "quality", "lower_better": False},
-    "roa": {"name": "ROA", "category": "quality", "lower_better": False},
     "gross_margin": {"name": "毛利率", "category": "quality", "lower_better": False},
     "net_margin": {"name": "净利率", "category": "quality", "lower_better": False},
     "debt_equity": {"name": "负债权益比", "category": "quality", "lower_better": True},
     "current_ratio": {"name": "流动比率", "category": "quality", "lower_better": False},
-    "interest_coverage": {"name": "利息覆盖倍数", "category": "quality", "lower_better": False},
-    "piotroski": {"name": "Piotroski F-Score", "category": "quality", "lower_better": False},
 
     # Momentum
     "ret_1m": {"name": "1月动量", "category": "momentum", "lower_better": False},
@@ -52,7 +49,6 @@ FACTOR_DEFS = {
     # Growth
     "revenue_growth": {"name": "营收增速", "category": "growth", "lower_better": False},
     "earnings_growth": {"name": "盈利增速", "category": "growth", "lower_better": False},
-    "fcf_growth": {"name": "FCF增速", "category": "growth", "lower_better": False},
 }
 
 FACTOR_CATEGORIES = ["value", "quality", "momentum", "growth"]
@@ -62,6 +58,20 @@ CATEGORY_LABELS = {
     "momentum": "动量因子",
     "growth": "成长因子",
 }
+
+
+def _latest_completed_quarter():
+    """Most recent COMPLETED fiscal quarter as (year, quarter).
+
+    Quarterly reports land weeks after period end, so the still-open current
+    quarter almost never has data — always query the last finished one
+    (replaces the previously hardcoded 2025Q2).
+    """
+    today = date.today()
+    q_current = (today.month - 1) // 3 + 1
+    if q_current == 1:
+        return today.year - 1, 4
+    return today.year, q_current - 1
 
 
 def _normalize_score(series: pd.Series, lower_better: bool) -> pd.Series:
@@ -147,6 +157,7 @@ def screen_stocks(
 def _calc_factors(bs, code: str) -> dict[str, float]:
     """Calculate all factors for one stock. Returns dict of normalized scores."""
     factors = {}
+    year, quarter = _latest_completed_quarter()
 
     # Get financial data
     try:
@@ -159,7 +170,7 @@ def _calc_factors(bs, code: str) -> dict[str, float]:
 
     # Profit data
     try:
-        profit = bs.query_profit_data(code=code, year=2025, quarter=2)
+        profit = bs.query_profit_data(code=code, year=year, quarter=quarter)
         if profit.error_code == "0":
             profit_df = profit.get_data()
             if not profit_df.empty:
@@ -168,12 +179,14 @@ def _calc_factors(bs, code: str) -> dict[str, float]:
                 roe = float(row.get("roeAvg", 0) or 0)
                 factors["roe"] = roe
                 factors["eps"] = eps
+                factors["gross_margin"] = float(row.get("gpMargin", 0) or 0)
+                factors["net_margin"] = float(row.get("npMargin", 0) or 0)
     except Exception:
         pass
 
     # Balance sheet
     try:
-        bal = bs.query_balance_data(code=code, year=2025, quarter=2)
+        bal = bs.query_balance_data(code=code, year=year, quarter=quarter)
         if bal.error_code == "0":
             bal_df = bal.get_data()
             if not bal_df.empty:
@@ -185,7 +198,7 @@ def _calc_factors(bs, code: str) -> dict[str, float]:
 
     # Growth data
     try:
-        grow = bs.query_growth_data(code=code, year=2025, quarter=2)
+        grow = bs.query_growth_data(code=code, year=year, quarter=quarter)
         if grow.error_code == "0":
             grow_df = grow.get_data()
             if not grow_df.empty:
@@ -196,6 +209,48 @@ def _calc_factors(bs, code: str) -> dict[str, float]:
                 factors["earnings_growth"] = eg
     except Exception:
         pass
+
+    # Valuation + momentum from daily k-data (single query, ~7 months).
+    # fields confirmed against baostock demo_A_stock_k_data.py.
+    try:
+        end_d = date.today()
+        start_d = end_d - timedelta(days=220)
+        rs_k = bs.query_history_k_data_plus(
+            code, "date,close,peTTM,pbMRQ,psTTM",
+            start_date=start_d.isoformat(), end_date=end_d.isoformat(),
+            frequency="d", adjustflag="2",
+        )
+        rows = []
+        while (rs_k.error_code == "0") and rs_k.next():
+            rows.append(rs_k.get_row_data())
+        if rows:
+            kdf = pd.DataFrame(rows, columns=rs_k.fields)
+            closes = pd.to_numeric(kdf["close"], errors="coerce").dropna()
+            if not closes.empty:
+                last_close = float(closes.iloc[-1])
+
+                def _ret(calendar_days):
+                    n = max(int(calendar_days * 5 / 7), 1)  # ≈ trading days
+                    if len(closes) > n:
+                        past = float(closes.iloc[-1 - n])
+                        if past > 0:
+                            return (last_close / past - 1) * 100
+                    return None
+
+                for key, days in (("ret_1m", 30), ("ret_3m", 90), ("ret_6m", 180)):
+                    r = _ret(days)
+                    if r is not None:
+                        factors[key] = r
+                if len(closes) > 20:
+                    daily_rets = closes.pct_change().dropna()
+                    if not daily_rets.empty:
+                        factors["volatility"] = float(daily_rets.std() * (252 ** 0.5) * 100)
+            for src, key in (("peTTM", "pe_ratio"), ("pbMRQ", "pb_ratio"), ("psTTM", "ps_ratio")):
+                vals = pd.to_numeric(kdf[src], errors="coerce").dropna()
+                if not vals.empty and float(vals.iloc[-1]) > 0:
+                    factors[key] = float(vals.iloc[-1])
+    except Exception as e:
+        logger.debug(f"k-data factor calc failed for {code}: {e}")
 
     # Normalize to percentile scores
     # For percentile we'd need cross-sectional data; use absolute scale instead.
@@ -215,15 +270,18 @@ def _normalize_single(value: float, fkey: str, fdef: dict) -> float:
     ranges = {
         "pe_ratio": (0, 100, True),       # 0-100, lower=better
         "pb_ratio": (0, 20, True),
+        "ps_ratio": (0, 20, True),
         "roe": (0, 50, False),            # 0-50%, higher=better
-        "roa": (0, 30, False),
         "gross_margin": (0, 80, False),
         "net_margin": (0, 50, False),
         "debt_equity": (0, 200, True),
         "current_ratio": (0, 5, False),
+        "ret_1m": (-30, 30, False),
+        "ret_3m": (-40, 60, False),
+        "ret_6m": (-50, 100, False),
+        "volatility": (10, 80, True),     # annualized %, lower=better
         "revenue_growth": (-50, 100, False),
         "earnings_growth": (-50, 100, False),
-        "fcf_growth": (-100, 200, False),
     }
 
     rng = ranges.get(fkey, (0, 100, fdef["lower_better"]))

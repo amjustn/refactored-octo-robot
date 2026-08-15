@@ -19,7 +19,7 @@ from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from .core.config import HOST, MAX_REPORT_AGE_DAYS, PORT, REPORTS_DIR
+from .core.config import BASE_DIR, HOST, MAX_REPORT_AGE_DAYS, PORT, REPORTS_DIR
 from .web_common import data_cache, logger, static_dir, task_store
 
 app = FastAPI(title="AI Berkshire Web", version="3.0.0")
@@ -201,6 +201,15 @@ async def _cleanup_old_tasks():
             task_store.cleanup_old_tasks(max_age_days=7)
         except Exception as e:
             logger.warning(f"Task cleanup failed: {e}")
+        # E6: per-task scratchpad JSONL files expire together with tasks.
+        try:
+            import time as _time
+            cutoff = _time.time() - 7 * 86400
+            for f in (BASE_DIR / "data" / "scratchpad").glob("*.jsonl"):
+                if f.stat().st_mtime < cutoff:
+                    f.unlink()
+        except Exception as e:
+            logger.warning(f"Scratchpad cleanup failed: {e}")
 
 
 async def _cleanup_expired_cache():

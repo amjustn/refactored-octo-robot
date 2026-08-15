@@ -180,6 +180,9 @@ async def api_llm_default():
 @router.post("/api/llm/test")
 async def api_llm_test(request: "Request"):
     """Test a user-supplied LLM config with a minimal completion call."""
+    # F4: each call spends a real LLM completion — rate-limit it.
+    if not _wc._check_rate_limit(request.client.host if request.client else "unknown"):
+        raise HTTPException(status_code=429, detail="请求过于频繁，请稍后再试")
     try:
         body = await request.json()
     except Exception:

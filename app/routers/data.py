@@ -1,4 +1,5 @@
 """Market data routes: /api/data/*, /api/health/data-sources*, /api/screen/factors."""
+import asyncio
 from datetime import datetime
 
 from fastapi import APIRouter
@@ -56,7 +57,9 @@ async def api_screen_factors(
 
     cat_list = [c.strip() for c in categories.split(",") if c.strip()]
     try:
-        results = screen_stocks(categories=cat_list, top_n=min(top_n, 50))
+        # E4: screen_stocks does dozens of blocking baostock round-trips —
+        # keep them off the event loop.
+        results = await asyncio.to_thread(screen_stocks, categories=cat_list, top_n=min(top_n, 50))
     except Exception as e:
         logger.error(f"Factor screening failed: {e}", exc_info=True)
         return {
@@ -88,6 +91,9 @@ async def api_screen_factors(
 async def api_read_url(url: str, max_chars: int = 8000):
     """Read any web page and extract text content."""
     from ..tools.web_search import read_webpage
+    # E8: clamp caller-supplied max_chars — an unbounded value lets a request
+    # pull arbitrarily large page text into memory / the prompt.
+    max_chars = max(100, min(int(max_chars), 20000))
     result = await read_webpage(url, max_chars=max_chars)
     return result
 

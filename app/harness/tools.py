@@ -434,14 +434,25 @@ class ToolResult:
     error: str = ""
 
 
+_BUSINESS_ERROR_HINTS = ("不存在", "未找到", "not found", "no data", "无法识别")
+
+
+def _is_business_error(msg: str) -> bool:
+    """A legitimate 'no such data' answer is not a provider failure and must
+    not trip the circuit breaker (e.g. querying a delisted/unknown symbol)."""
+    m = (msg or "").lower()
+    return any(h.lower() in m for h in _BUSINESS_ERROR_HINTS)
+
+
 class CircuitBreaker:
     """Per-tool circuit breaker.
 
     - closed: normal; consecutive failures increment a counter
     - open (after ``fail_threshold`` consecutive failures): calls are
       rejected immediately for ``recovery_probe_after`` seconds
-    - half-open: after the cooldown a single probe call is allowed;
-      success closes the breaker, failure re-opens it
+    - half-open: after the cooldown exactly one probe call is allowed at
+      a time (concurrent calls are rejected); success closes the breaker,
+      failure re-opens it
     """
 
     def __init__(self, name: str, fail_threshold: int = 3, recovery_probe_after: float = 300):
@@ -452,6 +463,7 @@ class CircuitBreaker:
         self.consecutive_failures = 0
         self.opened_at: Optional[float] = None
         self.last_error: str = ""
+        self._probe_in_flight = False
 
     def allow_call(self) -> bool:
         if self.state == "closed":
@@ -459,9 +471,13 @@ class CircuitBreaker:
         if self.state == "open":
             if self.opened_at is not None and (time.monotonic() - self.opened_at) >= self.recovery_probe_after:
                 self.state = "half_open"   # allow one probe
+                self._probe_in_flight = True
                 return True
             return False
-        # half_open: a probe is already in flight conceptually; allow it
+        # half_open: only the single probe may pass; concurrent calls wait
+        if self._probe_in_flight:
+            return False
+        self._probe_in_flight = True
         return True
 
     def record_success(self):
@@ -469,10 +485,12 @@ class CircuitBreaker:
         self.consecutive_failures = 0
         self.opened_at = None
         self.last_error = ""
+        self._probe_in_flight = False
 
     def record_failure(self, error: str = ""):
         self.consecutive_failures += 1
         self.last_error = error[:200]
+        self._probe_in_flight = False
         if self.state == "half_open" or self.consecutive_failures >= self.fail_threshold:
             self.state = "open"
             self.opened_at = time.monotonic()
@@ -805,7 +823,10 @@ class ToolGateway:
                         except Exception:
                             pass
                     return ToolResult(tool, True, content, source=source, latency_ms=latency, fallback_depth=depth)
-                breaker.record_failure(last_error)
+                # E5: business errors (unknown symbol / no such data) are
+                # legitimate answers, not provider failures — no breaker hit.
+                if not _is_business_error(last_error):
+                    breaker.record_failure(last_error)
             except asyncio.TimeoutError:
                 last_error = f"timeout after {tdef.timeout}s"
                 breaker.record_failure(last_error)

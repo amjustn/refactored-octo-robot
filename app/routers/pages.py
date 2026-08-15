@@ -133,7 +133,10 @@ MANUAL_HTML = """<!DOCTYPE html>
 @router.get("/manual", response_class=HTMLResponse)
 async def manual():
     """使用手册"""
-    return HTMLResponse(MANUAL_HTML)
+    # F5: the skill count in the static HTML goes stale as skills are added —
+    # substitute the live count at serve time.
+    html = MANUAL_HTML.replace("技能速查（19个技能）", f"技能速查（{len(list_skills())}个技能）")
+    return HTMLResponse(html)
 
 
 @router.get("/", response_class=HTMLResponse)
@@ -153,6 +156,8 @@ async def app_index():
 
     # Inject JWT into the page so the frontend picks it up automatically.
     # BasicAuthMiddleware already verified the user — no need to prompt again.
+    # F6: acceptable for the single-user / local deployment this app targets.
+    # Never share an /app page URL — whoever holds the URL holds the token.
     if BERKSHIRE_API_TOKEN:
         jwt_token = create_token(BERKSHIRE_API_TOKEN)
         script_tag = (

@@ -18,7 +18,7 @@ import logging
 
 from bs4 import BeautifulSoup
 
-from .web_search import _get_client
+from .web_search import _fetch_html, _get_client
 
 logger = logging.getLogger("ai_berkshire.site_crawler")
 
@@ -140,14 +140,17 @@ async def crawl_site(site_id: str, max_articles: int = 10) -> list:
 
     articles = []
     try:
+        # E8: route through the SSRF-checked, size-capped fetcher instead of a
+        # raw client.get (list URLs come from SITE_CONFIGS, but defense in
+        # depth costs nothing here).
         client = await _get_client()
-        resp = await client.get(url)
+        status_code, _headers, raw = await _fetch_html(client, url)
 
-        if resp.status_code != 200:
-            logger.debug(f"{name} returned {resp.status_code}")
+        if status_code != 200:
+            logger.debug(f"{name} returned {status_code}")
             return []
 
-        soup = BeautifulSoup(resp.text, "html.parser")
+        soup = BeautifulSoup(raw.decode("utf-8", errors="replace"), "html.parser")
 
         # Try configured selectors first
         items = soup.select(config["article_selector"])
@@ -210,6 +213,10 @@ async def crawl_site(site_id: str, max_articles: int = 10) -> list:
             if len(articles) >= max_articles:
                 break
 
+    except ValueError as ve:
+        # E8: URL rejected by SSRF validation / response too large
+        logger.debug(f"Crawl {name} rejected: {ve}")
+        return []
     except Exception as e:
         logger.error(f"Crawl {name} failed: {e}")
 

@@ -1,5 +1,7 @@
 """Knowledge routes: /api/knowledge*, /api/skill-knowledge*."""
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException, Request
+
+from .. import web_common as _wc
 
 router = APIRouter()
 
@@ -28,8 +30,11 @@ async def api_get_all_knowledge():
 
 
 @router.post("/api/knowledge/update")
-async def api_update_knowledge(master_key: str = None):
+async def api_update_knowledge(request: Request, master_key: str = None):
     """Trigger knowledge base update. If master_key is specified, only update that master."""
+    # F4: this triggers outbound fetches + LLM work — rate-limit like the others.
+    if not _wc._check_rate_limit(request.client.host if request.client else "unknown"):
+        raise HTTPException(status_code=429, detail="请求过于频繁，请稍后再试")
     from ..tools.knowledge_updater import update_all_masters, update_master_knowledge
     if master_key:
         result = await update_master_knowledge(master_key)

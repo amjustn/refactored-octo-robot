@@ -309,6 +309,10 @@ async def _validate_url(url: str) -> Optional[str]:
 async def _fetch_html(client: httpx.AsyncClient, url: str) -> tuple:
     """抓取 URL：SSRF 校验 + 手动处理一跳重定向（重新校验）+ 2MB 响应体上限。
 
+    注意（残余 TOCTOU 窗口）：DNS 校验与 TCP 连接之间目标域名可能被重解析到
+    内网地址（DNS rebinding）。彻底修复需在连接层钉住已校验 IP；当前校验 +
+    逐跳重校验已覆盖绝大多数场景，接受该残余风险并记录于此。
+
     Returns: (status_code, headers, body_bytes)
     Raises: ValueError — URL 被拒绝 / 响应体过大 / 重定向过多
     """
@@ -361,6 +365,10 @@ async def read_webpage(url: str, max_chars: int = 8000) -> dict:
     url = url.strip()
     if not url.startswith(("http://", "https://")):
         url = f"https://{url}"
+
+    # E8: defense in depth — clamp max_chars here too (the API layer clamps
+    # as well) so direct tool calls cannot request unbounded page text.
+    max_chars = max(100, min(int(max_chars), 20000))
 
     logger.info(f"Reading webpage: {url}")
 
