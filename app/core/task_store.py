@@ -73,6 +73,15 @@ class TaskStore:
                     CREATE INDEX IF NOT EXISTS idx_task_artifacts_task
                     ON task_artifacts(task_id)
                 """)
+                # save_task 写入 llm_config_json —— 该列的自愈迁移就放在这里，
+                # 保证不经 persist.Repository 直接实例化的 TaskStore 也能写。
+                existing = {
+                    row[1] for row in conn.execute("PRAGMA table_info(tasks)")
+                }
+                if "llm_config_json" not in existing:
+                    conn.execute(
+                        "ALTER TABLE tasks ADD COLUMN llm_config_json TEXT DEFAULT ''"
+                    )
                 conn.commit()
             finally:
                 conn.close()

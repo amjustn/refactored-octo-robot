@@ -1411,7 +1411,7 @@ function _streamResearchImpl(args, attachments, watchTaskId) {
       showToast('WebSocket响应超时，自动切换到普通模式', 'warning');
       _wsShouldReconnect = false;
       if (ws) { ws.close(); ws = null; }
-      batchResearch(args, attachments);
+      _batchFallback(args, attachments, true);
     }
   }, currentSkill && currentSkill.is_multi_agent ? 180000 : 90000);
 
@@ -1495,7 +1495,7 @@ function _streamResearchImpl(args, attachments, watchTaskId) {
           showToast('WebSocket连接失败，自动切换到普通模式', 'warning');
           _wsShouldReconnect = false;
           if (ws) { ws.close(); ws = null; }
-          batchResearch(args, attachments);
+          _batchFallback(args, attachments, false);
           return;
         }
       } else if (currentReport && !document.getElementById('result-area').style.display) {
@@ -1505,6 +1505,43 @@ function _streamResearchImpl(args, attachments, watchTaskId) {
   } catch (e) {
     finishResearch(false, e.message);
   }
+}
+
+// 回退 batch 前先查任务状态（与 _reconnectResearch 同一思路）：
+// 服务端任务仍在跑 → 转 watch / 提示，绝不重复 POST /api/research。
+// allowWatch=true（WS 暂时静默）转 watch 继续收事件；false（WS 多次连不上）
+// 只提示后台运行，避免在坏连线上做无谓的 watch 循环。
+async function _batchFallback(args, attachments, allowWatch) {
+  if (currentTaskId) {
+    try {
+      var headers = {};
+      Object.assign(headers, getAuthHeaders());
+      var res = await fetch('/api/task/' + currentTaskId, { headers: headers });
+      var t = await res.json();
+      if (t && t.status === 'running') {
+        if (allowWatch) {
+          showToast('任务仍在后台运行，转为进度接收模式', 'warning');
+          _wsShouldReconnect = true;
+          _streamResearchImpl(args, attachments, currentTaskId);
+        } else {
+          showToast('任务仍在后台运行，完成后可在「历史报告」中查看', 'warning');
+          finishResearch(false, '连接中断，任务仍在后台运行，完成后请查看历史报告');
+        }
+        return;
+      }
+      if (t && t.status === 'completed' && t.report) {
+        _wsShouldReconnect = false;
+        currentReport = t.report;
+        updateAllAgents('completed');
+        finishResearch(true, null, { duration: t.duration_seconds });
+        return;
+      }
+      // failed / cancelled / not found → 落到下面的 batch 重新开跑
+    } catch (e) {
+      // 状态查询失败（网络不通）→ 按原逻辑回退 batch
+    }
+  }
+  batchResearch(args, attachments);
 }
 
 // Reconnect resume: before reopening the WS, ask the server about the
@@ -1582,6 +1619,12 @@ async function batchResearch(args, attachments) {
     clearTimeout(timeout);
     var data = await res.json();
     if (data.task_id) currentTaskId = data.task_id;
+    if (res.status === 409) {
+      // 服务端去重命中：同 skill+arguments 的任务正在运行，不重复开跑
+      showToast(data.error || '相同参数的任务正在运行中', 'warning');
+      finishResearch(false, data.error || '相同参数的任务正在运行中');
+      return;
+    }
 
     if (data.agent_results) {
       var total = data.agent_results.length;

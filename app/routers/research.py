@@ -8,6 +8,7 @@ import asyncio
 import json
 
 from fastapi import APIRouter, HTTPException, Request, WebSocket
+from fastapi.responses import JSONResponse
 
 from .. import main as _main
 from ..harness import (
@@ -15,6 +16,9 @@ from ..harness import (
 )
 from ..harness import (
     cancel as harness_cancel,
+)
+from ..harness import (
+    find_running_task as harness_find_running,
 )
 from ..harness import (
     get_status as harness_get_status,
@@ -46,6 +50,19 @@ async def api_start_research(request: "Request", req: ResearchRequest):
     skill = get_skill(req.skill_name)
     if not skill:
         return {"error": f"Unknown skill: {req.skill_name}"}
+
+    # 服务端去重：同 skill+arguments 已有 running 任务 → 409 + 既有 task_id，
+    # 前端收到后只提示不重复开跑（WS 回退竞态的服务端兜底，见 app.js _batchFallback）。
+    running_id = harness_find_running(req.skill_name, req.arguments)
+    if running_id:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "task_id": running_id,
+                "status": "running",
+                "error": "相同参数的研究任务正在运行中，请勿重复提交",
+            },
+        )
 
     llm_config = _validate_llm_config(req.llm_config)
     spec = TaskSpec.build(
