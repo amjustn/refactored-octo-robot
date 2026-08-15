@@ -317,6 +317,22 @@ async def run(
             from .guards import OutputGuard
             guard = OutputGuard(bus=bus, task_id=spec.task_id)
             report, guard_warnings = guard.check(report, spec.skill_name, spec.strategy)
+            if guard.fatals:
+                # 第3层闸门：报告残留未执行的工具调用标记 → 硬失败。
+                # 先把破损报告存为 partial（可审计、可对比），再复用 E2 的
+                # AllAgentsFailedError 路径走通用异常分支：任务标 failed、
+                # 发 error 事件，历史列表出现「⟳ 继续任务」入口。
+                from .runner import AllAgentsFailedError
+                fatal_detail = "；".join(f["detail"] for f in guard.fatals)
+                logger.error(f"fatal guard hit for {spec.task_id}: {fatal_detail}")
+                try:
+                    await repo.asave_report(
+                        spec.skill_name, spec.arguments, report, partial=True,
+                        task_id=spec.task_id, overwrite_name=report_overwrite,
+                    )
+                except Exception as pe:
+                    logger.warning(f"fatal-gate partial save failed for {spec.task_id}: {pe}")
+                raise AllAgentsFailedError(fatal_detail)
             if extra_warnings:
                 guard_warnings.extend(extra_warnings)
                 notes = "；".join(w["detail"] for w in extra_warnings[:2])

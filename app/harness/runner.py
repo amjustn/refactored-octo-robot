@@ -56,6 +56,17 @@ SCRATCHPAD_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "scrat
 
 import re as _re
 
+# 第2层防御：DSML 工具调用标记剥离，覆盖三类形态（幂等）：
+#  1. 整块 <tool_calls>...</tool_calls>（含其间内容），开/闭标签均可带
+#     全角 ｜｜DSML｜｜ 前缀，大小写不敏感；
+#  2. 全角前缀标签（｜｜DSML｜｜invoke 等，含自闭合，历史行为保留）；
+#  3. 孤立标签：无前缀或混用形态的 <invoke ...> / </invoke> /
+#     <parameter ...> / </parameter> / <tool_calls> / </tool_calls> /
+#     </｜｜DSML｜｜invoke> 等。这些标记不会出现在正常中文研报正文里。
+_DSML_WHOLE_BLOCK_RE = _re.compile(
+    r'<\s*(?:｜｜DSML｜｜)?\s*tool_calls\b.*?</\s*(?:｜｜DSML｜｜)?\s*tool_calls\s*>',
+    _re.DOTALL | _re.IGNORECASE,
+)
 _DSML_BLOCK_RE = _re.compile(
     r'<\s*(?:｜｜DSML｜｜tool_calls|｜｜DSML｜｜invoke|｜｜DSML｜｜parameter|/｜｜DSML｜｜tool_calls|/｜｜DSML｜｜invoke|/｜｜DSML｜｜parameter)\s*[^>]*>',
     _re.DOTALL,
@@ -64,12 +75,18 @@ _DSML_SELF_RE = _re.compile(
     r'<\s*｜｜DSML｜｜(?:tool_calls|invoke|parameter)\b[^>]*?/>',
     _re.DOTALL,
 )
+_DSML_ORPHAN_RE = _re.compile(
+    r'<\s*/?\s*(?:｜｜DSML｜｜)?\s*(?:tool_calls|invoke|parameter)\b[^>]*>',
+    _re.IGNORECASE,
+)
 
 
 def _strip_dsml(text: str) -> str:
     """Remove DSML tool-call artifacts from an agent result (idempotent)."""
+    text = _DSML_WHOLE_BLOCK_RE.sub("", text)
     text = _DSML_BLOCK_RE.sub("", text)
-    return _DSML_SELF_RE.sub("", text)
+    text = _DSML_SELF_RE.sub("", text)
+    return _DSML_ORPHAN_RE.sub("", text)
 
 
 def _with_attachments(prompt: str, attachments: str) -> str:
@@ -297,15 +314,24 @@ class AgentRunner:
         if context:
             system_prompt = f"{system_prompt}\n\n{context}"
 
-        if agent_role in TOOL_ENABLED_AGENTS:
+        # 技能级工具开关（第1层修复）：单Agent技能（agent_role 为 None）
+        # 若在 registry 中声明 tools_enabled（提示词明确要求调用工具，如
+        # daily-briefing），同样走 function-calling 循环；多Agent成员角色
+        # 仍由 TOOL_ENABLED_AGENTS 覆盖，行为不变。
+        skill_tools_enabled = (
+            agent_role is None
+            and bool((get_skill(skill_name) or {}).get("tools_enabled"))
+        )
+        if agent_role in TOOL_ENABLED_AGENTS or skill_tools_enabled:
+            tool_label = agent_role or skill_name or "default"
             # Function-calling loop is non-streaming; emit whole result.
             result = await chat_complete_with_tools(
                 system_prompt, user_msg,
                 tools=ALL_TOOL_SCHEMAS,
-                tool_executor=self._tool_executor(agent_role),
+                tool_executor=self._tool_executor(tool_label),
                 llm_config=llm_config,
             )
-            self._note_tool_fallback(agent_role)
+            self._note_tool_fallback(tool_label)
             if stream:
                 self._chunk(result, agent=agent_role)
             return result

@@ -6,6 +6,12 @@
 | citation  | financial-looking numbers have a source marker nearby       | warning |
 | disclaimer| report ends with a no-investment-advice statement           | auto-fix|
 | length    | ≤ MAX_REPORT_LENGTH (50k; series 200k)                      | truncate|
+| tool_markers | leftover <tool_calls>/｜｜DSML｜｜/<invoke name= markers   | fatal   |
+
+tool_markers 为第3层闸门：报告残留工具调用标记说明模型对着未下发的
+tools 空喊（技能未走 function-calling 循环），报告实质破损。命中时
+记入 ``guard.fatals``，由 harness run() 存 partial 报告并将任务标
+failed（复用 AllAgentsFailedError 路径），历史列表出现「⟳ 继续任务」。
 
 Every warning becomes a guard_warning event (auditable) and is persisted
 to tasks.guard_warnings via the Repository. Warnings never alter the
@@ -43,6 +49,10 @@ _NUMBER = re.compile(
     r"(?:¥|HK\$|\$)?\d[\d,]*\.?\d*\s?(?:亿|万|%|元|港元|美元|倍)?"
 )
 
+# 工具调用标记残留（第3层闸门）：任一命中即 fatal。
+# 覆盖 DSML 全角前缀、整块 tool_calls、以及混用形态的 <invoke name=。
+_TOOL_MARKER_RE = re.compile(r"(｜｜DSML｜｜|<\s*tool_calls\b|<\s*invoke\s+name\s*=)", re.I)
+
 # Sections that are framework instructions, not output headings
 _STRUCTURE_SKIP = re.compile(
     r"(输入|目标|要求|工具|数据获取|框架|风格|方法|步骤|流程|原则|视角|"
@@ -70,6 +80,8 @@ class OutputGuard:
         self.bus = bus
         self.task_id = task_id or "adhoc"
         self.warnings: list[dict] = []
+        # fatal 命中清单（非 warning）：harness run() 据此判任务失败
+        self.fatals: list[dict] = []
 
     def _warn(self, gate: str, detail: str):
         warning = {"gate": gate, "detail": detail[:300]}
@@ -80,13 +92,34 @@ class OutputGuard:
     # ---------- gates ----------
 
     def check(self, report: str, skill_name: str = "", strategy: str = "single") -> tuple[str, list]:
-        """Run all gates; returns (possibly modified report, warnings)."""
+        """Run all gates; returns (possibly modified report, warnings).
+
+        Fatal hits are collected in ``self.fatals`` (not returned); the
+        caller (harness run) turns them into a hard task failure.
+        """
         self.warnings = []
+        self.fatals = []
+        self._gate_tool_markers(report)
         report = self._gate_structure(report, skill_name, strategy)
         self._gate_citation(report)
         report = self._gate_disclaimer(report)
         report = self._gate_length(report, strategy)
         return report, list(self.warnings)
+
+    def _gate_tool_markers(self, report: str):
+        """第3层闸门：最终报告残留工具调用标记 → fatal。
+
+        这些标记出现即说明模型试图调用未下发的 tools（单Agent技能未
+        启用 tools_enabled 路由），报告内容实质是未执行的调用计划。
+        """
+        m = _TOOL_MARKER_RE.search(report)
+        if m:
+            fatal = {
+                "gate": "tool_markers",
+                "detail": f"报告含未执行的工具调用标记（{m.group(0)!r}），工具未实际执行",
+            }
+            self.fatals.append(fatal)
+            self._warn("tool_markers", fatal["detail"])
 
     def _gate_structure(self, report: str, skill_name: str, strategy: str) -> str:
         if strategy != "single":
