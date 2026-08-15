@@ -213,6 +213,10 @@ SKILLS = [
         "category": "日报",
         "is_multi_agent": False,
         "agent_count": 1,
+        # 单Agent技能级工具开关：提示词明确要求调用 web_search /
+        # fetch_market_indices / get_stock_price，需走 function-calling 循环，
+        # 否则模型只会输出 <tool_calls> 文本标记（DSML 泄漏根因）。
+        "tools_enabled": True,
         "input_hint": "留空生成今日日报，或描述关注方向，如：关注新能源和腾讯的今日动态",
     },
 
