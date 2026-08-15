@@ -37,18 +37,37 @@ def get_client(base_url: str = None, api_key: str = None) -> AsyncOpenAI:
         if len(_clients) >= _MAX_CLIENTS:
             oldest_key = next(iter(_clients))
             evicted = _clients.pop(oldest_key)
-            try:
-                close = getattr(evicted, "close", None)
-                if close is not None and not asyncio.iscoroutinefunction(close):
-                    close()
-            except Exception:
-                pass  # best-effort; dropping the reference is enough
+            _close_client_safely(evicted)
         _clients[key] = AsyncOpenAI(
             api_key=api_key,
             base_url=base_url,
             timeout=AGENT_TIMEOUT,
         )
     return _clients[key]
+
+
+def _close_client_safely(client: AsyncOpenAI) -> None:
+    """Best-effort close of an evicted client.
+
+    AsyncOpenAI.close() 是协程：能拿到运行中的 loop 就调度关闭；
+    拿不到（同步上下文）就跳过 —— 进程会随 GC 回收连接，注释说明即可，
+    绝不能为了关闭而新建 loop（会泄漏线程）。
+    """
+    try:
+        close = getattr(client, "close", None)
+        if close is None:
+            return
+        if asyncio.iscoroutinefunction(close):
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                # 无运行中的事件循环：跳过协程关闭（连接由 GC/进程退出回收）
+                return
+            loop.create_task(close())
+        else:
+            close()
+    except Exception:
+        pass  # best-effort; dropping the reference is enough
 
 
 def resolve_llm_config(llm_config: dict = None) -> tuple:
@@ -67,15 +86,23 @@ _usage_task_var: ContextVar[Optional[str]] = ContextVar("llm_usage_task", defaul
 _usage_totals: dict[str, dict] = {}
 
 
+def _new_usage_bucket() -> dict:
+    """Fresh per-task usage bucket with a per-model breakdown sub-table."""
+    return {
+        "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
+        "by_model": {},  # model -> {prompt_tokens, completion_tokens, total_tokens}
+    }
+
+
 def set_usage_context(task_id: str) -> None:
     """Bind token accounting to the current asyncio context."""
     _usage_task_var.set(task_id)
-    _usage_totals.setdefault(task_id, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
+    _usage_totals.setdefault(task_id, _new_usage_bucket())
 
 
 def get_usage(task_id: str) -> dict:
-    """Return accumulated token usage for a task."""
-    return dict(_usage_totals.get(task_id, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}))
+    """Return accumulated token usage for a task (含 by_model per-model 明细)."""
+    return dict(_usage_totals.get(task_id, _new_usage_bucket()))
 
 
 def clear_usage(task_id: str) -> None:
@@ -83,17 +110,30 @@ def clear_usage(task_id: str) -> None:
     _usage_totals.pop(task_id, None)
 
 
-def _record_usage(usage) -> None:
-    """Accumulate an OpenAI usage object into the current task context."""
+def _record_usage(usage, model: Optional[str] = None) -> None:
+    """Accumulate an OpenAI usage object into the current task context.
+
+    model 传入本次调用的实际模型名：总量与 by_model 明细同步累加，
+    供 persist 按 per-model 价目分别计价。
+    """
     task_id = _usage_task_var.get()
     if not task_id or not usage:
         return
-    totals = _usage_totals.setdefault(
-        task_id, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    totals = _usage_totals.setdefault(task_id, _new_usage_bucket())
+    totals.setdefault("by_model", {})  # 防御旧 bucket 形状
+    p = getattr(usage, "prompt_tokens", 0) or 0
+    c = getattr(usage, "completion_tokens", 0) or 0
+    t = getattr(usage, "total_tokens", 0) or 0
+    totals["prompt_tokens"] += p
+    totals["completion_tokens"] += c
+    totals["total_tokens"] += t
+    slot = totals["by_model"].setdefault(
+        (model or "unknown")[:300],
+        {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
     )
-    totals["prompt_tokens"] += getattr(usage, "prompt_tokens", 0) or 0
-    totals["completion_tokens"] += getattr(usage, "completion_tokens", 0) or 0
-    totals["total_tokens"] += getattr(usage, "total_tokens", 0) or 0
+    slot["prompt_tokens"] += p
+    slot["completion_tokens"] += c
+    slot["total_tokens"] += t
 
 # Retry config
 _MAX_RETRIES = 3
@@ -197,7 +237,7 @@ async def chat_stream(
     stream = await _retry_async(_create_stream)
     async for chunk in stream:
         if chunk.usage:
-            _record_usage(chunk.usage)
+            _record_usage(chunk.usage, model)
         if chunk.choices and chunk.choices[0].delta.content:
             yield chunk.choices[0].delta.content
 
@@ -234,7 +274,7 @@ async def chat_complete(
 
     response = await _retry_async(_create)
     if response.usage:
-        _record_usage(response.usage)
+        _record_usage(response.usage, model)
     return response.choices[0].message.content or ""
 
 
@@ -307,14 +347,14 @@ async def chat_complete_with_tools(
             try:
                 response = await _retry_async(_create_no_tools)
                 if response.usage:
-                    _record_usage(response.usage)
+                    _record_usage(response.usage, model)
                 return response.choices[0].message.content or ""
             except Exception as e2:
                 logger.warning(f"No-tools fallback failed: {e2}, falling back to plain chat")
                 return await chat_complete(system_prompt, user_message, model, temperature, llm_config)
 
         if response.usage:
-            _record_usage(response.usage)
+            _record_usage(response.usage, model)
 
         choice = response.choices[0]
         message = choice.message
@@ -398,7 +438,7 @@ async def chat_complete_with_tools(
     try:
         response = await _retry_async(_create_final)
         if response.usage:
-            _record_usage(response.usage)
+            _record_usage(response.usage, model)
         return response.choices[0].message.content or ""
     except Exception as e:
         logger.error(f"Final summary failed: {e}")

@@ -98,7 +98,7 @@ class TestSpec:
         spec = TaskSpec.build(get_skill("daily-briefing"), "test")
         assert spec.strategy == "single"
         assert spec.agent_names == ("default",)
-        assert len(spec.task_id) == 8
+        assert len(spec.task_id) == 12
 
     def test_build_multi(self):
         from app.harness.spec import TaskSpec
@@ -403,9 +403,11 @@ class TestPersist:
         assert ("agent-a", "result") in tmp_repo.get_artifacts("t1")
 
     def test_save_billing(self, tmp_repo):
-        record = tmp_repo.save_billing("t1", {"prompt_tokens": 1000, "completion_tokens": 500}, 10.5)
+        record = tmp_repo.save_billing("t1", {"prompt_tokens": 1000, "completion_tokens": 500}, 10.5,
+                                       model="kimi-k3")
         assert record["tokens_prompt"] == 1000
         assert record["cost_yuan"] > 0
+        assert record["priced"] is True
 
     def test_interrupted_status(self, tmp_repo):
         from app.models.schemas import ResearchStatus

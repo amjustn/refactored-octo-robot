@@ -114,6 +114,34 @@ class LLMConfig:
         out.update(agent_cfg)
         return out
 
+    def to_storage_dict(self) -> dict:
+        """脱敏序列化：供 tasks 表落库、resume 沿用原任务配置。
+
+        绝不包含 api_key（顶层与 agent_models 内都没有）；空配置返回 {}。
+        """
+        out: dict = {}
+        if self.model:
+            out["model"] = self.model
+        if self.base_url:
+            out["base_url"] = self.base_url
+        if self.synthesis_model:
+            out["synthesis_model"] = self.synthesis_model
+        if self.per_agent_enabled:
+            out["per_agent_enabled"] = True
+        agents = {}
+        for name, cfg in self.agent_models.items():
+            sub = {}
+            if cfg.get("model"):
+                sub["model"] = cfg["model"]
+            if cfg.get("base_url"):
+                sub["base_url"] = cfg["base_url"]
+            # api_key 显式不序列化
+            if sub:
+                agents[name] = sub
+        if agents:
+            out["agent_models"] = agents
+        return out
+
     def has_any_agent_override(self) -> bool:
         """True when per-agent model is enabled and at least one agent has a
         config that differs from the global model."""
@@ -179,7 +207,7 @@ class TaskSpec:
             agent_names = ("default",)
 
         return cls(
-            task_id=task_id or str(uuid.uuid4())[:8],
+            task_id=task_id or uuid.uuid4().hex[:12],
             skill_name=skill["name"],
             arguments=arguments,
             attachments=attachments or "",

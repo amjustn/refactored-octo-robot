@@ -19,7 +19,7 @@ from ..core.config import LLM_MODEL, MAX_CONCURRENT_RUNS
 from ..core.llm import chat_complete, clear_usage, get_usage, set_usage_context
 from ..models.schemas import AgentProgress, ResearchStatus
 from .events import EventBus, EventType, get_bus
-from .persist import Repository, get_repository
+from .persist import Repository, get_repository, sanitize_llm_config_for_storage
 from .spec import TaskSpec
 
 logger = logging.getLogger("ai_berkshire.harness")
@@ -30,6 +30,8 @@ _FORGET_DELAY_S = 3600
 # Active task state (replaces main.py's active_tasks / running_jobs)
 _active: dict[str, ResearchStatus] = {}
 _jobs: dict[str, asyncio.Task] = {}
+# task_id -> arguments（ResearchStatus 不带 arguments，服务端去重需要它）
+_active_args: dict[str, str] = {}
 
 # Global concurrency gate: one semaphore per event loop, created lazily
 # (asyncio.Semaphore binds to the running loop; the app uses one loop,
@@ -60,12 +62,15 @@ class RunResult:
 
 # ==================== task registry ====================
 
-async def _register(status: ResearchStatus, arguments: str, repo: Repository):
+async def _register(status: ResearchStatus, arguments: str, repo: Repository,
+                    llm_config: Optional[dict] = None):
     if len(_active) >= _MAX_TASKS:
         oldest_id = next(iter(_active))
         _active.pop(oldest_id, None)
     _active[status.task_id] = status
-    await repo.asave_task(status, arguments)
+    _active_args[status.task_id] = arguments or ""
+    # llm_config 已脱敏（无 api_key），仅首次 INSERT 落库，供 resume 沿用
+    await repo.asave_task(status, arguments, sanitize_llm_config_for_storage(llm_config))
 
 
 async def _persist_active(task_id: str, arguments: str, repo: Repository):
@@ -76,6 +81,22 @@ async def _persist_active(task_id: str, arguments: str, repo: Repository):
 async def _forget_later(task_id: str, delay: int = _FORGET_DELAY_S):
     await asyncio.sleep(delay)
     _active.pop(task_id, None)
+    _active_args.pop(task_id, None)
+
+
+def find_running_task(skill_name: str, arguments: str) -> Optional[str]:
+    """按 skill+arguments 在活跃注册表里找 running 任务（服务端去重用）。
+
+    命中说明同参任务正在跑，调用方应返回既有 task_id 而非新起任务。
+    """
+    for task_id, status in _active.items():
+        if status.status != "running":
+            continue
+        if status.skill_name != skill_name:
+            continue
+        if _active_args.get(task_id, "") == (arguments or ""):
+            return task_id
+    return None
 
 
 def active_count() -> int:
@@ -261,7 +282,14 @@ async def run(
             status="running",
             agents=[AgentProgress(agent_name=n, status="pending") for n in spec.agent_names],
         )
-        await _register(status, spec.arguments, repo)
+        # resume 双跑防护：同 task_id 已在跑则拒绝注册。
+        # 检查与 _register 的占位之间无 await，asyncio 下是原子的。
+        existing = _active.get(spec.task_id)
+        if existing is not None and existing.status == "running":
+            dup_msg = "任务已在运行中，请勿重复启动"
+            bus.emit(spec.task_id, EventType.ERROR, code="duplicate", message=dup_msg)
+            return RunResult(task_id=spec.task_id, status="error", error=dup_msg)
+        await _register(status, spec.arguments, repo, llm_config=spec.llm.to_storage_dict())
         _jobs[spec.task_id] = asyncio.current_task()
         set_usage_context(spec.task_id)
         start_ts = time()
@@ -307,6 +335,8 @@ async def run(
                 "prompt_tokens": billing["tokens_prompt"],
                 "completion_tokens": billing["tokens_completion"],
                 "cost_yuan": billing["cost_yuan"],
+                "by_model": billing.get("by_model", []),
+                "priced": billing.get("priced", True),
             }
             report_path = await repo.asave_report(
                 spec.skill_name, spec.arguments, report, duration, tokens,
@@ -342,6 +372,17 @@ async def run(
             status.status = "cancelled"
             status.error = "已被用户取消"
             await _persist_active(spec.task_id, spec.arguments, repo)
+            # 取消也计费：已消耗的 partial tokens 落库（guard 未运行，warnings 为空）。
+            # clear_usage 在 finally 中照常执行。
+            try:
+                await repo.asave_billing(
+                    spec.task_id, get_usage(spec.task_id), time() - start_ts,
+                    guard_warnings=[],
+                    model=spec.llm.model or LLM_MODEL,
+                    accumulate=billing_accumulate,
+                )
+            except Exception as be:
+                logger.warning(f"billing on cancel failed for {spec.task_id}: {be}")
             if not report_saved:
                 await _save_partial_report(spec, repo, "取消", overwrite_name=report_overwrite)
             # Legacy-compatible cancel frame + additive explicit type
@@ -386,6 +427,16 @@ async def prepare_resume(task_id: str, llm_override: Optional[dict] = None) -> t
         return None, "任务不存在"
     if brief["status"] == "running" or is_active(task_id):
         return None, "任务仍在运行中"
+
+    # 原任务的 per-agent LLM 配置（落库时已脱敏，无 api_key）：请求未带
+    # override 时默认沿用；请求 override 优先（调用方已做校验清洗）。
+    if llm_override is None:
+        import json as _json
+        try:
+            stored = _json.loads(brief.get("llm_config_json") or "{}")
+        except Exception:
+            stored = {}
+        llm_override = stored or None
 
     from ..skills import get_skill
     skill = get_skill(brief["skill_name"])

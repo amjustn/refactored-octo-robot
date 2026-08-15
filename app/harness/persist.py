@@ -27,28 +27,210 @@ from ..models.schemas import ResearchStatus
 
 logger = logging.getLogger("ai_berkshire.harness.persist")
 
-# 元 / 百万 tokens。按各厂公开价目估算，可按实际账单调整。
+# 元 / 百万 tokens。2026-08 按各厂公开价目估算，可按实际账单调整。
+# 查找走前缀匹配（最长前缀优先）：新模型只要前缀命中即自动套用，
+# 未识别的模型记 0 并在计价结果里标 priced=False（见 compute_cost_detail）。
 MODEL_PRICING = {
-    # DeepSeek
+    # DeepSeek (api.deepseek.com)
     "deepseek-v4-flash": {"prompt": 2.0, "completion": 8.0},
     "deepseek-v4-pro": {"prompt": 4.0, "completion": 16.0},
-    # Kimi / Moonshot
-    "kimi-k2.5": {"prompt": 2.0, "completion": 8.0},
-    "kimi-k2.6": {"prompt": 2.0, "completion": 8.0},
+    "deepseek": {"prompt": 2.0, "completion": 8.0},
+    # Kimi / Moonshot (api.moonshot.cn)
+    "kimi-k2.7-code-highspeed": {"prompt": 4.0, "completion": 16.0},
     "kimi-k2.7-code": {"prompt": 2.0, "completion": 8.0},
-    "kimi-k2.7-code-highspeed": {"prompt": 2.0, "completion": 8.0},
+    "kimi-k2-thinking": {"prompt": 2.0, "completion": 8.0},
+    "kimi-k2.6": {"prompt": 2.0, "completion": 8.0},
+    "kimi-k2.5": {"prompt": 2.0, "completion": 8.0},
+    "kimi-k2": {"prompt": 2.0, "completion": 8.0},
     "kimi-k3": {"prompt": 4.0, "completion": 16.0},
-    # Zhipu / GLM
+    "kimi": {"prompt": 2.0, "completion": 8.0},
+    # Zhipu / GLM (open.bigmodel.cn)
+    "glm-4.5-air": {"prompt": 1.0, "completion": 4.0},
     "glm-4.5": {"prompt": 2.0, "completion": 8.0},
-    "glm-4.5-air": {"prompt": 2.0, "completion": 8.0},
     "glm-4.6": {"prompt": 2.0, "completion": 8.0},
     "glm-4.7": {"prompt": 2.0, "completion": 8.0},
-    "glm-5": {"prompt": 4.0, "completion": 16.0},
+    "glm-4v": {"prompt": 2.0, "completion": 8.0},
     "glm-5-turbo": {"prompt": 4.0, "completion": 16.0},
     "glm-5.1": {"prompt": 4.0, "completion": 16.0},
     "glm-5.2": {"prompt": 4.0, "completion": 16.0},
+    "glm-5": {"prompt": 4.0, "completion": 16.0},
+    "glm": {"prompt": 2.0, "completion": 8.0},
+    # OpenAI (api.openai.com)
+    "gpt-5.6": {"prompt": 10.0, "completion": 40.0},
+    "gpt-5.5": {"prompt": 8.0, "completion": 32.0},
+    "gpt-5.4": {"prompt": 6.0, "completion": 24.0},
+    "gpt-5.1": {"prompt": 5.0, "completion": 20.0},
+    "gpt-5": {"prompt": 5.0, "completion": 20.0},
+    "gpt-4o": {"prompt": 5.0, "completion": 15.0},
+    "gpt-4": {"prompt": 5.0, "completion": 15.0},
+    "o4-mini": {"prompt": 4.0, "completion": 16.0},
+    "o4": {"prompt": 4.0, "completion": 16.0},
+    # Anthropic (api.anthropic.com)
+    "claude-opus-5": {"prompt": 30.0, "completion": 120.0},
+    "claude-opus-4": {"prompt": 15.0, "completion": 75.0},
+    "claude-sonnet-5": {"prompt": 6.0, "completion": 24.0},
+    "claude-sonnet-4": {"prompt": 3.0, "completion": 15.0},
+    "claude": {"prompt": 6.0, "completion": 24.0},
+    # Google (generativelanguage.googleapis.com)
+    "gemini-3.6-flash": {"prompt": 1.0, "completion": 4.0},
+    "gemini-3.5-flash": {"prompt": 1.0, "completion": 4.0},
+    "gemini-2.5-pro": {"prompt": 4.0, "completion": 16.0},
+    "gemini-2.5-flash": {"prompt": 1.0, "completion": 4.0},
+    "gemini-2.0-flash": {"prompt": 1.0, "completion": 4.0},
+    "gemini": {"prompt": 1.0, "completion": 4.0},
+    # 阿里通义 (dashscope.aliyuncs.com)
+    "qwen3-max": {"prompt": 4.0, "completion": 16.0},
+    "qwen3-plus": {"prompt": 2.0, "completion": 8.0},
+    "qwen3-turbo": {"prompt": 1.0, "completion": 4.0},
+    "qwen-vl-max": {"prompt": 2.0, "completion": 8.0},
+    "qwen-vl-plus": {"prompt": 1.0, "completion": 4.0},
+    "qwen-vl": {"prompt": 1.0, "completion": 4.0},
+    "qwen": {"prompt": 2.0, "completion": 8.0},
+    # 百度文心 (qianfan.baidubce.com)
+    "ernie-speed": {"prompt": 0.5, "completion": 2.0},
+    "ernie-lite": {"prompt": 0.5, "completion": 2.0},
+    "ernie": {"prompt": 2.0, "completion": 8.0},
+    # 腾讯混元 (api.hunyuan.cloud.tencent.com)
+    "hunyuan-lite": {"prompt": 0.5, "completion": 2.0},
+    "hunyuan-a13b": {"prompt": 1.0, "completion": 4.0},
+    "hunyuan": {"prompt": 2.0, "completion": 8.0},
+    # 字节豆包 (ark.cn-beijing.volces.com)
+    "doubao-1.5-lite": {"prompt": 0.5, "completion": 2.0},
+    "doubao": {"prompt": 2.0, "completion": 8.0},
+    # 兜底：未识别模型的粗略估算（仅兼容旧 compute_cost_yuan 契约）
     "default": {"prompt": 2.0, "completion": 8.0},
 }
+
+# 前缀匹配表：按前缀长度降序，保证 "kimi-k2.7-code-highspeed" 先于 "kimi-k2.7-code" 命中
+_PRICING_PREFIXES = sorted(
+    (k for k in MODEL_PRICING if k != "default"), key=len, reverse=True
+)
+
+
+def _price_for_model(model: Optional[str]) -> Optional[dict]:
+    """前缀匹配价目（最长前缀优先）。
+
+    Ollama 本地模型（"name:tag" 形式，如 qwen3:14b / deepseek-r1:8b）视为免费，
+    返回 0 价目（priced=True）；未识别的模型返回 None（调用方记 0 + priced=False）。
+    """
+    name = (model or "").strip().lower()
+    if not name:
+        return None
+    if ":" in name:
+        # 本地 Ollama 模型（name:tag）：不计费
+        return {"prompt": 0.0, "completion": 0.0}
+    for prefix in _PRICING_PREFIXES:
+        if name.startswith(prefix):
+            return MODEL_PRICING[prefix]
+    return None
+
+
+def compute_cost_detail(usage: dict, model: Optional[str] = None) -> dict:
+    """按模型计价：{"cost_yuan", "priced"}。未识别模型记 0 且 priced=False。"""
+    price = _price_for_model(model)
+    if price is None:
+        return {"cost_yuan": 0.0, "priced": False}
+    prompt = usage.get("prompt_tokens", 0) or 0
+    completion = usage.get("completion_tokens", 0) or 0
+    cost = prompt * price["prompt"] / 1e6 + completion * price["completion"] / 1e6
+    return {"cost_yuan": round(cost, 4), "priced": True}
+
+
+def compute_cost_yuan(usage: dict, model: Optional[str] = None) -> float:
+    """Compute cost in CNY from a token-usage dict and the price list.
+
+    兼容旧契约：未识别模型回落 default 价目做粗略估算。
+    新代码请用 compute_cost_detail（未识别记 0 + priced=False）。
+    """
+    detail = compute_cost_detail(usage, model)
+    if detail["priced"]:
+        return detail["cost_yuan"]
+    price = MODEL_PRICING["default"]
+    prompt = usage.get("prompt_tokens", 0) or 0
+    completion = usage.get("completion_tokens", 0) or 0
+    cost = prompt * price["prompt"] / 1e6 + completion * price["completion"] / 1e6
+    return round(cost, 4)
+
+
+def compute_usage_breakdown(usage: dict, default_model: Optional[str] = None) -> list:
+    """把累计 usage 按 per-model 明细分别计价。
+
+    usage 携带 by_model 子表（core.llm._record_usage 按模型归集）时逐模型
+    计价求和；没有明细的旧调用方以 default_model 汇总为单行。
+    返回 [{model, prompt_tokens, completion_tokens, cost_yuan, priced}]，费用降序。
+    """
+    rows = []
+    by_model = usage.get("by_model") or {}
+    if by_model:
+        items = by_model.items()
+    else:
+        items = [(default_model or "unknown", usage)]
+    for mdl, u in items:
+        detail = compute_cost_detail(u, mdl)
+        rows.append({
+            "model": (mdl or "unknown")[:300],
+            "prompt_tokens": u.get("prompt_tokens", 0) or 0,
+            "completion_tokens": u.get("completion_tokens", 0) or 0,
+            "cost_yuan": detail["cost_yuan"],
+            "priced": detail["priced"],
+        })
+    rows.sort(key=lambda r: r["cost_yuan"], reverse=True)
+    return rows
+
+
+def sanitize_llm_config_for_storage(cfg: Optional[dict]) -> dict:
+    """脱敏 per-request LLM 配置用于落库：剥掉一切 api_key（顶层与
+    agent_models 内的独立 key 都绝不落库），保留 model/base_url/
+    synthesis_model/per_agent_enabled/agent_models，供 resume 沿用。"""
+    if not isinstance(cfg, dict):
+        return {}
+    out = {}
+    for key in ("model", "base_url", "synthesis_model"):
+        val = cfg.get(key)
+        if isinstance(val, str) and val.strip():
+            out[key] = val.strip()[:300]
+    if cfg.get("per_agent_enabled"):
+        out["per_agent_enabled"] = True
+    raw_agents = cfg.get("agent_models")
+    if isinstance(raw_agents, dict) and raw_agents:
+        agents = {}
+        for name, val in raw_agents.items():
+            if isinstance(val, str):
+                if val.strip():
+                    agents[str(name).strip()[:80]] = val.strip()[:300]
+            elif isinstance(val, dict):
+                sub = {}
+                m = (val.get("model") or "").strip()[:300]
+                if m:
+                    sub["model"] = m
+                bu = (val.get("base_url") or "").strip()[:500]
+                if bu:
+                    sub["base_url"] = bu
+                # api_key 显式剔除
+                if sub:
+                    agents[str(name).strip()[:80]] = sub
+        if agents:
+            out["agent_models"] = agents
+    return out
+
+
+def merge_usage_breakdowns(old: list, new: list) -> list:
+    """累加两份 per-model 明细（resume 续跑计费合并用），费用降序。"""
+    merged: dict[str, dict] = {}
+    for row in (old or []) + (new or []):
+        key = row.get("model") or "unknown"
+        slot = merged.setdefault(key, {
+            "model": key, "prompt_tokens": 0, "completion_tokens": 0,
+            "cost_yuan": 0.0, "priced": bool(row.get("priced")),
+        })
+        slot["prompt_tokens"] += row.get("prompt_tokens", 0) or 0
+        slot["completion_tokens"] += row.get("completion_tokens", 0) or 0
+        slot["cost_yuan"] = round(slot["cost_yuan"] + (row.get("cost_yuan", 0) or 0), 4)
+        slot["priced"] = slot["priced"] and bool(row.get("priced", True))
+    out = list(merged.values())
+    out.sort(key=lambda r: r["cost_yuan"], reverse=True)
+    return out
+
 
 # Billing columns added on top of the legacy tasks schema.
 _NEW_COLUMNS = {
@@ -58,6 +240,10 @@ _NEW_COLUMNS = {
     "duration_s": "duration_s REAL",
     "guard_warnings": "guard_warnings TEXT DEFAULT '[]'",
     "model": "model TEXT DEFAULT ''",
+    # per-model 用量/计价明细（JSON list，见 compute_usage_breakdown）
+    "usage_json": "usage_json TEXT DEFAULT ''",
+    # 脱敏后的 per-agent LLM 配置（绝不落 api_key），resume 默认沿用
+    "llm_config_json": "llm_config_json TEXT DEFAULT ''",
 }
 
 
@@ -65,15 +251,6 @@ def _sanitize_filename(name: str) -> str:
     name = Path(name).name
     name = re.sub(r"[^a-zA-Z0-9_\-\.]", "_", name)
     return name or "report"
-
-
-def compute_cost_yuan(usage: dict, model: Optional[str] = None) -> float:
-    """Compute cost in CNY from a token-usage dict and the price list."""
-    price = MODEL_PRICING.get(model or "", MODEL_PRICING["default"])
-    prompt = usage.get("prompt_tokens", 0) or 0
-    completion = usage.get("completion_tokens", 0) or 0
-    cost = prompt * price["prompt"] / 1e6 + completion * price["completion"] / 1e6
-    return round(cost, 4)
 
 
 class Repository:
@@ -107,8 +284,9 @@ class Repository:
 
     # ---------- task passthrough ----------
 
-    def save_task(self, status: ResearchStatus, arguments: str = ""):
-        self.store.save_task(status, arguments)
+    def save_task(self, status: ResearchStatus, arguments: str = "",
+                  llm_config: Optional[dict] = None):
+        self.store.save_task(status, arguments, llm_config=llm_config)
 
     def get_task(self, task_id: str) -> Optional[ResearchStatus]:
         return self.store.get_task(task_id)
@@ -144,8 +322,9 @@ class Repository:
 
     # ---------- async wrappers (offload blocking I/O from the loop) ----------
 
-    async def asave_task(self, status: ResearchStatus, arguments: str = ""):
-        await asyncio.to_thread(self.save_task, status, arguments)
+    async def asave_task(self, status: ResearchStatus, arguments: str = "",
+                         llm_config: Optional[dict] = None):
+        await asyncio.to_thread(self.save_task, status, arguments, llm_config)
 
     async def aget_task(self, task_id: str) -> Optional[ResearchStatus]:
         return await asyncio.to_thread(self.get_task, task_id)
@@ -178,45 +357,70 @@ class Repository:
     ) -> dict:
         """Persist token usage + cost for a finished task. Returns the record.
 
+        Cost is computed per-model from the usage breakdown
+        (usage["by_model"], see compute_usage_breakdown) and then summed;
+        the per-model detail is stored in the usage_json column. Models
+        missing from the price list contribute 0 and mark the record
+        priced=False (partially priced when mixed with known models).
+
         accumulate=True (resume flow) ADDS this run's tokens/cost/duration to
         the existing row instead of overwriting, so a resumed task's total
-        spend stays visible in the cost dashboard.
+        spend stays visible in the cost dashboard; per-model breakdowns are
+        merged per model.
         """
+        breakdown = compute_usage_breakdown(usage, default_model=model)
         record = {
             "tokens_prompt": usage.get("prompt_tokens", 0) or 0,
             "tokens_completion": usage.get("completion_tokens", 0) or 0,
-            "cost_yuan": compute_cost_yuan(usage, model),
+            "cost_yuan": round(sum(r["cost_yuan"] for r in breakdown), 4),
             "duration_s": round(duration_s, 1),
             "guard_warnings": json.dumps(guard_warnings or [], ensure_ascii=False),
             "model": (model or "")[:300],
+            "by_model": breakdown,
+            "priced": all(r["priced"] for r in breakdown) if breakdown else True,
         }
+        usage_json = json.dumps(breakdown, ensure_ascii=False)
         conn = sqlite3.connect(str(self.store.db_path), timeout=10)
+        conn.row_factory = sqlite3.Row
         try:
             if accumulate:
+                row = conn.execute(
+                    "SELECT usage_json FROM tasks WHERE task_id = ?", (task_id,)
+                ).fetchone()
+                if row and row["usage_json"]:
+                    try:
+                        merged = merge_usage_breakdowns(json.loads(row["usage_json"]), breakdown)
+                    except Exception:
+                        merged = breakdown
+                else:
+                    merged = breakdown
                 conn.execute(
                     """UPDATE tasks SET
                            tokens_prompt = tokens_prompt + ?,
                            tokens_completion = tokens_completion + ?,
                            cost_yuan = ROUND(cost_yuan + ?, 4),
                            duration_s = COALESCE(duration_s, 0) + ?,
-                           guard_warnings = ?, model = ?
+                           guard_warnings = ?, model = ?, usage_json = ?
                        WHERE task_id = ?""",
                     (
                         record["tokens_prompt"], record["tokens_completion"],
                         record["cost_yuan"], record["duration_s"],
-                        record["guard_warnings"], record["model"], task_id,
+                        record["guard_warnings"], record["model"],
+                        json.dumps(merged, ensure_ascii=False), task_id,
                     ),
                 )
+                record["by_model"] = merged
             else:
                 conn.execute(
                     """UPDATE tasks SET
                            tokens_prompt = ?, tokens_completion = ?,
-                           cost_yuan = ?, duration_s = ?, guard_warnings = ?, model = ?
+                           cost_yuan = ?, duration_s = ?, guard_warnings = ?, model = ?,
+                           usage_json = ?
                        WHERE task_id = ?""",
                     (
                         record["tokens_prompt"], record["tokens_completion"],
                         record["cost_yuan"], record["duration_s"],
-                        record["guard_warnings"], record["model"], task_id,
+                        record["guard_warnings"], record["model"], usage_json, task_id,
                     ),
                 )
             conn.commit()
@@ -232,7 +436,7 @@ class Repository:
         try:
             row = conn.execute(
                 """SELECT tokens_prompt, tokens_completion, cost_yuan,
-                          duration_s, guard_warnings
+                          duration_s, guard_warnings, usage_json
                    FROM tasks WHERE task_id = ?""",
                 (task_id,),
             ).fetchone()
@@ -243,6 +447,10 @@ class Repository:
                 out["guard_warnings"] = json.loads(out.get("guard_warnings") or "[]")
             except Exception:
                 out["guard_warnings"] = []
+            try:
+                out["by_model"] = json.loads(out.pop("usage_json") or "[]")
+            except Exception:
+                out["by_model"] = []
             return out
         finally:
             conn.close()
