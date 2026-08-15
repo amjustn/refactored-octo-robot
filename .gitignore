@@ -8,3 +8,4 @@ data/*.db
 .ruff_cache/
 _archive/
 eval/runs/
+data/scratchpad/

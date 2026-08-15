@@ -1,0 +1,13 @@
+{
+  "skill_name": "investment-team",
+  "arguments": "你按照这个分析这家公司",
+  "duration_seconds": 422.4,
+  "tokens": {
+    "prompt_tokens": 271519,
+    "completion_tokens": 32500,
+    "total_tokens": 304019
+  },
+  "created_at": "2026-08-14T14:35:17.571572",
+  "task_id": "da9b2d0c",
+  "summary": "腾讯核心业务护城河深且增长强劲，但AI巨额投入致自由现金流转负，当前估值缺乏安全边际，建议持有等待而非买入或卖出。"
+}

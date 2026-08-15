@@ -1,0 +1,13 @@
+{
+  "skill_name": "china-macro-analysis",
+  "arguments": "2026房地产",
+  "duration_seconds": 423.8,
+  "tokens": {
+    "prompt_tokens": 350610,
+    "completion_tokens": 47256,
+    "total_tokens": 397866
+  },
+  "created_at": "2026-08-14T13:26:39.702649",
+  "task_id": "7885f0f0",
+  "summary": "2026年房地产处于政策底已现、市场底未确认、经济底更远的磨底期，去库存收储主导，地产中枢永久下移，价格企稳最早2026Q4核心城市。"
+}

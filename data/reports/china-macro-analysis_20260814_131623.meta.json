@@ -1,0 +1,13 @@
+{
+  "skill_name": "china-macro-analysis",
+  "arguments": "20026年的房地产",
+  "duration_seconds": 212.7,
+  "tokens": {
+    "prompt_tokens": 136517,
+    "completion_tokens": 26470,
+    "total_tokens": 162987
+  },
+  "created_at": "2026-08-14T13:16:23.223726",
+  "task_id": "7af10ec8",
+  "summary": "该报告认定“20026年”无有效数据、疑为“2026年”笔误，因此无法对其房地产进行分析，需用户确认后另行输出。"
+}
