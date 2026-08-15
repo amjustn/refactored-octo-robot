@@ -284,7 +284,7 @@ async def api_upload_file(request: "Request"):
                         if ocr_text is None:
                             item.pop("text", None)
                             item.pop("method", None)
-                            item["error"] = "该PDF为扫描件（无文字层），需要配置视觉模型才能识别"
+                            item["error"] = "该PDF为扫描件（无文字层），当前模型不支持多模态，无法识别"
                         else:
                             item["text"] = ocr_text
                             item["method"] = "pdf-vision-ocr"
@@ -409,7 +409,7 @@ async def _extract_image_text(b64_data: str, content_type: str, vision_model: st
         _NON_VISION = {'deepseek', 'kimi', 'hunyuan'}
         _model_lower = (model or '').lower()
         if not vision_model and (not model or any(kw in _model_lower for kw in _NON_VISION)):
-            return f'[图片识别失败: 当前模型 "{model}" 不支持多模态。请在模型设置中填写 Vision 模型（如 gpt-4o / glm-4v / claude-sonnet-4）]'
+            return f'[图片识别失败: 当前模型 "{model}" 不支持多模态。请在模型设置中将模型更换为支持图片的多模态模型（如 gpt-4o / glm-4v / claude-sonnet-4）]'
         client = get_client(base_url, api_key)
 
         resp = await client.chat.completions.create(
@@ -429,7 +429,7 @@ async def _extract_image_text(b64_data: str, content_type: str, vision_model: st
         logger.warning(f"Vision extraction failed: {_err}")
         # Give user a clear fix instruction
         if '400' in _err or 'deserialize' in _err or 'invalid' in _err.lower():
-            return f'[图片识别失败: 模型 "{model}" 不支持图片识别。请打开模型设置，在 "Vision 模型" 栏填写支持多模态的模型名（如 gpt-4o / glm-4v / claude-sonnet-4）]'
+            return f'[图片识别失败: 模型 "{model}" 不支持图片识别。请在模型设置中将模型更换为支持多模态的模型（如 gpt-4o / glm-4v / claude-sonnet-4）]'
         return f"[图片识别失败: {_err}]"
 
 

@@ -1,3 +1,7 @@
+// 供量化仪表盘 (quant_trader:8000) 通过 window.open(url, 'berkshire_deeplink') 复用本标签页。
+// 无论本页是手动打开还是新开标签页，统一窗口名，实现「已开则复用、不重复新开」。
+// window.name 在后续导航中自动保留，这里只需在首次加载时设一次。
+window.name = 'berkshire_deeplink';
 // AI Berkshire Web - Application Logic
 let currentSkill = null;
 let allSkills = [];
@@ -555,7 +559,6 @@ function openLlmModal() {
   document.getElementById('llm-base-url').value = (cfg && cfg.base_url) || '';
   // Keep the stored key — wiping it here silently drops the key on re-save
   document.getElementById('llm-api-key').value = (cfg && cfg.api_key) || '';
-  document.getElementById('llm-vision-model').value = (cfg && cfg.vision_model) || '';
   
 
   // Trigger UI refresh
@@ -860,7 +863,6 @@ function saveLlmConfig() {
   var model = document.getElementById('llm-model').value.trim();
   var baseUrl = document.getElementById('llm-base-url').value.trim();
   var apiKey = document.getElementById('llm-api-key').value.trim();
-  var visionModel = document.getElementById('llm-vision-model').value.trim();
 
   if (!model && preset !== 'custom') {
     showToast('请选择模型', 'error');
@@ -903,7 +905,6 @@ function saveLlmConfig() {
   if (model) cfg.model = model;
   if (baseUrl) cfg.base_url = baseUrl;
   if (apiKey) cfg.api_key = apiKey;
-  if (visionModel) cfg.vision_model = visionModel;
   
   // Per-agent model: switch + mapping
   if (perAgentEnabled) {
@@ -924,7 +925,6 @@ function resetLlmConfig() {
   document.getElementById('llm-model-select').innerHTML = '<option value="">请选择模型</option>';
   document.getElementById('llm-base-url').value = '';
   document.getElementById('llm-api-key').value = '';
-  document.getElementById('llm-vision-model').value = '';
   document.getElementById('llm-per-agent-enabled').checked = false;
   document.getElementById('llm-per-agent-table').innerHTML = '';
   document.getElementById('llm-per-agent-fields').style.display = 'none';
@@ -1120,6 +1120,7 @@ function stopProgressTimer() {
 // ==================== Research ====================
 // ==================== File Upload ====================
 var _uploadedFiles = [];  // extracted text from uploaded files
+var _uploadedFileItems = [];  // uploaded file metadata for cumulative display
 
 // Known multimodal models
 var _MULTIMODAL_MODELS = ['gpt-4o', 'gpt-4-turbo', 'gpt-4-vision', 'claude-sonnet-4', 'claude-3', 'claude-3.5', 'gemini', 'glm-4v', 'qwen-vl', 'qwenvl', 'llava', 'pixtral', 'doubao-vision', 'yi-vision', 'grok-vision', 'gemini-2'];
@@ -1147,12 +1148,10 @@ async function handleFileUpload(fileList) {
   try {
     var headers = {};
     Object.assign(headers, getAuthHeaders());
-    // Append vision model + credentials from config
-    // (read raw stored config — getLlmConfig() strips UI-only fields like vision_model)
+    // Auto-use main model as vision model when it's multimodal
     var llmCfg = _loadLlmConfig() || {};
-    var visionModel = llmCfg.vision_model || '';
-    // Auto-use main model if it's multimodal and no vision model specified
-    if (!visionModel && llmCfg.model) {
+    var visionModel = '';
+    if (llmCfg.model) {
       var mainLower = llmCfg.model.toLowerCase();
       var isMulti = _MULTIMODAL_MODELS.some(function(k) { return mainLower.indexOf(k) >= 0; });
       if (isMulti) visionModel = llmCfg.model;
@@ -1168,50 +1167,70 @@ async function handleFileUpload(fileList) {
       throw new Error(err.detail || '上传失败 (' + res.status + ')');
     }
     var data = await res.json();
-    var html = '<div class="fp-header">已提取 ' + data.files.length + ' 个文件的内容（将自动注入研究）</div>';
-    var allText = [];
-    data.files.forEach(function(f) {
-      html += '<div class="fp-item">';
-      html += '<span class="fp-filename">' + escHtml(f.filename) + '</span>';
-      if (f.error) {
-        html += ' <span class="fp-error">✗ ' + escHtml(f.error) + '</span>';
-      } else {
-        if (f.summary) {
-          // UI: always show AI summary for human preview
-          html += ' <span style="color:#6b8e6b;font-size:0.75rem">🤖 AI摘要 (' + f.method + ')</span>';
-          html += '<div class="fp-summary">' + escHtml(f.summary) + '</div>';
-          // Injection: use original if short, summary if long
-          var MAX_INJECT = 5000;
-          if (f.text && f.text.length <= MAX_INJECT) {
-            allText.push('【文件：' + f.filename + '】\n' + f.text);
-            html += ' <span style="color:#8c8273;font-size:0.7rem">（注入原文 ' + f.text.length + '字）</span>';
-          } else {
-            allText.push('【文件：' + f.filename + ' - AI摘要】\n' + f.summary);
-            html += ' <span style="color:#8c8273;font-size:0.7rem">（原文 ' + (f.text ? f.text.length : 0) + '字过长，注入摘要）</span>';
-          }
-        } else {
-          allText.push('【文件：' + f.filename + '】\n' + f.text);
-          var preview = f.text ? f.text.slice(0, 100) + (f.text.length > 100 ? '...' : '') : '';
-          html += ' <span style="color:#8c8273;font-size:0.75rem">(' + f.method + ', ' + (f.text ? f.text.length : 0) + '字)</span>';
-          html += '<div style="color:#8c8273;font-size:0.72rem;margin-top:2px">' + escHtml(preview) + '</div>';
-        }
-      }
-      html += '</div>';
-    });preview.innerHTML = html;
-    preview.style.display = 'block';
-    _uploadedFiles = allText;
-    status.textContent = '✓ ' + allText.length + ' 个文件已就绪';
+    // Accumulate files (append, don't overwrite) so users can add 5+ files across multiple picks
+    data.files.forEach(function(f) { _uploadedFileItems.push(f); });
+    renderUploadPreview();
+    status.textContent = '✓ ' + _uploadedFileItems.length + ' 个文件已就绪';
     status.style.color = '#6b8e6b';
-    
-    // If no text in arg-field, suggest the file content
+
+    // If no text in arg-field, suggest the file names
     var af = document.getElementById('arg-field');
-    if (!af.value.trim() && allText.length) {
-      af.value = names.join(', ');
+    if (!af.value.trim() && _uploadedFileItems.length) {
+      af.value = _uploadedFileItems.map(function(x) { return x.filename; }).join(', ');
     }
   } catch(e) {
     status.textContent = '✗ ' + e.message;
     status.style.color = '#b85c5c';
     preview.style.display = 'none';
+  }
+}
+
+function renderUploadPreview() {
+  var preview = document.getElementById('file-preview');
+  _uploadedFiles = [];
+  var html = '<div class="fp-header">已上传 ' + _uploadedFileItems.length + ' 个文件（将自动注入研究）</div>';
+  _uploadedFileItems.forEach(function(f, idx) {
+    html += '<div class="fp-item">';
+    html += '<button class="fp-remove" onclick="removeUploadedFile(' + idx + ')" title="移除">✕</button>';
+    html += '<span class="fp-filename">' + escHtml(f.filename) + '</span>';
+    if (f.error) {
+      html += ' <span class="fp-error">✗ ' + escHtml(f.error) + '</span>';
+    } else {
+      var text = f.text || '';
+      if (f.summary) {
+        html += ' <span style="color:#6b8e6b;font-size:0.75rem">🤖 AI摘要 (' + (f.method || '') + ')</span>';
+        html += '<div class="fp-summary">' + escHtml(f.summary) + '</div>';
+        var MAX_INJECT = 5000;
+        if (text && text.length <= MAX_INJECT) {
+          _uploadedFiles.push('【文件：' + f.filename + '】\n' + text);
+          html += ' <span style="color:#8c8273;font-size:0.7rem">（注入原文 ' + text.length + '字）</span>';
+        } else {
+          _uploadedFiles.push('【文件：' + f.filename + ' - AI摘要】\n' + f.summary);
+          html += ' <span style="color:#8c8273;font-size:0.7rem">（原文 ' + (text ? text.length : 0) + '字过长，注入摘要）</span>';
+        }
+      } else {
+        _uploadedFiles.push('【文件：' + f.filename + '】\n' + text);
+        var pv = text ? text.slice(0, 100) + (text.length > 100 ? '...' : '') : '';
+        html += ' <span style="color:#8c8273;font-size:0.75rem">(' + (f.method || '') + ', ' + (text ? text.length : 0) + '字)</span>';
+        html += '<div style="color:#8c8273;font-size:0.72rem;margin-top:2px">' + escHtml(pv) + '</div>';
+      }
+    }
+    html += '</div>';
+  });
+  preview.innerHTML = html;
+  preview.style.display = _uploadedFileItems.length ? 'block' : 'none';
+}
+
+function removeUploadedFile(idx) {
+  _uploadedFileItems.splice(idx, 1);
+  renderUploadPreview();
+  var status = document.getElementById('file-status');
+  if (_uploadedFileItems.length) {
+    status.textContent = '✓ ' + _uploadedFileItems.length + ' 个文件已就绪';
+    status.style.color = '#6b8e6b';
+  } else {
+    status.textContent = '';
+    status.style.color = '';
   }
 }
 
@@ -1711,6 +1730,7 @@ function finishResearch(success, errorMsg, meta) {
   if (ws) { ws.close(); ws = null; }
   // Clear uploaded file preview after research completes
   _uploadedFiles = [];
+  _uploadedFileItems = [];
   document.getElementById('file-preview').style.display = 'none';
   document.getElementById('file-preview').innerHTML = '';
   document.getElementById('file-status').textContent = '';
@@ -1806,6 +1826,7 @@ function renderReport(md) {
 var _followUpLoading = false;
 var _followUpHistory = [];
 var _followupFiles = [];  // extracted text from files attached to a follow-up question
+var _followupFileItems = [];  // uploaded file metadata for cumulative display
 
 function _htmlToText(html) {
   var d = document.createElement('div');
@@ -1815,6 +1836,7 @@ function _htmlToText(html) {
 
 function _clearFollowupFiles() {
   _followupFiles = [];
+  _followupFileItems = [];
   var fi = document.getElementById('followup-file-input');
   if (fi) fi.value = '';
   var pv = document.getElementById('followup-file-preview');
@@ -1838,10 +1860,10 @@ async function handleFollowupFileUpload(fileList) {
   try {
     var headers = {};
     Object.assign(headers, getAuthHeaders());
-    // Same vision-model logic as the research upload (for image OCR)
+    // Auto-use main model as vision model when it's multimodal
     var llmCfg = _loadLlmConfig() || {};
-    var visionModel = llmCfg.vision_model || '';
-    if (!visionModel && llmCfg.model) {
+    var visionModel = '';
+    if (llmCfg.model) {
       var mainLower = llmCfg.model.toLowerCase();
       var isMulti = _MULTIMODAL_MODELS.some(function(k) { return mainLower.indexOf(k) >= 0; });
       if (isMulti) visionModel = llmCfg.model;
@@ -1857,30 +1879,50 @@ async function handleFollowupFileUpload(fileList) {
       throw new Error(err.detail || '上传失败 (' + res.status + ')');
     }
     var data = await res.json();
-    var html = '<div class="fp-header">已提取 ' + data.files.length + ' 个文件（将随下一次追问发送）</div>';
-    var allText = [];
-    data.files.forEach(function(f) {
-      html += '<div class="fp-item"><span class="fp-filename">' + escHtml(f.filename) + '</span>';
-      if (f.error) {
-        html += ' <span class="fp-error">✗ ' + escHtml(f.error) + '</span>';
-      } else if (f.summary && (!f.text || f.text.length > 5000)) {
-        allText.push('【文件：' + f.filename + ' - AI摘要】\n' + f.summary);
-        html += ' <span style="color:#8c8273;font-size:0.7rem">（注入AI摘要）</span>';
-      } else {
-        allText.push('【文件：' + f.filename + '】\n' + (f.text || f.summary || ''));
-        html += ' <span style="color:#8c8273;font-size:0.7rem">(' + (f.text ? f.text.length : 0) + '字)</span>';
-      }
-      html += '</div>';
-    });
-    preview.innerHTML = html;
-    preview.style.display = 'block';
-    _followupFiles = allText;
-    status.textContent = '✓ ' + allText.length + ' 个文件已就绪';
+    data.files.forEach(function(f) { _followupFileItems.push(f); });
+    renderFollowupPreview();
+    status.textContent = '✓ ' + _followupFileItems.length + ' 个文件已就绪';
     status.style.color = '#6b8e6b';
   } catch(e) {
     status.textContent = '✗ ' + e.message;
     status.style.color = '#b85c5c';
     preview.style.display = 'none';
+  }
+}
+
+function renderFollowupPreview() {
+  var preview = document.getElementById('followup-file-preview');
+  _followupFiles = [];
+  var html = '<div class="fp-header">已上传 ' + _followupFileItems.length + ' 个文件（将随下一次追问发送）</div>';
+  _followupFileItems.forEach(function(f, idx) {
+    html += '<div class="fp-item">';
+    html += '<button class="fp-remove" onclick="removeFollowupFile(' + idx + ')" title="移除">✕</button>';
+    html += '<span class="fp-filename">' + escHtml(f.filename) + '</span>';
+    if (f.error) {
+      html += ' <span class="fp-error">✗ ' + escHtml(f.error) + '</span>';
+    } else if (f.summary && (!f.text || f.text.length > 5000)) {
+      _followupFiles.push('【文件：' + f.filename + ' - AI摘要】\n' + f.summary);
+      html += ' <span style="color:#8c8273;font-size:0.7rem">（注入AI摘要）</span>';
+    } else {
+      _followupFiles.push('【文件：' + f.filename + '】\n' + (f.text || f.summary || ''));
+      html += ' <span style="color:#8c8273;font-size:0.7rem">(' + (f.text ? f.text.length : 0) + '字)</span>';
+    }
+    html += '</div>';
+  });
+  preview.innerHTML = html;
+  preview.style.display = _followupFileItems.length ? 'block' : 'none';
+}
+
+function removeFollowupFile(idx) {
+  _followupFileItems.splice(idx, 1);
+  renderFollowupPreview();
+  var status = document.getElementById('followup-file-status');
+  if (_followupFileItems.length) {
+    status.textContent = '✓ ' + _followupFileItems.length + ' 个文件已就绪';
+    status.style.color = '#6b8e6b';
+  } else {
+    status.textContent = '';
+    status.style.color = '';
   }
 }
 
@@ -2626,15 +2668,30 @@ async function loadReport(filename) {
 // Consumed params are stripped from the URL via history.replaceState so a
 // refresh never re-triggers the deep link (important for autorun).
 var DEEPLINK_MAX_ARGS = 500;
-function prefillFromURL() {
-  var params = new URLSearchParams(window.location.search);
-  var skill = params.get('skill') || '';
-  var args = params.get('arguments') || params.get('company') || '';
-  var autorun = params.get('autorun') === '1';
 
-  if (!skill && !args) return false;
-  if (args.length > DEEPLINK_MAX_ARGS) args = args.slice(0, DEEPLINK_MAX_ARGS);
+// 解析深链参数：优先 query，其次 hash。
+// dashboard 用 hash 传参（window.open 复用同名窗口时仅 hash 变化不会整页重载，只触发 hashchange），
+// 首次新开标签页时参数也落在 hash，故 query 与 hash 两者都认。
+function getDeepLinkParams() {
+  var q = new URLSearchParams(window.location.search);
+  var skill = q.get('skill') || '';
+  var args = q.get('arguments') || q.get('company') || '';
+  var autorun = q.get('autorun') === '1';
+  if (!skill && !args && window.location.hash) {
+    var h = window.location.hash;
+    if (h.charAt(0) === '#') h = h.slice(1);
+    if (h) {
+      var hq = new URLSearchParams(h);
+      skill = hq.get('skill') || '';
+      args = hq.get('arguments') || hq.get('company') || '';
+      autorun = hq.get('autorun') === '1';
+    }
+  }
+  return { skill: skill, args: args, autorun: autorun };
+}
 
+// 应用深链：选中技能 + 填入参数 + 可选自动开始分析。首次加载与 hashchange 复用同一逻辑。
+function applyDeepLink(skill, args, autorun) {
   var skillOk = false;
   if (skill) {
     // Unknown skill → ignore the whole deep link silently, stay on default view
@@ -2642,24 +2699,43 @@ function prefillFromURL() {
     selectSkill(skill);
     skillOk = true;
   }
-
   if (args) {
     var field = document.getElementById('arg-field');
     field.value = args;
     // Fire the normal input listeners (char count, hint, textarea auto-grow)
     field.dispatchEvent(new Event('input', { bubbles: true }));
   }
-
-  if (window.history && window.history.replaceState) {
-    window.history.replaceState({}, '', window.location.pathname);
-  }
-
   if (autorun && skillOk && args.trim()) {
     // Same flow as a manual click — startResearch() does its own validation
     setTimeout(function() { startResearch(); }, 600);
   }
   return true;
 }
+
+function prefillFromURL() {
+  var p = getDeepLinkParams();
+  if (!p.skill && !p.args) return false;
+  if (p.args.length > DEEPLINK_MAX_ARGS) p.args = p.args.slice(0, DEEPLINK_MAX_ARGS);
+  var ok = applyDeepLink(p.skill, p.args, p.autorun);
+  if (window.history && window.history.replaceState) {
+    window.history.replaceState({}, '', window.location.pathname);
+  }
+  return ok;
+}
+
+// 复用已开的 Berkshire 标签页时，window.open 只改 #hash（不整页重载），
+// 监听 hashchange 直接填入代码并分析——实现「已开则复用、直接输入内容、不重新打开」。
+window.addEventListener('hashchange', function() {
+  var p = getDeepLinkParams();
+  if (p.args) {
+    if (p.args.length > DEEPLINK_MAX_ARGS) p.args = p.args.slice(0, DEEPLINK_MAX_ARGS);
+    applyDeepLink(p.skill, p.args, p.autorun);
+    // 清 hash，确保下次（即使参数相同）也能再次触发 hashchange
+    if (window.history && window.history.replaceState) {
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+  }
+});
 
 // ==================== Save on pagehide (beforeunload triggers Permissions Policy violation) ====================
 window.addEventListener('pagehide', function() {

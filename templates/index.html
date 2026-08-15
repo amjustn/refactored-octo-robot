@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>AI Berkshire Web - 价值投资研究工作站</title>
 <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
-<link rel="stylesheet" href="/static/css/style.css?v=20260807a">
+<link rel="stylesheet" href="/static/css/style.css?v=20260813a">
 <script>window.__JWT__="eyJhbG...2gL8";localStorage.setItem("ai_berkshire_jwt","eyJhbG...2gL8");</script></head>
 <body>
 <div id="toast-container"></div>
@@ -13,8 +13,7 @@
 <div id="app">
   <aside id="sidebar">
     <div class="logo">
-      <h1>AI Berkshire</h1>
-      <p class="subtitle">价值投资研究工作站</p>
+      <h1>价值投资研究工作站</h1>
     </div>
     <div class="skill-search-box">
       <input type="text" id="skill-search" placeholder="搜索技能..." oninput="filterSkills()" autocomplete="off">
@@ -143,7 +142,7 @@
           <h2>历史决策</h2>
           <span id="decisions-summary" class="decisions-summary"></span>
         </div>
-        <p class="decisions-hint">每次研究完成后自动记录结论与关键假设；下次分析同股票时会自动注入上下文验证旧假设。</p>
+        <p class="decisions-hint">每次研究完成后自动记录结论与关键假设；下次分析同内容时会自动注入上下文验证旧假设。</p>
         <div id="decisions-list"></div>
       </div>
     </div>
@@ -197,7 +196,7 @@
         <p>选择左侧技能，输入分析目标，开始AI驱动的价值投资研究</p>
         <div id="failed-tasks" class="failed-tasks" style="display:none"></div>
         <div class="quick-actions">
-          <div class="quick-card manual-card" onclick="window.open('/manual','_blank')"><span>→</span><span>点击查看使用手册</span></div>
+          <div class="quick-card manual-card" onclick="location.href='/manual'"><span>→</span><span>点击查看使用手册</span></div>
         </div>
       </div>
     </div>
@@ -238,9 +237,6 @@
       <input type="password" id="llm-api-key" placeholder="sk-..." autocomplete="off">
     </div>
 
-    <label>视觉模型（可选，用于图片识别）</label>
-    <input type="text" id="llm-vision-model" placeholder="如 gpt-4o / qwen-vl-max" autocomplete="off">
-
     <div id="llm-per-agent-block" style="display:none">
       <label class="llm-synthesis-toggle">
         <input type="checkbox" id="llm-per-agent-enabled" onchange="onPerAgentToggle()">
@@ -264,6 +260,6 @@
 <script src="/static/js/marked.min.js"></script>
 <script src="/static/js/echarts.min.js"></script>
 <script src="https://cdn.bootcdn.net/ajax/libs/dompurify/3.0.6/purify.min.js"></script>
-<script src="/static/js/app.js?v=20260807g"></script>
+<script src="/static/js/app.js?v=20260814b"></script>
 </body>
 </html>

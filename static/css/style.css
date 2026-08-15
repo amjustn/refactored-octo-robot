@@ -58,7 +58,7 @@ body {
 .logo h1 {
   font-size: 1.15rem;
   color: var(--ink);
-  font-weight: 400;
+  font-weight: 700;
   letter-spacing: 0.08em;
   font-family: 'Noto Serif SC', Georgia, serif;
 }
@@ -1171,6 +1171,8 @@ body {
 .file-preview .fp-item { margin-bottom: 8px; }
 .file-preview .fp-filename { color: #c4a77d; font-weight: 500; }
 .file-preview .fp-error { color: #b85c5c; }
+.file-preview .fp-remove { float: right; border: none; background: transparent; color: #b85c5c; cursor: pointer; font-size: 0.75rem; padding: 0 3px; line-height: 1.2; }
+.file-preview .fp-remove:hover { color: #8c3d3d; }
 
 
 /* ── Top-right manual button ── */

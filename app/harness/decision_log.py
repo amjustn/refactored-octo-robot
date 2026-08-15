@@ -18,7 +18,7 @@ DECISION_LOG_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "de
 
 _DECISION_LOG_HEADER = """# AI Berkshire 决策日志
 
-> 每次研究完成后自动记录。下次分析同股票时自动注入上下文。
+> 每次研究完成后自动记录。下次分析同内容时自动注入上下文。
 > 状态: pending（待验证）→ resolved（已验证/已过期）
 > 格式: 时间 | 股票 | 结论 | 置信度 | 关键假设 | 状态
 

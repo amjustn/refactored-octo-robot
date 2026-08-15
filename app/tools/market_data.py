@@ -245,7 +245,7 @@ def check_listing_status(company_name: str) -> Optional[dict]:
                 "hint": "",
             }
 
-    # 3. Heuristic: if name is Chinese or looks like a company name, 
+    # 3. Heuristic: if name is Chinese or looks like a company name,
     #    but resolved to no symbol AND not in known-unlisted — flag uncertain
     has_chinese = bool(re.search(r'[\u4e00-\u9fff]', name))
     looks_like_brand = bool(re.match(r'^[A-Z][a-z]{2,}$', name))  # Capitalized word
