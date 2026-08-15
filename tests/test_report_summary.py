@@ -21,7 +21,7 @@ sys.path.insert(0, "/home/q/ai_berkshire_web")
 import pytest
 from fastapi.testclient import TestClient
 
-import app.main as main_module
+import app.web_common as main_module
 from app.main import app
 from app.core import config as _config
 

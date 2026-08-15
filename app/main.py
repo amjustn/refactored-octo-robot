@@ -5,7 +5,8 @@ auto-update system, and context injection for all agents.
 
 Route handlers live in app/routers/* (split out of this module verbatim);
 shared state/helpers live in app/web_common.py.  This module keeps the app
-object, middleware, the rate limiter, the startup hooks and router wiring.
+object, middleware, the startup hooks and router wiring.  The rate
+limiter itself lives in web_common and is re-exported here for back-compat.
 """
 import asyncio
 import base64
@@ -23,28 +24,7 @@ from .web_common import data_cache, logger, static_dir, task_store
 
 app = FastAPI(title="AI Berkshire Web", version="3.0.0")
 
-# ==================== Rate Limiting ====================
-from collections import defaultdict, deque
-from time import time
-
-_RATE_LIMIT_WINDOW = 60
-_RATE_LIMIT_MAX = 5
-_rate_limiter: dict[str, deque] = defaultdict(deque)
-
-# Cap on report text served via /api/task/{id} and WS watch-resume frames.
-_TASK_REPORT_MAX_CHARS = 200_000
-
-
-def _check_rate_limit(client_ip: str) -> bool:
-    now = time()
-    dq = _rate_limiter[client_ip]
-    while dq and dq[0] < now - _RATE_LIMIT_WINDOW:
-        dq.popleft()
-    if len(dq) >= _RATE_LIMIT_MAX:
-        return False
-    dq.append(now)
-    return True
-
+# Rate limiting & WS JWT verify live in web_common (re-exported below).
 # ==================== CORS ====================
 _ALLOWED_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:8001,http://127.0.0.1:8001").split(",")
 app.add_middleware(
@@ -159,12 +139,6 @@ class JWTAuthMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(JWTAuthMiddleware)
 
-def _ws_verify_jwt(token: str) -> bool:
-    """Validate a JWT for WebSocket connections."""
-    if BERKSHIRE_API_TOKEN is None:
-        return True
-    return verify_token(token, BERKSHIRE_API_TOKEN) is not None
-
 app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
 # Task lifecycle (active registry, running jobs, reports, billing) is owned
@@ -187,7 +161,16 @@ for _r in (pages, data, knowledge, research, misc):
 from .harness.persist import get_repository  # noqa: E402
 from .routers.misc import _extract_image_text, api_auth_login  # noqa: E402,F401
 from .routers.research import ws_research  # noqa: E402,F401
-from .web_common import _sanitize_filename, _validate_llm_config  # noqa: E402,F401
+from .web_common import (  # noqa: E402,F401
+    _RATE_LIMIT_MAX,
+    _RATE_LIMIT_WINDOW,
+    _TASK_REPORT_MAX_CHARS,
+    _check_rate_limit,
+    _rate_limiter,
+    _sanitize_filename,
+    _validate_llm_config,
+    _ws_verify_jwt,
+)
 
 # ==================== Background Tasks ====================
 

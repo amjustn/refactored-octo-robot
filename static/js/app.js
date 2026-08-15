@@ -1123,7 +1123,7 @@ var _uploadedFiles = [];  // extracted text from uploaded files
 var _uploadedFileItems = [];  // uploaded file metadata for cumulative display
 
 // Known multimodal models
-var _MULTIMODAL_MODELS = ['gpt-4o', 'gpt-4-turbo', 'gpt-4-vision', 'claude-sonnet-4', 'claude-3', 'claude-3.5', 'gemini', 'glm-4v', 'qwen-vl', 'qwenvl', 'llava', 'pixtral', 'doubao-vision', 'yi-vision', 'grok-vision', 'gemini-2'];
+var _MULTIMODAL_MODELS = ['gpt-4o', 'gpt-4-turbo', 'gpt-4-vision', 'gpt-5.6', 'gpt-5.5', 'gpt-5.4', 'claude-sonnet-5', 'claude-opus-5', 'claude-sonnet-4', 'claude-opus-4', 'claude-3', 'gemini', 'glm-4v', 'qwen-vl', 'qwenvl', 'doubao-vision', 'doubao-1.5-vision', 'llava', 'pixtral', 'yi-vision', 'grok-vision', 'gemma3'];
 
 function updateUploadVisibility() {
   // Upload row is always visible — vision model only affects image OCR quality
@@ -1161,6 +1161,7 @@ async function handleFileUpload(fileList) {
       if (llmCfg.base_url) formData.append('vision_base_url', llmCfg.base_url);
       if (llmCfg.api_key) formData.append('vision_api_key', llmCfg.api_key);
     }
+    if (llmCfg.model) formData.append('llm_config', JSON.stringify(llmCfg));
     var res = await fetch('/api/upload', { method: 'POST', headers: headers, body: formData });
     if (!res.ok) {
       var err = await res.json().catch(function() { return {}; });
@@ -1916,6 +1917,7 @@ async function handleFollowupFileUpload(fileList) {
       if (llmCfg.base_url) formData.append('vision_base_url', llmCfg.base_url);
       if (llmCfg.api_key) formData.append('vision_api_key', llmCfg.api_key);
     }
+    if (llmCfg.model) formData.append('llm_config', JSON.stringify(llmCfg));
     var res = await fetch('/api/upload', { method: 'POST', headers: headers, body: formData });
     if (!res.ok) {
       var err = await res.json().catch(function() { return {}; });

@@ -1,8 +1,8 @@
 """Research task routes: /api/research, /api/cancel, /api/task(s), WS /ws/research.
 
-Rate-limit / JWT helpers are resolved through ``app.main`` at call time
-(``_main.<name>``) because the test-suite monkeypatches those attributes on
-the ``app.main`` module; binding them here by value would break that.
+Rate-limit / JWT helpers are resolved through app.web_common at call time
+(_wc.<name>) because the test-suite monkeypatches those attributes on
+the app.web_common module; binding them here by value would break that.
 """
 import asyncio
 import json
@@ -10,7 +10,7 @@ import json
 from fastapi import APIRouter, HTTPException, Request, WebSocket
 from fastapi.responses import JSONResponse
 
-from .. import main as _main
+from .. import web_common as _wc
 from ..harness import (
     TaskSpec,
 )
@@ -45,7 +45,7 @@ router = APIRouter()
 
 @router.post("/api/research")
 async def api_start_research(request: "Request", req: ResearchRequest):
-    if not _main._check_rate_limit(request.client.host if request.client else "unknown"):
+    if not _wc._check_rate_limit(request.client.host if request.client else "unknown"):
         raise HTTPException(status_code=429, detail="请求过于频繁，请稍后再试")
     skill = get_skill(req.skill_name)
     if not skill:
@@ -100,7 +100,7 @@ async def api_resume_task(request: "Request", task_id: str):
     校验通过后任务在后台启动（同一 task_id），前端随后用 WS
     watch_task_id 跟随事件流。响应携带 skipped/rerun 名单供进度页即时展示。
     """
-    if not _main._check_rate_limit(request.client.host if request.client else "unknown"):
+    if not _wc._check_rate_limit(request.client.host if request.client else "unknown"):
         raise HTTPException(status_code=429, detail="请求过于频繁，请稍后再试")
     try:
         body = await request.json()
@@ -155,7 +155,7 @@ async def ws_research(websocket: WebSocket, skill_name: str):
         watch_task_id = ""
         llm_config = None
 
-    if not _main._ws_verify_jwt(token):
+    if not _wc._ws_verify_jwt(token):
         await websocket.send_json({"type": "error", "message": "Unauthorized"})
         try:
             await websocket.close(code=1008)
@@ -172,7 +172,7 @@ async def ws_research(websocket: WebSocket, skill_name: str):
 
     # Same per-IP rate limit as /api/research — WS runs cost the same LLM budget.
     client_ip = websocket.client.host if websocket.client else "unknown"
-    if not _main._check_rate_limit(client_ip):
+    if not _wc._check_rate_limit(client_ip):
         await websocket.send_json({"type": "error", "message": "请求过于频繁，请稍后再试"})
         try:
             await websocket.close(code=1008)
@@ -275,7 +275,7 @@ async def _ws_watch_task(websocket: WebSocket, task_id: str):
                 await websocket.send_json({
                     "type": "complete",
                     "task_id": task_id,
-                    "report": (status.report or "")[:_main._TASK_REPORT_MAX_CHARS],
+                    "report": (status.report or "")[:_wc._TASK_REPORT_MAX_CHARS],
                     "resumed": True,
                 })
             else:
@@ -325,7 +325,7 @@ async def api_task_status(task_id: str):
     if not status:
         return {"error": "Task not found"}
     payload = status.model_dump()
-    payload["report"] = (payload.get("report") or "")[:_main._TASK_REPORT_MAX_CHARS]
+    payload["report"] = (payload.get("report") or "")[:_wc._TASK_REPORT_MAX_CHARS]
     extras = get_repository().get_task_extras(task_id)
     payload["arguments"] = extras.get("arguments") or ""
     if extras.get("duration_s") is not None:

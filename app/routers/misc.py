@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
-from .. import main as _main  # late-bound: tests monkeypatch app.main rate-limit attrs
+from .. import web_common as _wc  # late-bound: tests monkeypatch web_common attrs
 from ..core.config import BERKSHIRE_API_TOKEN
 from ..core.jwt_utils import create_token
 from ..harness.persist import get_repository
@@ -100,7 +100,7 @@ async def api_follow_up(request: "Request", req: FollowUpRequest):
     if not req.report or not req.question:
         raise HTTPException(status_code=400, detail="report and question are required")
 
-    if not _main._check_rate_limit(request.client.host if request.client else "unknown"):
+    if not _wc._check_rate_limit(request.client.host if request.client else "unknown"):
         raise HTTPException(status_code=429, detail="请求过于频繁，请稍后再试")
 
     # Sanitize history: keep only well-formed user/assistant turns,
@@ -231,11 +231,44 @@ async def api_llm_test(request: "Request"):
 
 # ==================== File Upload & Multimodal ====================
 
+_MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # per-file cap
+_MAX_UPLOAD_FILES = 10
+
+
+async def _read_upload_limited(f, limit: int):
+    """Read an UploadFile in 1MB chunks, aborting as soon as limit is
+    exceeded — the partial buffer is discarded so oversize files never sit
+    in memory.  Returns (data, ok); ok=False means the limit was exceeded."""
+    buf = bytearray()
+    while True:
+        chunk = await f.read(1024 * 1024)
+        if not chunk:
+            break
+        buf.extend(chunk)
+        if len(buf) > limit:
+            return b"", False
+    return bytes(buf), True
+
+
 @router.post("/api/upload")
 async def api_upload_file(request: "Request"):
     """Upload image/PDF/Excel, extract text content for research injection."""
     import base64
     import io
+
+    if not _wc._check_rate_limit(request.client.host if request.client else "unknown"):
+        raise HTTPException(status_code=429, detail="请求过于频繁，请稍后再试")
+
+    # Fast reject on declared body size before multipart parsing.  The
+    # ceiling allows the maximum legitimate combination (10 files x 20MB)
+    # plus multipart framing overhead; the per-file cap is enforced by
+    # _read_upload_limited while streaming each part.
+    try:
+        declared = int(request.headers.get("content-length") or 0)
+    except ValueError:
+        declared = 0
+    if declared > _MAX_UPLOAD_BYTES * _MAX_UPLOAD_FILES + 2 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="上传总大小超限（单个文件≤20MB，单次最多10个文件）")
 
     try:
         form = await request.form()
@@ -245,15 +278,17 @@ async def api_upload_file(request: "Request"):
     files = form.getlist("files")
     if not files:
         raise HTTPException(status_code=400, detail="未选择文件")
+    if len(files) > _MAX_UPLOAD_FILES:
+        raise HTTPException(status_code=400, detail="单次最多上传 10 个文件")
 
     results = []
     for f in files:
         filename = getattr(f, "filename", "unknown")
         content_type = getattr(f, "content_type", "") or ""
-        data = await f.read()
+        data, within_limit = await _read_upload_limited(f, _MAX_UPLOAD_BYTES)
         item = {"filename": filename, "type": content_type}
 
-        if len(data) > 20 * 1024 * 1024:
+        if not within_limit:
             item["error"] = "文件超过20MB限制"
             results.append(item)
             continue
@@ -264,7 +299,7 @@ async def api_upload_file(request: "Request"):
                 vision_model = form.get("vision_model", "") or None
                 vision_base_url = form.get("vision_base_url", "") or None
                 vision_api_key = form.get("vision_api_key", "") or None
-                text = await _main._extract_image_text(b64, content_type, vision_model, vision_base_url, vision_api_key)
+                text = await _extract_image_text(b64, content_type, vision_model, vision_base_url, vision_api_key)
                 item["text"] = text
                 item["method"] = "vision"
 
@@ -294,10 +329,9 @@ async def api_upload_file(request: "Request"):
                         item["error"] = f"扫描件识别失败: {str(oe)[:200]}"
                         logger.error(f"Scanned PDF OCR failed ({filename}): {oe}", exc_info=True)
                 if item.get("text") and len(item["text"]) > 500:
-                    try:
-                        item["summary"] = await _summarize_data(item["text"], filename, form)
-                    except Exception as se:
-                        logger.warning(f"Summarization failed for {filename}: {se}")
+                    summary = await _summarize_data(item["text"], filename, form)
+                    if summary:
+                        item["summary"] = summary
 
             elif filename.lower().endswith((".xlsx", ".xls")):
                 import openpyxl
@@ -327,10 +361,9 @@ async def api_upload_file(request: "Request"):
                 item["text"] = "\n".join(parts)[:50000]
                 item["method"] = "docx-extract"
                 if len(item["text"]) > 500:
-                    try:
-                        item["summary"] = await _summarize_data(item["text"], filename, form)
-                    except Exception as se:
-                        logger.warning(f"Summarization failed for {filename}: {se}")
+                    summary = await _summarize_data(item["text"], filename, form)
+                    if summary:
+                        item["summary"] = summary
 
             elif filename.lower().endswith(".pptx"):
                 from pptx import Presentation
@@ -349,10 +382,9 @@ async def api_upload_file(request: "Request"):
                 item["text"] = "\n".join(parts)[:50000]
                 item["method"] = "pptx-extract"
                 if len(item["text"]) > 500:
-                    try:
-                        item["summary"] = await _summarize_data(item["text"], filename, form)
-                    except Exception as se:
-                        logger.warning(f"Summarization failed for {filename}: {se}")
+                    summary = await _summarize_data(item["text"], filename, form)
+                    if summary:
+                        item["summary"] = summary
 
             elif filename.lower().endswith((".doc", ".ppt")):
                 item["error"] = "旧版 .doc/.ppt 格式暂不支持，请另存为 .docx/.pptx 后重新上传"
@@ -362,10 +394,9 @@ async def api_upload_file(request: "Request"):
                 item["text"] = raw_text
                 item["method"] = "text-extract"
                 if len(raw_text) > 500:
-                    try:
-                        item["summary"] = await _summarize_data(raw_text, filename, form)
-                    except Exception as se:
-                        logger.warning(f"Summarization failed for {filename}: {se}")
+                    summary = await _summarize_data(raw_text, filename, form)
+                    if summary:
+                        item["summary"] = summary
             else:
                 item["error"] = f"不支持的文件类型: {content_type}"
 
@@ -380,19 +411,33 @@ async def api_upload_file(request: "Request"):
 
 
 async def _summarize_data(raw_text: str, filename: str, form) -> str:
-    """Use LLM to summarize extracted file data into key insights."""
+    """Use LLM to summarize extracted file data into key insights.
+
+    Honors a per-request llm_config override carried in the upload form.
+    Any failure (bad config, LLM error) returns "" — the caller then
+    simply omits the summary instead of surfacing an error string.
+    """
     try:
         from ..core.llm import chat_complete
+        llm_config = None
+        raw_cfg = form.get("llm_config") if form is not None else None
+        if raw_cfg:
+            try:
+                llm_config = _validate_llm_config(json.loads(raw_cfg))
+            except Exception:
+                llm_config = None
         # Trim to avoid token overflow
         sample = raw_text[:6000]
         summary = await chat_complete(
             system_prompt="你是一位数据分析师。对上传的文件数据提取关键洞察，用中文简洁输出。",
             user_message=f"文件名: {filename}\n\n数据样本:\n{sample}\n\n请分析并输出:\n1. 数据概况（行数/列数/时间范围）\n2. 关键趋势或异常\n3. 3-5条核心洞察\n控制在300字以内",
             temperature=0.3,
+            llm_config=llm_config,
         )
         return (summary or "")[:600]
     except Exception as e:
-        return f"[摘要生成失败: {str(e)[:80]}]"
+        logger.warning(f"Summarization failed for {filename}: {e}")
+        return ""
 
 async def _extract_image_text(b64_data: str, content_type: str, vision_model: str = None, vision_base_url: str = None, vision_api_key: str = None) -> str:
     """Use vision-capable LLM to describe image content."""
@@ -470,7 +515,7 @@ async def _ocr_scanned_pdf(data: bytes, form) -> "str | None":
                 break
             pix = page.get_pixmap(dpi=150)
             b64 = base64.b64encode(pix.tobytes("png")).decode()
-            page_text = await _main._extract_image_text(b64, "image/png", model, base_url, api_key)
+            page_text = await _extract_image_text(b64, "image/png", model, base_url, api_key)
             parts.append(f"## 第 {page_idx + 1} 页\n{page_text}")
     finally:
         doc.close()
@@ -481,8 +526,8 @@ async def _ocr_scanned_pdf(data: bytes, form) -> "str | None":
 @router.get("/api/reports")
 async def api_list_reports():
     reports = []
-    if _main.REPORTS_DIR.exists():
-        for f in sorted(_main.REPORTS_DIR.glob("*.md"), key=lambda x: x.stat().st_mtime, reverse=True):
+    if _wc.REPORTS_DIR.exists():
+        for f in sorted(_wc.REPORTS_DIR.glob("*.md"), key=lambda x: x.stat().st_mtime, reverse=True):
             item = {
                 "name": f.name,
                 "size": f.stat().st_size,
@@ -537,9 +582,9 @@ async def api_list_reports():
 @router.get("/api/reports/{filename}")
 async def api_get_report(filename: str):
     safe_name = _sanitize_filename(filename)
-    report_path = (_main.REPORTS_DIR / safe_name).resolve()
+    report_path = (_wc.REPORTS_DIR / safe_name).resolve()
     try:
-        report_path.relative_to(_main.REPORTS_DIR.resolve())
+        report_path.relative_to(_wc.REPORTS_DIR.resolve())
     except ValueError:
         raise HTTPException(status_code=403, detail="Access denied: path outside reports directory")
     if not report_path.exists():
@@ -559,9 +604,9 @@ async def api_get_report(filename: str):
 async def api_delete_report(filename: str):
     """Delete a report and its metadata sidecar."""
     safe_name = _sanitize_filename(filename)
-    report_path = (_main.REPORTS_DIR / safe_name).resolve()
+    report_path = (_wc.REPORTS_DIR / safe_name).resolve()
     try:
-        report_path.relative_to(_main.REPORTS_DIR.resolve())
+        report_path.relative_to(_wc.REPORTS_DIR.resolve())
     except ValueError:
         raise HTTPException(status_code=403, detail="Access denied: path outside reports directory")
     if not report_path.exists():

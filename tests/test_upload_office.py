@@ -9,7 +9,7 @@ from io import BytesIO
 import pytest
 from fastapi.testclient import TestClient
 
-import app.main as main_module
+import app.routers.misc as main_module
 from app.main import app
 from app.core import config as _config
 
@@ -136,7 +136,7 @@ def test_scanned_pdf_without_vision_model_errors():
     resp = _upload([("files", ("scanned.pdf", _make_scanned_pdf(), "application/pdf"))])
     assert resp.status_code == 200
     f = resp.json()["files"][0]
-    assert f["error"] == "该PDF为扫描件（无文字层），需要配置视觉模型才能识别"
+    assert f["error"] == "该PDF为扫描件（无文字层），当前模型不支持多模态，无法识别"
     assert "text" not in f
 
 

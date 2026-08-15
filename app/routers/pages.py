@@ -5,7 +5,7 @@ from datetime import datetime
 from fastapi import APIRouter
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 
-from .. import main as _main  # late-bound REPORTS_DIR (tests monkeypatch app.main)
+from .. import web_common as _wc  # late-bound REPORTS_DIR (tests monkeypatch web_common)
 from ..core.config import BERKSHIRE_API_TOKEN
 from ..core.jwt_utils import create_token
 from ..harness import active_count as harness_active_count
@@ -175,7 +175,7 @@ async def health():
         "llm_configured": bool(LLM_API_KEY),
         "llm_model": LLM_MODEL,
         "skills_count": len(list_skills()),
-        "reports_count": len(list(_main.REPORTS_DIR.glob("*.md"))) if _main.REPORTS_DIR.exists() else 0,
+        "reports_count": len(list(_wc.REPORTS_DIR.glob("*.md"))) if _wc.REPORTS_DIR.exists() else 0,
         "active_tasks": harness_active_count(),
         "db_size": task_store.db_path.stat().st_size if task_store.db_path.exists() else 0,
         "data_cache": data_cache.get_stats(),

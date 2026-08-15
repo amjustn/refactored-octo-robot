@@ -196,13 +196,14 @@ class TestConcurrencyGate:
     def test_ws_rate_limit_rejects_over_limit(self, monkeypatch):
         """ws_research 在 JWT 校验后应用与 /api/research 相同的限流。"""
         import app.main as main_mod
+        import app.web_common as wc_mod
 
-        monkeypatch.setattr(main_mod, "_ws_verify_jwt", lambda token: True)
+        monkeypatch.setattr(wc_mod, "_ws_verify_jwt", lambda token: True)
 
         ip = "203.0.113.7"
-        main_mod._rate_limiter.pop(ip, None)
-        for _ in range(main_mod._RATE_LIMIT_MAX):
-            assert main_mod._check_rate_limit(ip)
+        wc_mod._rate_limiter.pop(ip, None)
+        for _ in range(wc_mod._RATE_LIMIT_MAX):
+            assert wc_mod._check_rate_limit(ip)
 
         sent = []
 
@@ -225,7 +226,7 @@ class TestConcurrencyGate:
         try:
             asyncio.run(main_mod.ws_research(ws, "investment-team"))
         finally:
-            main_mod._rate_limiter.pop(ip, None)
+            wc_mod._rate_limiter.pop(ip, None)
 
         assert sent == [{"type": "error", "message": "请求过于频繁，请稍后再试"}]
         assert ws.closed == 1008

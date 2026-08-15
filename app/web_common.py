@@ -4,20 +4,27 @@ Single importable home for objects used by both ``app.main`` and the
 ``app.routers`` modules.  This module must NOT import ``app.main`` or
 ``app.routers`` (that would be circular).
 
-Note: the rate limiter and ``_ws_verify_jwt`` intentionally stay in
-``app.main`` — the test-suite monkeypatches those exact attributes on
-``app.main`` (e.g. ``_RATE_LIMIT_MAX``, ``_rate_limiter``,
-``_ws_verify_jwt``), so their lookup must remain in that module's namespace.
+The rate limiter, _ws_verify_jwt and _TASK_REPORT_MAX_CHARS
+live here (single source of truth); app.main re-exports them for
+back-compat.  Tests that monkeypatch values/functions must target
+THIS module — routers look them up here late-bound.
 """
 import logging
 import re
+from collections import defaultdict, deque
 from pathlib import Path
+from time import time
 from typing import Optional
 
 from fastapi import HTTPException
 
-from .core.config import BASE_DIR
+from .core.config import (
+    BASE_DIR,
+    BERKSHIRE_API_TOKEN,
+    REPORTS_DIR,  # noqa: F401  (re-exported; routers read _wc.REPORTS_DIR)
+)
 from .core.data_cache import DataCache
+from .core.jwt_utils import verify_token
 from .core.task_store import TaskStore
 
 # ==================== Logging ====================
@@ -31,6 +38,33 @@ static_dir = BASE_DIR / "static"
 templates_dir = BASE_DIR / "templates"
 static_dir.mkdir(parents=True, exist_ok=True)
 templates_dir.mkdir(parents=True, exist_ok=True)
+
+
+# ==================== Rate Limiting ====================
+_RATE_LIMIT_WINDOW = 60
+_RATE_LIMIT_MAX = 5
+_rate_limiter: dict[str, deque] = defaultdict(deque)
+
+# Cap on report text served via /api/task/{id} and WS watch-resume frames.
+_TASK_REPORT_MAX_CHARS = 200_000
+
+
+def _check_rate_limit(client_ip: str) -> bool:
+    now = time()
+    dq = _rate_limiter[client_ip]
+    while dq and dq[0] < now - _RATE_LIMIT_WINDOW:
+        dq.popleft()
+    if len(dq) >= _RATE_LIMIT_MAX:
+        return False
+    dq.append(now)
+    return True
+
+
+def _ws_verify_jwt(token: str) -> bool:
+    """Validate a JWT for WebSocket connections."""
+    if BERKSHIRE_API_TOKEN is None:
+        return True
+    return verify_token(token, BERKSHIRE_API_TOKEN) is not None
 
 
 # ==================== Helpers ====================
