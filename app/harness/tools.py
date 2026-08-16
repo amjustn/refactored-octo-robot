@@ -553,6 +553,11 @@ class ToolGateway:
             self.tools["get_stock_price"] = replace(
                 self.tools["get_stock_price"], fn=self._stock_price_chain,
             )
+        # 财务报表同样走源级 fallback 链（US/HK 主源换东财数据中心，yfinance 降权）
+        if "get_financial_data" in self.tools and self.tools["get_financial_data"].fn is None:
+            self.tools["get_financial_data"] = replace(
+                self.tools["get_financial_data"], fn=self._financial_data_chain,
+            )
         # 熔断器：工具级 + 数据源级（akshare/yfinance/tencent/sina/yahoo/eastmoney）
         # 共用一个字典，名称互不冲突；源级在首次使用时惰性创建
         self.breakers: dict[str, CircuitBreaker] = {
@@ -671,10 +676,12 @@ class ToolGateway:
                 ("sina", lambda: mdh.fetch_a_share_price_sina(resolved), 8.0),
             ]
         else:
+            # yfinance 美股/港股在本环境频繁 curl 超时（生产日志实测），降权垫底；
+            # 腾讯 qt.gtimg.cn 报价实测稳定，升为主源
             providers = [
-                ("yfinance", lambda: md._fetch_yf_price(resolved, market), 25.0),
                 ("tencent", lambda: mdh.fetch_us_hk_price_tencent(resolved), 8.0),
                 ("yahoo", lambda: mdh.fetch_us_hk_price_yahoo(resolved), 10.0),
+                ("yfinance", lambda: md._fetch_yf_price(resolved, market), 12.0),
             ]
 
         errors = []
@@ -720,6 +727,99 @@ class ToolGateway:
         return json.dumps({
             "symbol": resolved,
             "error": f"未获取到 {resolved} 的行情数据（所有数据源均失败）",
+            "hint": "可能是数据源不可用且未安装 akshare/yfinance",
+            "errors": errors,
+            "timestamp": datetime.now().isoformat(),
+        }, ensure_ascii=False, default=str)
+
+    # ----- 财务报表源级 fallback 链 -----
+
+    async def _financial_data_chain(self, args: dict) -> str:
+        """财务报表 fallback 链（与 _stock_price_chain 同模式）：
+
+        A股:   akshare（新浪报表系）
+        US:    东财数据中心(akshare datacenter) -> yfinance(12s 降权)
+        HK:    东财数据中心(akshare datacenter) -> yfinance(12s 降权)
+        （东财 push2 行情接口本环境被连接重置，但 datacenter 财务接口实测
+        <1s 可达且数据完整；yfinance 财务接口实测 57s 超时，仅作回退）
+
+        每源独立熔断（东财财务用独立 breaker 名 eastmoney_dc，不与
+        push2 行情的 eastmoney 混用——两者可达性不同）。
+        """
+        from ..tools import market_data as md
+
+        symbol = str((args or {}).get("symbol", ""))
+        resolved = md._resolve_company_name(symbol) or symbol
+        market = md._detect_market(resolved)
+
+        # 市场无法识别：回退 legacy 全链路（含搜索兜底），不改变怪异入参行为
+        if market not in ("A_SHARE", "US", "HK"):
+            legacy = await md.get_financial_data(symbol)
+            return json.dumps(legacy, ensure_ascii=False, default=str)
+
+        # 与 market_data 共享缓存（routers/data.py 等直接调用方也能命中）
+        cached = md._cache.get("financials", resolved, md.CACHE_TTL_FINANCIAL)
+        if cached:
+            return json.dumps({**cached, "_source": "cache"}, ensure_ascii=False, default=str)
+
+        if market == "A_SHARE":
+            providers = [
+                ("akshare", lambda: md._fetch_a_share_financials(resolved), 30.0),
+            ]
+        elif market == "US":
+            providers = [
+                ("eastmoney_dc", lambda: md._fetch_em_us_financials(resolved), 15.0),
+                ("yfinance", lambda: md._fetch_yf_financials(resolved, market), 12.0),
+            ]
+        else:  # HK
+            providers = [
+                ("eastmoney_dc", lambda: md._fetch_em_hk_financials(resolved), 15.0),
+                ("yfinance", lambda: md._fetch_yf_financials(resolved, market), 12.0),
+            ]
+
+        errors = []
+        for source, fetch, timeout_s in providers:
+            br = self._source_breaker(source)
+            if not br.allow_call():
+                errors.append(f"{source}: circuit open")
+                logger.info(f"财务源 {source} 熔断中，跳过（{resolved}）")
+                continue
+            try:
+                data = await asyncio.wait_for(fetch(), timeout=timeout_s)
+            except asyncio.TimeoutError:
+                if source in ("akshare", "yfinance"):
+                    # 同步 SDK 超时会在 mkt-sync 线程池留下孤儿线程，计入遥测
+                    md._record_sync_timeout(source)
+                br.record_failure(f"timeout>{timeout_s}s")
+                errors.append(f"{source}: timeout>{timeout_s}s")
+                logger.warning(f"财务源 {source} 超时（{resolved}，>{timeout_s}s）")
+                continue
+            except Exception as e:
+                br.record_failure(str(e)[:120])
+                errors.append(f"{source}: {str(e)[:80]}")
+                logger.warning(f"财务源 {source} 失败（{resolved}）: {e}")
+                continue
+            if data and not data.get("error"):
+                br.record_success()
+                data["_source"] = source
+                try:
+                    md._cache.set("financials", resolved, data)
+                except Exception:
+                    pass
+                return json.dumps(data, ensure_ascii=False, default=str)
+            br.record_failure("empty result")
+            errors.append(f"{source}: empty")
+
+        # 全部源失败 -> 过期缓存兜底（与旧 get_financial_data 尾部一致）
+        stale = md._cache.get_stale("financials", resolved)
+        if stale:
+            payload = dict(stale["data"])
+            payload["_stale"] = True
+            payload["_source"] = "stale_cache"
+            return json.dumps(payload, ensure_ascii=False, default=str)
+        return json.dumps({
+            "symbol": resolved,
+            "error": f"未获取到 {resolved} 的财务数据（所有数据源均失败）",
             "hint": "可能是数据源不可用且未安装 akshare/yfinance",
             "errors": errors,
             "timestamp": datetime.now().isoformat(),

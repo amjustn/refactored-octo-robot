@@ -510,6 +510,163 @@ async def _fetch_yf_financials(symbol: str, market: str) -> dict:
     return await _run_sync(_fetch)
 
 
+# ==================== US/HK Financials — 东财数据中心（akshare EM datacenter） ====================
+#
+# 实测(2026-08-16 本环境)：datacenter 系接口 <1s 可达且数据完整（push2 行情
+# 接口被连接重置，但 datacenter 正常），yfinance 财务接口 57s 超时必败。
+# 因此 US/HK 财务数据主源切换为东财数据中心，yfinance 降权为回退。
+
+def _em_num(row: dict, key: str):
+    """NaN/None 安全的数值提取。"""
+    v = row.get(key)
+    try:
+        f = float(v)
+        return None if f != f else f  # NaN -> None
+    except (TypeError, ValueError):
+        return None
+
+
+def _em_us_row(row: dict) -> dict:
+    """东财美股财务指标行 → 结构化字段（金额同时给元与亿元）。"""
+    def num(k):
+        return _em_num(row, k)
+
+    def yi(k):
+        v = num(k)
+        return round(v / 1e8, 2) if v is not None else None
+
+    return {
+        "report_date": str(row.get("REPORT_DATE") or "")[:10],
+        "report_type": str(row.get("REPORT_TYPE") or ""),
+        "revenue": num("OPERATE_INCOME"),
+        "revenue_yi": yi("OPERATE_INCOME"),
+        "revenue_yoy_pct": num("OPERATE_INCOME_YOY"),
+        "gross_profit": num("GROSS_PROFIT"),
+        "gross_profit_yi": yi("GROSS_PROFIT"),
+        "net_profit_parent": num("PARENT_HOLDER_NETPROFIT"),
+        "net_profit_parent_yi": yi("PARENT_HOLDER_NETPROFIT"),
+        "net_profit_yoy_pct": num("PARENT_HOLDER_NETPROFIT_YOY"),
+        "basic_eps": num("BASIC_EPS"),
+        "gross_margin_pct": num("GROSS_PROFIT_RATIO"),
+        "net_margin_pct": num("NET_PROFIT_RATIO"),
+        "roe_avg_pct": num("ROE_AVG"),
+    }
+
+
+# 港股利润表长表科目 → 标准字段（东财 hk_report_em 的 STD_ITEM_NAME）
+_HK_INCOME_ITEMS = {
+    "营运收入": "revenue",          # 含其他营业收入的总口径，优先
+    "营业额": "revenue_core",       # 核心营业额，营运收入缺失时兜底
+    "经营溢利": "operating_profit",
+    "除税后溢利": "net_profit",
+    "股东应占溢利": "net_profit_parent",
+}
+
+
+def _pivot_hk_income(df, n_periods: int) -> list:
+    """东财港股利润表长表(REPORT_DATE × STD_ITEM_NAME × AMOUNT) → 每期一行。"""
+    if df is None or not len(df):
+        return []
+    df = df.copy()
+    df["REPORT_DATE"] = df["REPORT_DATE"].astype(str).str[:10]
+    dates = sorted(df["REPORT_DATE"].unique(), reverse=True)[:n_periods]
+    rows = []
+    for d in dates:
+        row = {"report_date": d}
+        for _, r in df[df["REPORT_DATE"] == d].iterrows():
+            field = _HK_INCOME_ITEMS.get(str(r.get("STD_ITEM_NAME") or ""))
+            if not field:
+                continue
+            val = _em_num(r, "AMOUNT")
+            if val is not None:
+                row[field] = val
+        # 收入口径：优先营运收入，缺失时用营业额
+        if "revenue" not in row and "revenue_core" in row:
+            row["revenue"] = row.pop("revenue_core")
+        else:
+            row.pop("revenue_core", None)
+        for k in list(row.keys()):
+            if k != "report_date" and isinstance(row[k], float):
+                row[f"{k}_yi"] = round(row[k] / 1e8, 2)
+        if len(row) > 1:
+            rows.append(row)
+    return rows
+
+
+async def _fetch_em_us_financials(symbol: str) -> dict:
+    """东财数据中心美股财务指标：年报近4期 + 单季报近6期。
+
+    接口 ak.stock_financial_us_analysis_indicator_em（datacenter-web.eastmoney.com），
+    实测 PDD 年报/单季报 0.3-0.4s 返回。单位：元（*_yi 字段为亿元）。
+    """
+    def _fetch():
+        import akshare as ak
+        out = {}
+        try:
+            ann = ak.stock_financial_us_analysis_indicator_em(symbol=symbol, indicator="年报")
+            if ann is not None and len(ann):
+                out["annual"] = [_em_us_row(r) for r in ann.head(4).to_dict("records")]
+                if "CURRENCY_ABBR" in ann.columns:
+                    out["currency"] = str(ann["CURRENCY_ABBR"].iloc[0])
+        except Exception as e:
+            logger.debug(f"EM US annual financials failed for {symbol}: {e}")
+        try:
+            q = ak.stock_financial_us_analysis_indicator_em(symbol=symbol, indicator="单季报")
+            if q is not None and len(q):
+                out["quarterly"] = [_em_us_row(r) for r in q.head(6).to_dict("records")]
+        except Exception as e:
+            logger.debug(f"EM US quarterly financials failed for {symbol}: {e}")
+        return out or None
+
+    data = await _run_sync(_fetch)
+    if data:
+        data.setdefault("currency", "CNY")
+        data.update({
+            "symbol": symbol,
+            "unit_note": "金额为元；*_yi 字段为亿元",
+            "source": "eastmoney_datacenter",
+        })
+    return data
+
+
+async def _fetch_em_hk_financials(symbol: str) -> dict:
+    """东财数据中心港股利润表：年度近3期 + 报告期(季度/中期)近2期。
+
+    接口 ak.stock_financial_hk_report_em，实测 00700 利润表 0.4s 返回。
+    单位：元（*_yi 字段为亿元）；币种以公司报告币种为准（腾讯控股为人民币）。
+    """
+    code = symbol.upper().replace(".HK", "").zfill(5)
+
+    def _fetch():
+        import akshare as ak
+        out = {}
+        try:
+            inc = ak.stock_financial_hk_report_em(stock=code, symbol="利润表", indicator="年度")
+            rows = _pivot_hk_income(inc, 3)
+            if rows:
+                out["annual_income"] = rows
+        except Exception as e:
+            logger.debug(f"EM HK annual income failed for {symbol}: {e}")
+        try:
+            inc_q = ak.stock_financial_hk_report_em(stock=code, symbol="利润表", indicator="报告期")
+            rows = _pivot_hk_income(inc_q, 2)
+            if rows:
+                out["interim_income"] = rows
+        except Exception as e:
+            logger.debug(f"EM HK interim income failed for {symbol}: {e}")
+        return out or None
+
+    data = await _run_sync(_fetch)
+    if data:
+        data.update({
+            "symbol": symbol,
+            "unit_note": "金额为报告币种元；*_yi 字段为亿元",
+            "currency": "以公司报告币种为准（腾讯控股为人民币 CNY）",
+            "source": "eastmoney_datacenter",
+        })
+    return data
+
+
 # ==================== Market Indices ====================
 
 async def fetch_market_indices() -> dict:
@@ -1025,7 +1182,13 @@ async def get_financial_data(symbol: str) -> dict:
         if market == 'A_SHARE':
             data = await _fetch_a_share_financials(symbol)
         elif market in ('US', 'HK'):
-            data = await _fetch_yf_financials(symbol, market)
+            # yfinance 财务接口实测超时 57s（gateway 30s 必败），降权为 12s 快速失败
+            try:
+                data = await asyncio.wait_for(_fetch_yf_financials(symbol, market), timeout=12.0)
+            except asyncio.TimeoutError:
+                _record_sync_timeout("yfinance")
+                logger.warning(f"yfinance financials timeout for {symbol} (>12s)")
+                data = None
         else:
             # Try search
             results = await search_company(symbol)
