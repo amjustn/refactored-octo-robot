@@ -872,7 +872,17 @@ async def fetch_company_news(symbol: str, days: int = 14) -> list:
         return news_list
 
     try:
-        data = await _run_sync(_fetch)
+        # US/HK 新闻走 yfinance（curl 超时 30s 常态），整体限时 12s 快速失败；
+        # A 股 akshare 东财新闻正常，不限
+        if market in ('US', 'HK'):
+            try:
+                data = await asyncio.wait_for(_run_sync(_fetch), timeout=12.0)
+            except asyncio.TimeoutError:
+                _record_sync_timeout("yfinance")
+                logger.warning(f"yfinance news timeout for {symbol} (>12s)")
+                data = []
+        else:
+            data = await _run_sync(_fetch)
         if not data:
             # ── HTTP fallback for news (no library dependency) ──
             logger.info(f"Primary news source failed for {symbol}, trying HTTP fallback...")
