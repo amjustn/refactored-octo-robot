@@ -40,3 +40,11 @@ def test_tolerance_boundary():
 
 def test_no_data_points_full_marks():
     assert score_data("任意", {"expect": {}})["score"] == 30
+
+
+def test_multi_column_year_table():
+    """多年对比表：标签行首列是旧年份，当期值在同窗口后续列"""
+    label = "营收"
+    report = f"| {label} | 6,090 | 6,603 | 7,518 | 4,012 |"
+    r = score_data(report, {"expect": {"data_points": {label: 7518}}})
+    assert r["points"][label]["ok"] is True and r["score"] == 30

@@ -58,15 +58,15 @@ def score_data(report: str, case: dict) -> dict:
     hits = 0
     for label, expected in points.items():
         expected = float(expected)
-        # 扫描标签的所有出现位置（而非仅首个）：报告常在表头/增速语境先
-        # 出现标签（如"2025营收增速"，窗口首数字是年份），真实金额在后文。
-        # 任一出现位置的窗口首数字落入 2% 容差即判命中；found 报告命中值，
-        # 未命中时报告首个候选值，candidates 保留全部候选便于对账。
+        # 扫描标签所有出现位置 × 窗口内全部数字（而非仅首处首数字）：
+        # 报告常在表头/增速语境先出现标签（"2025营收增速"窗口首数字是年份），
+        # 多年对比表首列是旧年份金额（"| 营业收入 | 6,090 | ... | 7,518 |"），
+        # 真实当期值在同窗口后续列。窗口内任一数字落入 2% 容差即判"报告在
+        # 标签附近给出了期望数值"；found 报告命中值，未命中时报告首个候选值。
         candidates = []
         for m in re.finditer(re.escape(label), report):
             window = report[m.start(): m.start() + 80]
-            nm = _NUMBER.search(window)
-            if nm:
+            for nm in _NUMBER.finditer(window):
                 v = _norm_num(nm.group(1))
                 if v is not None:
                     candidates.append(v)
