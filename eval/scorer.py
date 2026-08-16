@@ -58,18 +58,31 @@ def score_data(report: str, case: dict) -> dict:
     hits = 0
     for label, expected in points.items():
         expected = float(expected)
-        found = None
+        # 扫描标签的所有出现位置（而非仅首个）：报告常在表头/增速语境先
+        # 出现标签（如"2025营收增速"，窗口首数字是年份），真实金额在后文。
+        # 任一出现位置的窗口首数字落入 2% 容差即判命中；found 报告命中值，
+        # 未命中时报告首个候选值，candidates 保留全部候选便于对账。
+        candidates = []
         for m in re.finditer(re.escape(label), report):
             window = report[m.start(): m.start() + 80]
             nm = _NUMBER.search(window)
             if nm:
-                found = _norm_num(nm.group(1))
-                if found is not None:
-                    break
-        ok = found is not None and expected != 0 and abs(found - expected) / abs(expected) <= 0.02
+                v = _norm_num(nm.group(1))
+                if v is not None:
+                    candidates.append(v)
+        found = None
+        ok = False
+        for v in candidates:
+            if expected != 0 and abs(v - expected) / abs(expected) <= 0.02:
+                found = v
+                ok = True
+                break
+        if found is None and candidates:
+            found = candidates[0]
         if ok:
             hits += 1
-        results[label] = {"expected": expected, "found": found, "ok": ok}
+        results[label] = {"expected": expected, "found": found, "ok": ok,
+                          "candidates": candidates[:5]}
     ratio = hits / len(points)
     return {"score": round(WEIGHTS["data"] * ratio, 1), "points": results}
 
