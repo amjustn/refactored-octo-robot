@@ -74,6 +74,61 @@ def _stub_blob(case: dict, required_sections: list) -> str:
     return "\n".join(parts)
 
 
+RECORD_SKIP_MARKER = ('"error"', '"_placeholder": true')
+
+
+def _install_recorder(playback_sink: dict):
+    """录制模式：包一层 ToolGateway._call_chain，把成功的真实工具结果记入 sink。
+
+    key 规则与 ToolGateway._cache_key 完全一致（工具名+参数 JSON），
+    跳过含 error / placeholder 的结果，避免把失败响应录进 cassette。
+    """
+    from app.harness.tools import ToolGateway, get_gateway
+
+    gateway = get_gateway()
+    orig = gateway._call_chain
+
+    async def wrapped(tool, args, depth=0, seen=None):
+        result = await orig(tool, args, depth=depth, seen=seen if seen is not None else set())
+        if result.ok and depth == 0 and not any(m in result.content for m in RECORD_SKIP_MARKER):
+            key = ToolGateway._cache_key(tool, args)
+            if key not in playback_sink:
+                playback_sink[key] = result.content
+        return result
+
+    gateway._call_chain = wrapped
+    return gateway, orig
+
+
+async def _verify_cassettes(playback: dict) -> tuple:
+    """离线回放验证：逐 key 走 playback 模式的网关，确认全部命中 cassette
+    且不触网（playback 短路一切真实执行）。返回 (hits, misses)。"""
+    from app.harness.tools import get_gateway
+
+    gateway = get_gateway()
+    prev = gateway.playback
+    gateway.playback = playback
+    hits = misses = 0
+    try:
+        for key in sorted(playback):
+            tool, _, args_json = key.partition(":")
+            try:
+                args = json.loads(args_json) if args_json else {}
+            except Exception:
+                args = {}
+            r = await gateway._call_chain(tool, args, depth=0, seen=set())
+            if r.ok and r.source == "cassette":
+                hits += 1
+                print(f"[cassette] HIT {key[:100]}")
+            else:
+                misses += 1
+                print(f"[cassette] MISS {key[:100]}")
+    finally:
+        gateway.playback = prev
+    print(f"[cassette] verify: {hits} hit / {misses} miss (offline, no network)")
+    return hits, misses
+
+
 async def run_case(case: dict, stub_llm: bool, playback: dict, scratch: Path) -> dict:
     from app.harness import TaskSpec
     from app.harness import run as harness_run
@@ -205,6 +260,17 @@ async def main_async(args) -> int:
     (scratch / "reports").mkdir(exist_ok=True)
 
     playback = _load_cassettes()
+    if args.stub_llm and playback:
+        print(f"[replay] verifying {len(playback)} cassette keys (offline playback) ...")
+        await _verify_cassettes(playback)
+
+    recorder = None
+    record_sink: dict = {}
+    if args.record:
+        from app.harness.tools import get_gateway  # noqa: F401
+        recorder = _install_recorder(record_sink)
+        print(f"[replay] recording tool results -> eval/cassettes/{args.record}_{ts}.json")
+
     results = []
     for case in cases:
         print(f"[replay] {case['_file']} (skill={case['skill']}) ...")
@@ -217,6 +283,15 @@ async def main_async(args) -> int:
             print(f"  status={r['status']} score={r['scores']['total']} {dims}")
             for check, ok in (r.get("checks") or {}).items():
                 print(f"  check {check}: {'PASS' if ok else 'FAIL'}")
+
+    if args.record:
+        cass_dir = Path(__file__).parent / "cassettes"
+        out_cass = cass_dir / f"{args.record}_{ts}.json"
+        out_cass.write_text(json.dumps(record_sink, ensure_ascii=False, indent=1), encoding="utf-8")
+        print(f"[replay] recorded {len(record_sink)} tool responses -> {out_cass}")
+        if recorder:
+            gw, orig = recorder
+            gw._call_chain = orig
 
     out = scratch / "scores.json"
     out.write_text(json.dumps({
@@ -242,6 +317,7 @@ def main():
     ap.add_argument("--all", action="store_true", help="run all golden cases")
     ap.add_argument("--skill", help="run only cases for one skill")
     ap.add_argument("--stub-llm", action="store_true", help="offline stub LLM (no tokens spent)")
+    ap.add_argument("--record", metavar="NAME", help="record real tool responses into eval/cassettes/NAME_<ts>.json")
     args = ap.parse_args()
     if not args.all and not args.skill:
         ap.error("pass --all or --skill NAME")
