@@ -28,13 +28,16 @@ SO360_HTML = '''
 
 
 def test_fallback_to_sogou_when_bing_empty(monkeypatch):
-    """Bing 无结果 → 搜狗命中并按序返回"""
-    async def fake_bing(q, n):
+    """首源无结果 → 回退到下一个源并按序返回（批次守卫见 test_search_batch_guard）"""
+    async def empty(q, n):
         return []
-    async def fake_sogou(q, n):
-        return [{"title": "test 相关标题", "url": "https://example.com/a", "snippet": "S"}]
-    monkeypatch.setattr(ws, "_bing_search", fake_bing)
-    monkeypatch.setattr(ws, "_sogou_search", fake_sogou)
+    async def fake_360(q, n):
+        return [{"title": "test query 相关标题", "url": "https://example.com/a",
+                 "snippet": "test query 摘要"}]
+    monkeypatch.setattr(ws, "_sogou_search", empty)
+    monkeypatch.setattr(ws, "_so360_search", fake_360)
+    for fn in ("_baidu_search", "_bing_search", "_toutiao_search", "_ddg_search"):
+        monkeypatch.setattr(ws, fn, empty)
     r = asyncio.run(ws.web_search("test query"))
     assert r and r[0]["url"] == "https://example.com/a"
 
@@ -69,7 +72,8 @@ def test_all_fail_gives_placeholder(monkeypatch):
     """全链失败 → 占位结果(不抛异常)"""
     async def boom(q, n):
         raise RuntimeError("network down")
-    for fn in ("_bing_search", "_sogou_search", "_so360_search", "_ddg_search"):
+    for fn in ("_sogou_search", "_so360_search", "_baidu_search",
+               "_bing_search", "_toutiao_search", "_ddg_search"):
         monkeypatch.setattr(ws, fn, boom)
     r = asyncio.run(ws.web_search("test"))
     assert len(r) == 1 and r[0].get("_placeholder") is True
