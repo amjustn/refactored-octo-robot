@@ -23,6 +23,9 @@ from bs4 import BeautifulSoup
 
 logger = logging.getLogger("ai_berkshire.web_search")
 
+# 批次相关性阈值：批次中"含足够查询 token"的结果占比低于该值判为投毒批次
+_MIN_BATCH_RELEVANCE = 0.5
+
 # Shared HTTP client (separate from market_data_http to avoid conflicts)
 _web_client: Optional[httpx.AsyncClient] = None
 _client_lock = asyncio.Lock()
@@ -82,25 +85,43 @@ async def web_search(query: str, max_results: int = 10) -> list:
     query = query.strip()
     logger.info(f"Web search: {query}")
 
-    # 相关性守卫: 结果标题/摘要与查询关键词零重叠视为"假命中"(搜索引擎反爬投毒),继续回退
-    def _relevant(rs):
-        import re as _re
-        tokens = [t for t in _re.findall(r"[一-鿿]{2,}|[A-Za-z0-9]{3,}", query)
-                  if t not in ("最新", "分析", "预测", "怎么样", "如何")]
-        if not tokens:
-            return True
-        for r in rs:
-            blob = (r.get("title", "") + r.get("snippet", ""))
-            if any(t in blob for t in tokens):
-                return True
-        return False
+    # ── 相关性守卫（批次评分制）─────────────────────────────
+    # 反爬投毒特征：整批结果与查询无关（如财务查询返回"拼"字字典词条），
+    # 或标题原样回声查询串。旧守卫"任意一条命中即放行"会被一条正常结果
+    # 蒙混过关；升级为批次评分：命中结果占比 < _MIN_BATCH_RELEVANCE 判为
+    # 投毒批次，继续回退；全部源都被投毒才返回 placeholder。
+    q_norm = re.sub(r"\s+", "", query)
 
-    # 国内可用性优先的多源回退链: Bing → 搜狗 → 360 → DuckDuckGo(常被墙,垫底)
+    def _relevance_ratio(rs):
+        tokens = [t for t in re.findall(r"[一-鿿]{2,}|[A-Za-z0-9]{3,}", query)
+                  if t not in ("最新", "分析", "预测", "怎么样", "如何")]
+        if not tokens or not rs:
+            return 1.0 if not tokens else 0.0
+        need = min(2, len(tokens))  # 单 token 查询放宽到 1
+        hits = 0
+        for r in rs:
+            title = r.get("title", "") or ""
+            snippet = r.get("snippet", "") or ""
+            # 标题整串回声查询 → 只信摘要（头条/视频源常见投毒手法）
+            blob = snippet if (q_norm and q_norm in re.sub(r"\s+", "", title)) else title + snippet
+            if sum(1 for t in tokens if t in blob) >= need:
+                hits += 1
+        return hits / len(rs)
+
+    # 多源回退链（按 2026-08-16 本环境实测质量重排，3 个财务查询探针）：
+    #   搜狗  — 财务查询质量最高（hits 8/8、3/3、8/8），摘要含真实数字，~1-2s
+    #   360   — 财务查询稳定（7/7 全中），摘要信息量大，~1.3s
+    #   百度  — 财务查询良好（7/7、6/7），~1.1-1.6s
+    #   Bing  — 快（~0.5s）但财务查询易被反爬投毒（字典词条/门户页），降权
+    #   头条  — 命中率虚高（标题回声查询+视频结果），仅作兜底
+    #   DDG   — 本环境必超时（被墙），短超时垫底
     results = []
     for name, fn in (
-        ("Bing", _bing_search),
         ("Sogou", _sogou_search),
         ("360", _so360_search),
+        ("Baidu", _baidu_search),
+        ("Bing", _bing_search),
+        ("Toutiao", _toutiao_search),
         ("DuckDuckGo", _ddg_search),
     ):
         try:
@@ -108,12 +129,13 @@ async def web_search(query: str, max_results: int = 10) -> list:
         except Exception as e:
             logger.debug(f"{name} search error: {e}")
             results = []
-        if results and _relevant(results):
-            if name != "Bing":
-                logger.info(f"Web search via fallback: {name}")
-            break
         if results:
-            logger.info(f"{name} results rejected by relevance guard, trying next source")
+            ratio = _relevance_ratio(results)
+            if ratio >= _MIN_BATCH_RELEVANCE:
+                if name != "Sogou":
+                    logger.info(f"Web search via fallback: {name} (relevance {ratio:.0%})")
+                break
+            logger.info(f"{name} batch rejected (relevance {ratio:.0%} < {_MIN_BATCH_RELEVANCE:.0%}), trying next source")
             results = []
 
     if not results:
@@ -173,6 +195,65 @@ async def _so360_search(query: str, max_results: int = 10) -> list:
         url = t.get("href", "") if t else ""
         snippet = sn.get_text(strip=True) if sn else ""
         if title and url and url.startswith("http"):
+            results.append({"title": title, "url": url, "snippet": snippet})
+    return results
+
+
+async def _baidu_search(query: str, max_results: int = 10) -> list:
+    """百度网页搜索(国内可用) — HTML 解析回退源
+
+    实测(2026-08-16)财务查询质量良好(7/7 命中)，摘要含真实财报数字。
+    rn 参数控制每页条数，取稍大值给守卫留出筛选余量。
+    """
+    client = await _get_client()
+    resp = await asyncio.wait_for(
+        client.get("https://www.baidu.com/s",
+                   params={"wd": query, "rn": str(min(20, max_results + 5))},
+                   headers={"Referer": "https://www.baidu.com/"}),
+        timeout=8.0,
+    )
+    if resp.status_code != 200:
+        return []
+    soup = BeautifulSoup(resp.text, "html.parser")
+    results = []
+    for item in soup.select(".result, .result-op")[:max_results]:
+        t = item.select_one("h3 a")
+        sn = item.select_one(".c-abstract, .cosc-source-text, [class*='content-right']")
+        title = t.get_text(strip=True) if t else ""
+        url = t.get("href", "") if t else ""
+        snippet = sn.get_text(strip=True) if sn else ""
+        if title and url:
+            results.append({"title": title, "url": url, "snippet": snippet})
+    return results
+
+
+async def _toutiao_search(query: str, max_results: int = 10) -> list:
+    """头条搜索(国内可用) — HTML 解析兜底源
+
+    实测(2026-08-16)命中率虚高：部分结果标题原样回声查询串且偏视频内容，
+    相关性守卫的回声检测会过滤这类结果，仅作倒数第二兜底。
+    """
+    client = await _get_client()
+    resp = await asyncio.wait_for(
+        client.get("https://so.toutiao.com/search",
+                   params={"keyword": query, "pd": "synthesis"},
+                   headers={"Referer": "https://so.toutiao.com/"}),
+        timeout=8.0,
+    )
+    if resp.status_code != 200:
+        return []
+    soup = BeautifulSoup(resp.text, "html.parser")
+    results = []
+    for item in soup.select(".result-content, [class*='result-card'], [class*='result']")[:max_results]:
+        a = item.select_one("a")
+        if not a:
+            continue
+        title = a.get_text(strip=True)[:80]
+        url = a.get("href", "")
+        snippet = item.get_text(strip=True)[:300]
+        if url.startswith("/"):
+            url = "https://so.toutiao.com" + url
+        if title and url:
             results.append({"title": title, "url": url, "snippet": snippet})
     return results
 
