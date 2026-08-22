@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Berkshire Web - 价值投资研究工作站</title>
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+<link rel="stylesheet" href="/static/css/style.css?v=20260813a">
+<script>window.__JWT__="eyJhbG...2gL8";localStorage.setItem("ai_berkshire_jwt","eyJhbG...2gL8");</script></head>
+<body>
+<div id="toast-container"></div>
+<button id="sidebar-toggle" onclick="toggleSidebar()" aria-label="菜单">☰</button>
+<div id="app">
+  <aside id="sidebar">
+    <div class="logo">
+      <h1>价值投资研究工作站</h1>
+    </div>
+    <div class="skill-search-box">
+      <input type="text" id="skill-search" placeholder="搜索技能..." oninput="filterSkills()" autocomplete="off">
+    </div>
+    <nav id="skill-nav">
+      <div id="nav-loading">
+        <div class="skeleton-line skeleton"></div>
+        <div class="skeleton-line short skeleton"></div>
+        <div class="skeleton-line skeleton"></div>
+        <div class="skeleton-line long skeleton"></div>
+        <div class="skeleton-line skeleton"></div>
+        <div class="skeleton-line short skeleton"></div>
+      </div>
+      <div id="nav-categories"></div>
+    </nav>
+    <div class="sidebar-footer">
+      <button class="btn-history" onclick="showHistory()">历史报告</button>
+      <button class="btn-history" onclick="showDecisions()">历史决策</button>
+      <button class="btn-history" onclick="showCosts()">成本统计</button>
+      <button class="btn-history btn-llm-settings" onclick="openLlmModal()">⚙ 模型设置</button>
+      <p class="powered" id="powered-by">Powered by DeepSeek</p>
+    </div>
+  </aside>
+  <div id="sidebar-mask" onclick="toggleSidebar()"></div>
+
+  <a href="/manual" class="btn-manual" title="使用手册">📖 使用手册</a>
+
+  <main id="main">
+    <div id="input-area">
+      <div class="input-card">
+        <div class="skill-selector">
+          <label>当前技能</label>
+          <div class="skill-pill" id="current-skill">
+            <span id="skill-icon">K</span>
+            <span id="skill-name">investment-team</span>
+            <span id="skill-label">多Agent投研团队</span>
+          </div>
+          <p class="skill-desc" id="skill-desc"></p>
+        </div>
+        <div class="arg-input">
+          <label for="arg-field">分析目标</label>
+          <textarea id="arg-field" rows="2" placeholder="用自然语言描述你的分析目标，如：分析腾讯2025年游戏业务的增长可持续性，并与网易对比" autocomplete="off"></textarea>
+          <span class="hint" id="input-hint"></span>
+          <div id="file-upload-row" class="file-upload">
+            <input type="file" id="file-input" accept="image/*,.pdf,.xlsx,.xls,.csv,.txt,.docx,.doc,.pptx,.ppt,.md,.json" multiple onchange="handleFileUpload(this.files)" style="display:none">
+            <button type="button" class="btn-upload" onclick="document.getElementById('file-input').click()">📎 上传文件（图片/PDF/Excel）</button>
+            <span class="file-status" id="file-status"></span>
+          </div>
+          <div id="file-preview" class="file-preview" style="display:none"></div>
+        </div>
+        <div id="llm-notice" class="llm-notice" style="display:none" onclick="openLlmModal()">
+          ⚠ 你还没有配置模型。点击此处填写供应商、模型和 API Key →
+        </div>
+        <div class="actions">
+          <button id="btn-research" class="btn-primary" onclick="startResearch()">开始研究</button>
+          <button id="btn-cancel" class="btn-cancel" style="display:none" onclick="cancelResearch()">✕ 取消</button>
+          <label class="stream-toggle"><input type="checkbox" id="stream-mode" checked><span>流式输出</span></label>
+        </div>
+        <span class="char-count" id="charCount"></span>
+      </div>
+    </div>
+
+    <div id="progress-area" style="display:none">
+      <div class="progress-card">
+        <div class="progress-header">
+          <span id="progress-title">研究中...</span>
+          <span class="progress-header-right">
+            <span id="progress-timer" class="progress-timer"></span>
+            <span id="progress-status" class="status-badge running">运行中</span>
+          </span>
+        </div>
+        <div id="agent-progress"></div>
+        <div class="progress-count" id="progressCount"></div>
+      </div>
+    </div>
+
+    <div id="result-area" style="display:none">
+      <div class="result-toolbar">
+        <button onclick="backToHome()" class="btn-back">← 返回</button>
+        <button onclick="copyReport()">复制报告</button>
+        <button onclick="downloadReport()">下载MD</button>
+        <button onclick="exportHtml()">导出HTML</button>
+        <button onclick="exportPdf()">导出PDF</button>
+        <button onclick="printReport()">打印</button>
+        <button onclick="toggleToc()" id="btn-toc">目录</button>
+        <button onclick="clearResult()">清除</button>
+      </div>
+      <div id="restore-banner" class="restore-banner" style="display:none">
+        <span id="restore-banner-text"></span>
+        <button onclick="dismissRestoreBanner()">知道了</button>
+      </div>
+      <div id="report-meta" class="report-meta" style="display:none"></div>
+      <div class="result-body">
+        <div id="report-content" class="markdown-body"></div>
+        <nav id="report-toc" class="report-toc" style="display:none"></nav>
+      </div>
+      <div id="follow-up-area" style="display:none">
+        <div class="follow-up-header">🔍 追问深挖</div>
+        <div id="follow-up-qa"></div>
+        <div id="followup-file-preview" class="file-preview" style="display:none"></div>
+        <div class="follow-up-input">
+          <input type="file" id="followup-file-input" accept="image/*,.pdf,.xlsx,.xls,.csv,.txt,.docx,.doc,.pptx,.ppt,.md,.json" multiple onchange="handleFollowupFileUpload(this.files)" style="display:none">
+          <button type="button" id="btn-followup-upload" class="btn-upload" title="附加参考资料" onclick="document.getElementById('followup-file-input').click()">📎</button>
+          <input type="text" id="follow-up-field" placeholder="对这份报告进一步提问，AI会基于报告内容回答..." onkeydown="if(event.key==='Enter')submitFollowUp()">
+          <button id="btn-follow-up" onclick="submitFollowUp()">发送</button>
+        </div>
+        <span class="file-status" id="followup-file-status"></span>
+      </div>
+    </div>
+
+    <div id="history-area" style="display:none">
+      <div class="history-card">
+        <h2>历史报告</h2>
+        <div class="history-toolbar">
+          <input type="text" class="history-search" id="historySearch" placeholder="搜索报告（文件名/分析目标/技能）..." oninput="filterHistory()">
+          <button id="btn-compare" class="btn-compare" onclick="compareSelected()" disabled>对比所选</button>
+        </div>
+        <div id="history-list"></div>
+      </div>
+    </div>
+
+    <div id="decisions-area" style="display:none">
+      <div class="history-card">
+        <div class="costs-header">
+          <button onclick="closeDecisions()" class="btn-back">← 返回</button>
+          <h2>历史决策</h2>
+          <span id="decisions-summary" class="decisions-summary"></span>
+        </div>
+        <p class="decisions-hint">每次研究完成后自动记录结论与关键假设；下次分析同内容时会自动注入上下文验证旧假设。</p>
+        <div id="decisions-list"></div>
+      </div>
+    </div>
+
+    <div id="compare-area" style="display:none">
+      <div class="result-toolbar">
+        <button onclick="closeCompare()">← 返回列表</button>
+        <span id="compare-title" class="compare-title"></span>
+      </div>
+      <div class="compare-panes">
+        <div class="compare-pane"><div id="compare-left" class="markdown-body"></div></div>
+        <div class="compare-pane"><div id="compare-right" class="markdown-body"></div></div>
+      </div>
+    </div>
+
+    <div id="costs-area" style="display:none">
+      <div class="history-card costs-card">
+        <div class="costs-header">
+          <button onclick="closeCosts()" class="btn-back">← 返回</button>
+          <h2>成本统计</h2>
+          <div class="costs-model-bar">
+            <label for="cost-model-sel">模型：</label>
+            <select id="cost-model-sel" onchange="setCostModel(this.value)">
+              <option value="">全部模型</option>
+            </select>
+          </div>
+          <div class="costs-days" id="costs-days">
+            <button data-days="7" onclick="setCostDays(7)">近7天</button>
+            <button data-days="30" class="active" onclick="setCostDays(30)">近30天</button>
+            <button data-days="90" onclick="setCostDays(90)">近90天</button>
+          </div>
+        </div>
+        <div class="cost-cards">
+          <div class="cost-card"><div class="cost-card-label">总运行次数</div><div class="cost-card-value" id="cost-total-runs">-</div></div>
+          <div class="cost-card"><div class="cost-card-label">总Token</div><div class="cost-card-value" id="cost-total-tokens">-</div></div>
+          <div class="cost-card"><div class="cost-card-label">总费用</div><div class="cost-card-value" id="cost-total-yuan">-</div></div>
+          <div class="cost-card"><div class="cost-card-label">平均耗时</div><div class="cost-card-value" id="cost-avg-duration">-</div></div>
+        </div>
+        <h3 class="costs-section-title">按模型统计</h3>
+        <div id="cost-model-table"></div>
+        <h3 class="costs-section-title">每日费用（¥）</h3>
+        <div id="cost-chart-daily" class="cost-chart"></div>
+        <h3 class="costs-section-title">按技能费用（¥）</h3>
+        <div id="cost-chart-skill" class="cost-chart"></div>
+      </div>
+    </div>
+
+    <div id="empty-state">
+      <div class="welcome">
+        <h2>一个人 + AI = 一个投研团队</h2>
+        <p>选择左侧技能，输入分析目标，开始AI驱动的价值投资研究</p>
+        <div id="failed-tasks" class="failed-tasks" style="display:none"></div>
+        <div class="quick-actions">
+          <div class="quick-card manual-card" onclick="location.href='/manual'"><span>→</span><span>点击查看使用手册</span></div>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+<div id="llm-modal" class="modal-mask" style="display:none" onclick="if(event.target===this)closeLlmModal()">
+  <div class="modal-card">
+    <h3>模型设置</h3>
+    <p class="modal-tip">配置保存在你的浏览器 localStorage，随请求发送，服务器不落盘。</p>
+
+    <label>服务商</label>
+    <select id="llm-preset" onchange="onProviderChange()">
+      <option value="deepseek">DeepSeek</option>
+      <option value="openai">OpenAI</option>
+      <option value="anthropic">Anthropic（Claude）</option>
+      <option value="google">Google（Gemini）</option>
+      <option value="zhipu">智谱（GLM）</option>
+      <option value="qwen">阿里（通义千问）</option>
+      <option value="baidu">百度（文心）</option>
+      <option value="hunyuan">腾讯混元</option>
+      <option value="doubao">字节（豆包）</option>
+      <option value="kimi">Kimi（Moonshot）</option>
+      <option value="ollama">Ollama（本地）</option>
+      <option value="codex">Codex（OpenAI）</option>
+      <option value="custom">自定义中转站</option>
+    </select>
+
+    <label>模型</label>
+    <select id="llm-model-select" onchange="onModelSelectChange()" style="display:none">
+      <option value="">请选择模型</option>
+    </select>
+    <input type="text" id="llm-model" placeholder="deepseek-v4-flash" autocomplete="off">
+
+    <div id="llm-custom-fields" style="display:none">
+      <label>Base URL</label>
+      <input type="text" id="llm-base-url" placeholder="https://api.deepseek.com" autocomplete="off">
+      <label>API Key</label>
+      <input type="password" id="llm-api-key" placeholder="sk-..." autocomplete="off">
+    </div>
+
+    <div id="llm-per-agent-block" style="display:none">
+      <label class="llm-synthesis-toggle">
+        <input type="checkbox" id="llm-per-agent-enabled" onchange="onPerAgentToggle()">
+        <span>每个Agent可单独指定模型（多Agent技能专用）</span>
+      </label>
+      <p class="modal-tip" style="margin:4px 0 0">为不同分析师分配不同模型，如：财务用pro保证精度、行业用flash节省费用。未指定的Agent使用上方全局模型。</p>
+      <div id="llm-per-agent-fields" style="display:none">
+        <div id="llm-per-agent-table" class="per-agent-table"></div>
+      </div>
+    </div>
+
+    <div class="modal-actions">
+      <button id="btn-llm-test" onclick="testLlmConfig()">测试连接</button>
+      <button class="btn-primary" onclick="saveLlmConfig()">保存</button>
+      <button onclick="resetLlmConfig()">恢复默认</button>
+      <button onclick="closeLlmModal()">关闭</button>
+    </div>
+    <p id="llm-test-result" class="llm-test-result"></p>
+  </div>
+</div>
+<script src="/static/js/marked.min.js"></script>
+<script src="/static/js/echarts.min.js"></script>
+<script src="https://cdn.bootcdn.net/ajax/libs/dompurify/3.0.6/purify.min.js"></script>
+<script src="/static/js/app.js?v=20260814b"></script>
+</body>
+</html>

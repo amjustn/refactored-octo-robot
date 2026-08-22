@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- 和纸背景 -->
+  <rect width="64" height="64" rx="8" fill="#f7f3e9"/>
+  <!-- 枯山水纹理 — 同心波纹 -->
+  <circle cx="32" cy="32" r="28" fill="none" stroke="#e5dac8" stroke-width="0.4"/>
+  <circle cx="32" cy="32" r="20" fill="none" stroke="#e5dac8" stroke-width="0.3"/>
+  <!-- 山 — 一笔墨 -->
+  <path d="M6 48 Q20 24 32 36 Q44 16 58 42" fill="none" stroke="#3d3d3d" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- 山影 — 淡墨 -->
+  <path d="M14 48 Q26 30 32 38 Q42 26 52 44" fill="none" stroke="#8c8273" stroke-width="1" stroke-linecap="round" opacity="0.5"/>
+  <!-- 竹 — 一笔 -->
+  <line x1="48" y1="18" x2="48" y2="38" stroke="#6b8e6b" stroke-width="1.2" stroke-linecap="round"/>
+  <path d="M48 22 Q44 18 42 20" fill="none" stroke="#6b8e6b" stroke-width="0.8" stroke-linecap="round"/>
+  <path d="M48 28 Q52 24 54 26" fill="none" stroke="#6b8e6b" stroke-width="0.8" stroke-linecap="round"/>
+  <!-- 枯葉 -->
+  <ellipse cx="20" cy="18" rx="3" ry="1.5" fill="#c4a77d" opacity="0.7" transform="rotate(-20 20 18)"/>
+</svg>
