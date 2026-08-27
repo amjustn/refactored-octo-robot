@@ -205,4 +205,6 @@ if ERRORS:
     for e in ERRORS:
         print(f"  - {e}")
 
-sys.exit(0 if FAIL == 0 else 1)
+# pytest 兼容 (2026-08-27): 模块导入(收集)时不退出 — 顶层脚本仅直接运行时生效
+if __name__ == "__main__":
+    sys.exit(0 if FAIL == 0 else 1)

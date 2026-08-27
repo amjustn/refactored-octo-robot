@@ -53,13 +53,23 @@ async def api_screen_factors(
     categories: comma-separated list of factor categories
     top_n: number of top-ranked stocks to return
     """
-    from ..tools.factor_screen import CATEGORY_LABELS, FACTOR_DEFS, screen_stocks
+    from ..tools.factor_screen import CATEGORY_LABELS, FACTOR_DEFS, screen_stocks, last_screen_partial
 
     cat_list = [c.strip() for c in categories.split(",") if c.strip()]
     try:
         # E4: screen_stocks does dozens of blocking baostock round-trips —
         # keep them off the event loop.
-        results = await asyncio.to_thread(screen_stocks, categories=cat_list, top_n=min(top_n, 50))
+        results = await asyncio.wait_for(
+            asyncio.to_thread(screen_stocks, categories=cat_list, top_n=min(top_n, 50)),
+            timeout=30.0,  # 函数内已有25s预算+兜底; 此处防线程彻底卡死
+        )
+    except asyncio.TimeoutError:
+        logger.error("Factor screening timed out (>30s) — returning degraded response")
+        return {
+            "status": "partial",
+            "message": "因子筛选超时，数据源响应过慢，请稍后重试",
+            "results": [],
+        }
     except Exception as e:
         logger.error(f"Factor screening failed: {e}", exc_info=True)
         return {
@@ -69,7 +79,7 @@ async def api_screen_factors(
         }
 
     # Format for frontend
-    return {
+    resp = {
         "status": "ok",
         "categories": {c: CATEGORY_LABELS.get(c, c) for c in cat_list},
         "factor_count": len(FACTOR_DEFS),
@@ -85,6 +95,10 @@ async def api_screen_factors(
             for r in results
         ],
     }
+    if last_screen_partial:
+        resp["status"] = "partial"
+        resp["message"] = f"时间预算内仅完成 {len(results)} 只股票的因子计算，结果可能不完整"
+    return resp
 
 
 @router.get("/api/data/read-url")

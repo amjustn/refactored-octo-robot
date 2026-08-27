@@ -13,6 +13,15 @@ os.environ.setdefault("LLM_API_KEY", "test-key")
 os.environ.setdefault("LLM_BASE_URL", "http://localhost:9999")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# 2026-08-27: 以下 3 个是"顶层断言式"验证脚本（bash 直跑），不是 pytest 用例。
+# 其顶层 async def test_xxx 会被 pytest 误收集并报 fixture 错误，故显式排除。
+# 单独运行方式不变：venv/bin/python3 tests/<file>.py
+collect_ignore_glob = [
+    "test_bug_fixes_round1.py",
+    "test_bug_fixes_round2.py",
+    "test_skill_knowledge_full_chain.py",
+]
+
 import pytest
 
 

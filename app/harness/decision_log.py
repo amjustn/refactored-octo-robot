@@ -162,6 +162,16 @@ def load_decisions(arguments: str, max_entries: int = 5) -> str:
     extracted from arguments. Returns formatted context string for injection,
     or empty string if no relevant decisions found.
     """
+    def _entry_age_days(ts: str) -> float:
+        """Parse '2026-08-06 16:32 UTC' → age in days. Unparseable → inf."""
+        try:
+            dt = datetime.strptime(_one_line(ts), "%Y-%m-%d %H:%M UTC").replace(
+                tzinfo=timezone.utc
+            )
+            return (datetime.now(timezone.utc) - dt).total_seconds() / 86400
+        except Exception:
+            return float("inf")
+
     stock = _extract_stock_name(arguments)
     if not stock:
         return ""  # can't extract a meaningful stock name
@@ -175,6 +185,7 @@ def load_decisions(arguments: str, max_entries: int = 5) -> str:
         # Find sections mentioning this stock (case-insensitive)
         sections = re.split(r"\n(?=## )", content)
         relevant = []
+        stale_pending = 0
 
         for section in sections:
             if not section.strip() or not section.startswith("## "):
@@ -184,16 +195,36 @@ def load_decisions(arguments: str, max_entries: int = 5) -> str:
                 lines = section.strip().split("\n")
                 # Keep it compact: title + first 6 detail lines
                 compact = "\n".join(lines[:8])
+
+                # P3-闭环(2026-08-27): 超过14天仍pending的旧决策,
+                # 注入时明确标注"待你复核" — 防止旧观点被当作已验证结论沿用。
+                m_ts = re.search(r"— (\d{4}-\d{2}-\d{2} \d{2}:\d{2}) UTC", compact)
+                m_st = re.search(r"\*\*状态\*\*: *(\w+)", compact)
+                age = _entry_age_days(m_ts.group(1) + " UTC") if m_ts else float("inf")
+                status = (m_st.group(1).strip() if m_st else "pending") or "pending"
+                if status == "pending" and age > 14:
+                    stale_pending += 1
+                    compact = (
+                        compact
+                        + f"\n- **⚠ 时效提示**: 本条决策记录于 {int(age)} 天前且尚未复核，"
+                        "请先验证其关键假设是否仍然成立，再决定是否参考"
+                    )
                 relevant.append(compact)
 
         if not relevant:
             return ""
 
         # Return most recent first, limited to max_entries
+        stale_note = (
+            f"（其中 {stale_pending} 条超过两周未复核——优先验证时效性）\n\n"
+            if stale_pending
+            else "\n\n"
+        )
         context = (
             "\n## 📋 历史决策记录（来自 decision-log.md）\n\n"
             "你之前分析过这只股票，以下是历史结论。请参考这些记录，"
-            "验证之前的关键假设是否仍然成立，并据此给出更新后的分析。\n\n"
+            "验证之前的关键假设是否仍然成立，并据此给出更新后的分析。"
+            + stale_note
         )
         for entry in relevant[-max_entries:]:
             context += entry + "\n"
@@ -212,10 +243,26 @@ def _extract_stock_name(arguments: str) -> str:
     Whitespace (incl. newlines) is collapsed first and leading markdown
     heading/quote markers stripped, so a multi-line goal cannot inject a
     section header into the log through the returned name.
+    2026-08-27 增强：剥离"分析一下/帮我看看/研究一下"等动词前缀、
+    在括号(代码/补充说明)处截断——否则整句话被当作股票名存入日志,
+    导致按名字检索历史决策时永远匹配不到。
     """
     arg = " ".join(arguments.split()).lstrip("#> ").strip()
     if not arg:
         return ""
+
+    # 在括号处截断: "中际讯创(300308)" → "中际讯创"
+    arg = re.split(r"[（(【\[]", arg)[0].strip()
+
+    # 剥离常见动词前缀 (循环剥离直到不再变化)
+    _PREFIXES = ["分析一下", "帮我看一下", "帮我看看", "看一下", "看看", "分析", "研究", "评估", "复盘"]
+    changed = True
+    while changed:
+        changed = False
+        for pre in _PREFIXES:
+            if arg.startswith(pre) and len(arg) > len(pre) + 1:
+                arg = arg[len(pre):].lstrip("，,。. 、的")
+                changed = True
 
     # Try to extract first meaningful name segment
     # Common patterns: "腾讯 2025Q4", "拼多多", "茅台 分析", "0700.HK"
