@@ -1,6 +1,7 @@
 """Assorted API routes: auth, skills, follow-up, llm, upload, reports, pdf, stats, tools."""
 import asyncio
 import json
+import os
 from datetime import datetime
 from hmac import compare_digest
 from typing import Optional
@@ -307,14 +308,42 @@ async def api_upload_file(request: "Request"):
                 item["method"] = "vision"
 
             elif filename.lower().endswith(".pdf") or content_type == "application/pdf":
-                import fitz
-                doc = fitz.open(stream=data, filetype="pdf")
-                parts = []
-                for page in doc:
-                    parts.append(page.get_text())
-                doc.close()
-                item["text"] = "\n".join(parts)[:50000]
-                item["method"] = "pdf-extract"
+                # 首选 MarkItDown — 保留表格/标题层级为结构化 Markdown，
+                # 对研报/财报这类表格密集的 PDF 分析质量远高于纯文本提取。
+                item["text"] = ""
+                item["method"] = ""
+                try:
+                    import tempfile
+                    from markitdown import MarkItDown
+                    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+                        tmp.write(data)
+                        tmp_path = tmp.name
+                    try:
+                        _md = MarkItDown()
+                        _res = _md.convert(tmp_path)
+                        item["text"] = (_res.text_content or "").strip()
+                        if item["text"]:
+                            item["method"] = "pdf-markitdown"
+                    finally:
+                        try:
+                            os.unlink(tmp_path)
+                        except OSError:
+                            pass
+                except Exception as e:
+                    logger.warning(f"MarkItDown failed ({filename}), falling back to PyMuPDF: {e}")
+                    item["text"] = ""
+                    item["method"] = ""
+                # 兜底：MarkItDown 失败/无输出 → PyMuPDF 纯文本
+                if not item["text"]:
+                    import fitz
+                    doc = fitz.open(stream=data, filetype="pdf")
+                    parts = []
+                    for page in doc:
+                        parts.append(page.get_text())
+                    doc.close()
+                    item["text"] = "\n".join(parts)[:50000]
+                    item["method"] = "pdf-extract"
+                item["text"] = item["text"][:50000]
                 if len(item["text"].strip()) < 100:
                     # Likely a scanned PDF (no text layer) → try vision OCR fallback
                     try:
@@ -638,6 +667,160 @@ async def api_list_decisions():
 
 # ── P4: PDF export ──────────────────────────────────────────────
 
+# 独立 HTML 查看页（双击报告 → 新标签页）内联样式。
+# 与 style.css 的 :root 变量 + .markdown-body 规则保持一致，
+# 保证新页面字体/配色/排版与 app 内完全一致，且不依赖主站 CSS。
+_REPORT_VIEW_CSS = """
+:root {
+  --bg: #f7f3e9; --bg-secondary: #f0ebe0; --bg-card: #fdfaf5;
+  --border: #d4c5a9; --border-light: #e5dac8;
+  --text: #3d3d3d; --text-secondary: #8c8273;
+  --accent: #6b8e6b; --accent-yellow: #c4a77d; --ink: #3d3d3d;
+  --radius: 4px;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+  font-family: 'Noto Serif SC', 'Source Han Serif SC', 'STSong', 'SimSun', 'Songti SC', Georgia, 'Times New Roman', serif;
+  background: var(--bg);
+  background-image:
+    radial-gradient(ellipse at 85% 15%, rgba(196,167,125,0.06) 0%, transparent 60%),
+    radial-gradient(ellipse at 15% 90%, rgba(107,142,107,0.04) 0%, transparent 50%);
+  color: var(--text);
+  line-height: 1.85;
+  min-height: 100vh;
+}
+.report-shell { max-width: 1100px; margin: 0 auto; padding: 36px 28px 80px; }
+.report-shell h1 { font-size: 1.35rem; color: var(--ink); margin: 32px 0 14px; padding-bottom: 10px; border-bottom: 1px solid var(--border-light); font-weight: 400; letter-spacing: 0.04em; }
+.report-shell h2 { font-size: 1.1rem; margin: 28px 0 10px; font-weight: 400; color: var(--accent); letter-spacing: 0.03em; }
+.report-shell h3 { font-size: 0.95rem; margin: 20px 0 8px; color: var(--accent-yellow); font-weight: 400; }
+.report-shell p { margin: 10px 0; }
+.report-shell table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 0.78rem; }
+.report-shell th { background: var(--bg-secondary); padding: 9px 14px; text-align: left; border-bottom: 1px solid var(--border); font-weight: 400; color: var(--text-secondary); letter-spacing: 0.04em; font-size: 0.72rem; text-transform: uppercase; }
+.report-shell td { padding: 7px 14px; border-bottom: 1px solid var(--border-light); }
+.report-shell code { background: var(--bg-secondary); padding: 2px 6px; border-radius: 2px; font-size: 0.85em; color: var(--accent); }
+.report-shell pre { background: var(--bg-secondary); padding: 16px; border-radius: var(--radius); overflow-x: auto; border: 1px solid var(--border-light); margin: 14px 0; }
+.report-shell blockquote { border-left: 2px solid var(--accent-yellow); padding: 8px 18px; margin: 14px 0; color: var(--text-secondary); font-style: italic; }
+.report-shell hr { border: none; border-top: 1px solid var(--border-light); margin: 28px 0; }
+.report-shell ul, .report-shell ol { padding-left: 22px; margin: 8px 0; }
+.report-shell li { margin: 5px 0; }
+.report-shell strong { color: var(--ink); font-weight: 600; }
+.report-shell .ai-disclaimer { border-top: 1px solid var(--border-light); margin-top: 40px; padding-top: 12px; font-size: 0.8rem; color: var(--text-secondary); text-align: center; }
+.report-toolbar { position: sticky; top: 0; background: var(--bg); padding: 10px 0; margin-bottom: 8px; border-bottom: 1px solid var(--border-light); display: flex; gap: 10px; align-items: center; font-size: 0.78rem; color: var(--text-secondary); }
+.report-toolbar a, .report-toolbar button { background: none; border: 1px solid var(--border); color: var(--accent); padding: 5px 14px; border-radius: var(--radius); font-size: 0.78rem; cursor: pointer; text-decoration: none; font-family: inherit; }
+.report-toolbar a:hover, .report-toolbar button:hover { border-color: var(--accent); }
+/* ── 打印分页控制：表格/代码块整体不切断、行不劈开、标题不孤悬页底 ── */
+.report-shell table, .report-shell pre, .report-shell blockquote { break-inside: avoid; page-break-inside: avoid; }
+.report-shell tr { break-inside: avoid; page-break-inside: avoid; }
+.report-shell h1, .report-shell h2, .report-shell h3 { break-after: avoid; page-break-after: avoid; }
+@media print {
+  .report-toolbar { display: none !important; }
+  .report-shell { max-width: 100%; padding: 0; }
+}
+"""
+
+
+@router.post("/api/report/view")
+async def api_report_view(request: Request):
+    """把报告的 markdown 渲染成独立 HTML 文件（内联完整样式），落盘到
+    data/reports/standalone/，返回新标签页 URL。
+
+    Request: {"markdown": "...", "filename": "可选建议名"}
+    Response: {"url": "/report-view/<file>.html", "filename": ...}
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    markdown_text = body.get("markdown", "")
+    if not markdown_text or len(markdown_text) < 50:
+        raise HTTPException(status_code=400, detail="Markdown content too short")
+
+    # 文件名：前端建议名 → sanitize → 加时间戳防覆盖
+    base_name = _sanitize_filename(body.get("filename") or "report") or "report"
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    file_name = f"{base_name}_{ts}.html"
+
+    standalone_dir = _wc.REPORTS_DIR / "standalone"
+    standalone_dir.mkdir(parents=True, exist_ok=True)
+    out_path = (standalone_dir / file_name).resolve()
+    try:
+        out_path.relative_to(standalone_dir.resolve())
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Invalid filename")
+
+    try:
+        from markdown_it import MarkdownIt
+        _md_parser = MarkdownIt("commonmark", {"html": True}).enable("table")
+        html_body = _md_parser.render(markdown_text)
+    except ImportError:
+        html_body = markdown_text.replace("\n", "<br>")
+
+    # 标题：取 markdown 第一个 # 标题，否则用文件名
+    import re as _re
+    m = _re.search(r"^#\s+(.+)$", markdown_text, _re.MULTILINE)
+    title = (m.group(1).strip() if m else file_name.replace(".html", ""))[:120]
+
+    html = f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{title}</title>
+<style>{_REPORT_VIEW_CSS}</style>
+</head>
+<body>
+<div class="report-shell">
+<div class="report-toolbar">
+  <span>📄 {title}</span>
+  <span style="flex:1"></span>
+  <button onclick="window.print()">🖨 打印</button>
+  <a href="/app">← 返回</a>
+</div>
+{html_body}
+<div class="ai-disclaimer">该数据由AI在数据的基础上进行分析，仅供参考</div>
+</div>
+</body>
+</html>"""
+
+    out_path.write_text(html, encoding="utf-8")
+    return {"url": f"/report-view/{file_name}", "filename": file_name}
+
+
+@router.get("/report-view/{filename}")
+async def api_report_view_page(filename: str):
+    """Serve a standalone report HTML file (new-tab view)."""
+    safe_name = _sanitize_filename(filename)
+    if not safe_name:
+        raise HTTPException(status_code=404, detail="Report not found")
+    standalone_dir = _wc.REPORTS_DIR / "standalone"
+    report_path = (standalone_dir / safe_name).resolve()
+    try:
+        report_path.relative_to(standalone_dir.resolve())
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Access denied")
+    if not report_path.exists():
+        raise HTTPException(status_code=404, detail="Report not found")
+    content = report_path.read_text(encoding="utf-8")
+    return Response(content=content, media_type="text/html; charset=utf-8")
+
+
+@router.get("/api/stats/costs")
+async def api_cost_stats(days: int = Query(default=30, ge=1, le=365), model: str = Query(default=None, max_length=300)):
+    """LLM cost/token aggregation for the cost dashboard.
+
+    Counts only terminal tasks that actually ran (completed / failed /
+    cancelled); running and interrupted tasks are excluded so partial
+    or zero billing does not skew the averages. `by_day` covers the
+    last `days` calendar days (including today) with zero-filled gaps.
+    `model`（可选）按模型过滤；`by_model` 始终返回模型维度分组。
+    """
+    repo = get_repository()
+    return await repo.aget_cost_stats(days, model)
+
+
+# ── P4: PDF export ──────────────────────────────────────────────
+
 _PDF_CSS = """
 @page { size: A4; margin: 2cm 2.2cm; @bottom-center { content: counter(page); font-size: 0.7rem; color: #999; } }
 body { font-family: "Noto Serif SC", "Source Han Serif SC", "SimSun", serif; font-size: 11pt; line-height: 1.8; color: #333; }
@@ -667,11 +850,9 @@ async def api_export_pdf(request: Request):
         raise HTTPException(status_code=400, detail="Markdown content too short")
 
     try:
-        import markdown as _md_lib
-        html_body = _md_lib.markdown(
-            markdown_text,
-            extensions=["tables", "fenced_code", "codehilite", "toc"],
-        )
+        from markdown_it import MarkdownIt
+        _md_parser = MarkdownIt("commonmark", {"html": True}).enable("table")
+        html_body = _md_parser.render(markdown_text)
     except ImportError:
         # Fallback: basic conversion
         html_body = markdown_text.replace("\n", "<br>")
@@ -693,19 +874,6 @@ async def api_export_pdf(request: Request):
     except Exception as e:
         logger.error(f"PDF generation failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"PDF generation failed: {str(e)}")
-
-@router.get("/api/stats/costs")
-async def api_cost_stats(days: int = Query(default=30, ge=1, le=365), model: str = Query(default=None, max_length=300)):
-    """LLM cost/token aggregation for the cost dashboard.
-
-    Counts only terminal tasks that actually ran (completed / failed /
-    cancelled); running and interrupted tasks are excluded so partial
-    or zero billing does not skew the averages. `by_day` covers the
-    last `days` calendar days (including today) with zero-filled gaps.
-    `model`（可选）按模型过滤；`by_model` 始终返回模型维度分组。
-    """
-    repo = get_repository()
-    return await repo.aget_cost_stats(days, model)
 
 @router.post("/api/tools/{tool_name}")
 async def api_run_tool(tool_name: str, params: dict = None):

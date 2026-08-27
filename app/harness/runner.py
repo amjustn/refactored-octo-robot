@@ -39,12 +39,14 @@ from .persist import get_repository
 from .prompts import (
     AGENT_ROLE_PROMPTS,
     SERIES_SYSTEM_PROMPT,
+    TERMINOLOGY_RULE,
     get_default_system_prompt,
     get_role_label,
     get_synthesis_prompt,
 )
 from .spec import TaskSpec
 from .tools import ALL_TOOL_SCHEMAS, TOOL_ENABLED_AGENTS, get_gateway
+from ..tools.valuation_guard import annotate_report, check_report
 
 logger = logging.getLogger("ai_berkshire.harness.runner")
 
@@ -202,6 +204,13 @@ class AgentRunner:
                 attachments=spec.attachments,
             )
 
+        # ── 估值一致性校验(硬防线) ─────────────────────────────
+        # 拦截 AI 口算导致的估值数字自相矛盾(如"9-10倍PE×EPS 8.2元=60-68元")。
+        # 硬失败: 打回重写一次, 仍失败则报告顶部插入警告条; 软警告: 轻量提示条。
+        # 非估值内容原样放行, 零开销。
+        if report and not report.startswith("[错误]"):
+            report = await self._apply_valuation_guard(report, llm_config)
+
         # P3: save decision to cross-session log (non-blocking, best-effort).
         # Skipped for error reports and for E2 fatal runs — a run where every
         # agent failed carries no trustworthy investment thesis.
@@ -214,6 +223,45 @@ class AgentRunner:
             )
 
         return report
+
+    # ---------- 估值一致性校验 ----------
+
+    async def _apply_valuation_guard(self, report: str, llm_config: Optional[dict] = None) -> str:
+        """估值一致性校验入口: 硬失败→打回重写一次→仍失败→顶部标注警告。
+
+        返回修正/标注后的报告文本; 非估值内容原样返回。
+        """
+        vg = check_report(report)
+        if not vg["triggered"]:
+            return report
+        if vg["hard_fail"]:
+            issues = "\n".join(f"- {c['detail']}" for c in vg["checks"] if c["severity"] == "hard")
+            fixed = await self._rewrite_valuation_fixes(report, issues, llm_config)
+            if fixed and fixed.strip():
+                vg2 = check_report(fixed)
+                if vg2["triggered"] and not vg2["hard_fail"]:
+                    # 修正成功; 残留软警告则附轻量提示条
+                    return annotate_report(fixed, vg2) if vg2["warnings"] else fixed
+                return annotate_report(fixed, vg2)
+            return annotate_report(report, vg)
+        # 仅软警告
+        return annotate_report(report, vg)
+
+    async def _rewrite_valuation_fixes(self, report: str, issues: str, llm_config: Optional[dict] = None) -> str:
+        """把错误清单交给模型做一次定点修正(仅数字); 失败返回空串。"""
+        system = (
+            "你是财经数据校对员。下面是一份研究报告, 其中包含几处估值数字自相矛盾。\n"
+            "请只修正错误清单中列出的数字, 使计算自洽\n"
+            "(例如: '9-10倍PE × EPS 8.2元' 的合理价值区间应为74-82元, 而非60-68元)。\n"
+            "保持报告的其余内容、结构、格式、语气完全不变, 不要添加或删除段落。\n"
+            "直接输出修正后的完整报告, 不要任何解释或前后缀。"
+        )
+        user = f"错误清单:\n{issues}\n\n报告原文:\n{report}"
+        try:
+            return await chat_complete(system, user, llm_config=llm_config or {}) or ""
+        except Exception as e:
+            logger.warning(f"valuation rewrite failed (task={self.task_id}): {e}")
+            return ""
 
     # ---------- tool execution ----------
 
@@ -313,6 +361,9 @@ class AgentRunner:
 
         if context:
             system_prompt = f"{system_prompt}\n\n{context}"
+
+        # 术语注释规则: 所有报告统一挂载(首次出现的金融专业术语加≤30字注释)
+        system_prompt = f"{system_prompt}\n\n{TERMINOLOGY_RULE}"
 
         # 技能级工具开关（第1层修复）：单Agent技能（agent_role 为 None）
         # 若在 registry 中声明 tools_enabled（提示词明确要求调用工具，如
@@ -471,9 +522,11 @@ class AgentRunner:
         agent_reports = ""
         success_count = 0
         failed_count = 0
+        failed_details: list[tuple[str, str]] = []
         for name, result in results:
             if result.startswith("[错误]"):
                 failed_count += 1
+                failed_details.append((name, result))
                 continue
             success_count += 1
             role_label = get_role_label(name)
@@ -542,6 +595,14 @@ class AgentRunner:
                 if isinstance(item, Exception):
                     continue
                 pair, text = item
+                if text.startswith("[评审失败"):
+                    # Never feed a failed review into the synthesis prompt as
+                    # if it were a real peer review — the Team Lead would read
+                    # it as an actual challenge. Failures stay in logs/progress
+                    # only (Cumora lesson: failures must be explicit, never
+                    # disguised as content).
+                    logger.warning(f"Debate {pair} failed, excluded from synthesis input")
+                    continue
                 debate_output += f"\n\n### 交叉评审：{pair}\n{text}\n"
 
             self._progress("system", "completed", f"{len(success_results)} 位 Agent 交叉辩论完成", 1.0)
@@ -571,6 +632,7 @@ class AgentRunner:
         synthesis_prompt = get_synthesis_prompt(skill_name)
         if context:
             synthesis_prompt += f"\n\n{context}"
+        synthesis_prompt += f"\n\n{TERMINOLOGY_RULE}"
         synthesis_prompt += f"\n\n以下是{agent_label}的独立研究报告：\n{agent_reports}"
         # P5: inject debate results
         if debate_output:
@@ -681,6 +743,17 @@ class AgentRunner:
         if post_synthesis_output:
             final_report += f"\n---\n## 后期处理（编辑/评审）\n{post_synthesis_output}\n"
 
+        # Failure attribution: which agents failed and why must be visible in
+        # the deliverable itself, not just the progress UI — the report may be
+        # exported/sent to WeChat where the per-agent progress is long gone
+        # (Cumora lesson: failures surface in the artifact, never silent).
+        if failed_details:
+            final_report += "\n---\n\n## ⚠ 部分 Agent 执行失败\n\n"
+            for name, err in failed_details:
+                role_label = get_role_label(name)
+                _reason = err[:200]
+                final_report += f"- **{role_label}**（{name}）：{_reason}\n"
+
         # Length truncation is owned solely by OutputGuard (harness run flow).
         return final_report
 
@@ -739,6 +812,7 @@ class AgentRunner:
             system_prompt = SERIES_SYSTEM_PROMPT
             if context:
                 system_prompt += f"\n\n{context}"
+            system_prompt += f"\n\n{TERMINOLOGY_RULE}"
 
             try:
                 # Function-calling loop (non-streaming); emit whole article

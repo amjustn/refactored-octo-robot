@@ -272,10 +272,16 @@ body {
 
 /* ── Result ── */
 #result-area { flex:1; overflow-y:auto; padding: 0 32px 32px; }
+#result-area::-webkit-scrollbar { width: 10px; }
+#result-area::-webkit-scrollbar-track { background: transparent; }
+#result-area::-webkit-scrollbar-thumb { background: var(--border); border-radius: 5px; }
+#result-area::-webkit-scrollbar-thumb:hover { background: var(--text-secondary); }
+#result-area { scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
 .result-toolbar {
   display: flex;
   gap: 8px;
-  padding: 14px 0;
+  padding: 14px 32px;
+  margin: 0 -32px;
   position: sticky;
   top: 0;
   background: var(--bg);
@@ -299,7 +305,7 @@ body {
 .result-toolbar .btn-back { border-color: var(--accent); color: var(--accent); font-weight: 500; }
 .result-toolbar .btn-back:hover { background: var(--accent); color: var(--washi); }
 
-.markdown-body { max-width: 720px; line-height: 1.85; font-size: 0.88rem; }
+.markdown-body { max-width: 1100px; line-height: 1.85; font-size: 0.95rem; }
 .markdown-body h1 {
   font-size: 1.35rem;
   color: var(--ink);
@@ -602,6 +608,28 @@ body {
   max-width: 720px;
   letter-spacing: 0.03em;
 }
+.report-dblclick-hint {
+  position: fixed;
+  right: 18px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 1200;
+  font-size: 0.72rem;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  background: var(--bg-card);          /* 实心 — 吸顶/固定表面必须实心，半透明会透出壁纸(pitfall 90) */
+  border: 1px dashed rgba(196,167,125,0.5);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  letter-spacing: 0.03em;
+  cursor: pointer;
+  user-select: none;
+  text-align: center;
+  box-shadow: var(--shadow);
+  transition: opacity 0.2s;
+}
+.report-dblclick-hint:hover { border-color: var(--accent); color: var(--accent); }
+@media (max-width: 1100px) { .report-dblclick-hint { display: none !important; } }
 .restore-banner {
   display: flex;
   align-items: center;
@@ -794,7 +822,7 @@ body {
   body { overflow: visible; height: auto; background: #fff; }
   #sidebar, #input-area, #progress-area, .result-toolbar,
   #sidebar-toggle, .restore-banner, .report-toc, #toast-container,
-  #follow-up-area { display: none !important; }
+  #report-dblclick-hint, #follow-up-area { display: none !important; }
   #app, #main, #result-area { display: block; height: auto; overflow: visible; padding: 0; }
   .result-body { display: block; }
   .markdown-body { max-width: 100%; }
@@ -1043,12 +1071,23 @@ body {
   font-size: 0.75rem;
   margin-bottom: 4px;
 }
+/* AI 回复复用报告同款 markdown 排版（颜色/字体与上方报告一致） */
+.follow-up-qa .markdown-body { max-width: 100%; }
+.follow-up-qa .markdown-body h1 { font-size: 1.15rem; margin: 18px 0 10px; padding-bottom: 8px; }
+.follow-up-qa .markdown-body h2 { font-size: 1.02rem; margin: 16px 0 8px; }
+.follow-up-qa .markdown-body h3 { font-size: 0.98rem; margin: 14px 0 6px; }
+.follow-up-qa .markdown-body p, .follow-up-qa .markdown-body li, .follow-up-qa .markdown-body blockquote { font-size: 0.9rem; line-height: 1.8; }
+.follow-up-qa .markdown-body pre { font-size: 0.82rem; }
+.follow-up-qa .markdown-body table { font-size: 0.85rem; }
 .follow-up-qa-item .qa-content {
   color: #3d3d3d;
   font-size: 0.9rem;
   line-height: 1.75;
 }
 .follow-up-qa-item .qa-content p { margin: 4px 0; }
+/* 兜底：AI 回复(带 markdown-body)的正文间距/颜色与上方报告一致 */
+.follow-up-qa-item .qa-content.markdown-body p { margin: 10px 0; }
+.follow-up-qa-item .qa-content.markdown-body { color: var(--ink); }
 .follow-up-loading {
   color: #c4a77d;
   font-style: italic;
@@ -1298,3 +1337,38 @@ body {
   margin-right: 6px;
 }
 .btn-continue-task:hover { background: var(--accent); color: var(--washi); }
+
+/* ===== P0 财务/估值图表面板 (fc-*) ===== */
+.fc-panel {
+  max-width: 1100px;
+  margin: 18px 0 6px;
+  padding: 16px;
+  background: var(--bg-card, #fdfaf5);
+  border: 1px solid var(--border, #d4c5a9);
+  border-radius: var(--radius, 4px);
+  box-shadow: var(--shadow, 0 1px 3px rgba(61,61,61,0.06));
+}
+.fc-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 10px; margin-bottom: 8px; }
+.fc-title { font-size: 1.05rem; font-weight: 600; color: var(--ink, #3d3d3d); }
+.fc-sub { font-size: 0.8rem; color: var(--text-secondary, #8c8273); }
+.fc-asof { margin-left: auto; font-size: 0.75rem; color: var(--text-secondary, #8c8273); }
+.fc-badges { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.fc-badge {
+  display: inline-block; padding: 3px 10px; border-radius: 10px;
+  font-size: 0.78rem; border: 1px solid var(--border-light, #e5dac8); color: var(--text, #3d3d3d);
+}
+.fc-badge-key { background: var(--kare, #e8dfce); }
+.fc-badge-low { background: rgba(107,142,107,0.14); color: #4d7a4d; border-color: rgba(107,142,107,0.35); }
+.fc-badge-mid { background: rgba(196,167,125,0.14); color: #8a7448; border-color: rgba(196,167,125,0.4); }
+.fc-badge-high { background: rgba(196,102,90,0.13); color: #a04d42; border-color: rgba(196,102,90,0.35); }
+.fc-badge-na { background: var(--kare, #e8dfce); color: var(--text-secondary, #8c8273); }
+.fc-tabs { display: flex; gap: 6px; margin-bottom: 10px; }
+.fc-tab {
+  padding: 5px 14px; font-size: 0.85rem; cursor: pointer;
+  background: transparent; border: 1px solid var(--border, #d4c5a9);
+  border-radius: 3px; color: var(--text-secondary, #8c8273); transition: all 0.15s;
+}
+.fc-tab:hover { border-color: var(--accent, #6b8e6b); color: var(--accent, #6b8e6b); }
+.fc-tab.active { background: var(--accent, #6b8e6b); border-color: var(--accent, #6b8e6b); color: #fff; }
+.fc-chart { width: 100%; height: 330px; }
+.fc-empty { padding: 40px 0; text-align: center; color: var(--text-secondary, #8c8273); font-size: 0.9rem; }

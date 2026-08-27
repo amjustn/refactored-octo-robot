@@ -140,6 +140,19 @@ class ContextBuilder:
         except Exception as e:
             logger.debug(f"ContextBuilder: decision log injection skipped: {e}")
 
+        # P3.5: inject stock memory (recent reports for the same stock)
+        try:
+            from ..tools.stock_memory import build_memory_context
+            from .decision_log import _extract_stock_name
+
+            stock = _extract_stock_name(arguments)
+            if stock:
+                memory = build_memory_context(stock, limit=3)
+                if memory:
+                    raw = memory + "\n" + raw
+        except Exception as e:
+            logger.debug(f"ContextBuilder: stock memory injection skipped: {e}")
+
         bundle = self._trim_and_grade(raw)
         bundle.goal_hints = goal_hints
 

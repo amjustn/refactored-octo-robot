@@ -146,14 +146,14 @@ app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
 
 # ==================== Routers ====================
-from .routers import data, knowledge, misc, pages, research  # noqa: E402
+from .routers import charts, data, export_wechat, knowledge, misc, pages, research, skin  # noqa: E402
 
 # NOTE: FastAPI 0.138's include_router() registers a lazy _IncludedRouter
 # wrapper (no .path attribute), which would break callers iterating
 # app.routes (tests do ``[r.path for r in app.routes]``).  Routers are
 # included without prefix/tags/dependencies, so extending the route list
 # directly is equivalent to the classic eager include.
-for _r in (pages, data, knowledge, research, misc):
+for _r in (pages, data, knowledge, research, misc, skin, charts, export_wechat):
     app.router.routes.extend(_r.router.routes)
 
 # Back-compat re-exports: tests (and any external callers) import these

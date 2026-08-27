@@ -9,3 +9,8 @@ data/*.db
 _archive/
 eval/runs/
 data/scratchpad/
+data/reports/
+data/data_cache.db
+data/skin_settings.json
+*.bak_*
+data_cache.db

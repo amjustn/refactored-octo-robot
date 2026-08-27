@@ -489,15 +489,29 @@ async def build_full_context(arguments: str = "", skill_name: str = "", goal_hin
             logger.debug(f"Web search context failed: {e}")
             return ""
 
+    async def _fetch_broker_ctx():
+        # Auto broker/机构研报 context — every agent sees institutional
+        # ratings & consensus estimates when analyzing an A-share stock.
+        if not symbol:
+            return ""
+        try:
+            from ..tools.broker_reports import build_broker_context
+            return await build_broker_context(symbol=symbol, arguments=arguments, skill_name=skill_name) or ""
+        except Exception as e:
+            logger.debug(f"Broker context failed: {e}")
+            return ""
+
     import asyncio
-    idx_ctx, comp_ctx, web_ctx = await asyncio.gather(
-        _fetch_indices_ctx(), _fetch_company_ctx(), _fetch_web_ctx(),
+    idx_ctx, comp_ctx, web_ctx, broker_ctx = await asyncio.gather(
+        _fetch_indices_ctx(), _fetch_company_ctx(), _fetch_web_ctx(), _fetch_broker_ctx(),
     )
     # Assemble sections in the same order as the sequential implementation
     if idx_ctx is not None:
         parts.append(idx_ctx)
     if comp_ctx is not None:
         parts.append(comp_ctx)
+    if broker_ctx:
+        parts.append(broker_ctx)
     if web_ctx:
         parts.append(web_ctx)
 

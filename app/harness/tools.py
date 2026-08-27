@@ -70,18 +70,22 @@ FINANCIAL_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "three_scenario",
-            "description": "三情景估值：乐观/中性/悲观，返回目标价和上涨空间",
+            "description": "三情景估值：乐观/中性/悲观，返回目标价和上涨空间。支持三种估值锚，按公司类型动态选择：anchor=PE(默认,传统重资产/制造/消费,用eps+multiples)、anchor=PB(银行/保险/周期股,用bvps+multiples)、anchor=PS(轻资产/互联网/软件,用revenue_per_share+multiples)。目标价=未来基准值(1+增长率)×倍数",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "price": {"type": "number", "description": "当前股价"},
-                    "eps": {"type": "number", "description": "当前每股收益"},
                     "shares_100m": {"type": "number", "description": "总股本（亿股）"},
                     "growth_rates": {"type": "array", "items": {"type": "number"}, "description": "三个情景的增长率"},
-                    "pe_multiples": {"type": "array", "items": {"type": "number"}, "description": "三个情景的PE倍数"},
+                    "anchor": {"type": "string", "enum": ["PE", "PB", "PS"], "description": "估值锚：PE(重资产/消费)、PB(银行/保险/周期)、PS(轻资产/互联网),默认PE"},
+                    "eps": {"type": "number", "description": "当前每股收益(anchor=PE时必填)"},
+                    "bvps": {"type": "number", "description": "当前每股净资产(anchor=PB时必填)"},
+                    "revenue_per_share": {"type": "number", "description": "当前每股营收(anchor=PS时必填,=营收/股本)"},
+                    "multiples": {"type": "array", "items": {"type": "number"}, "description": "三个情景的估值倍数(PE倍数/PB倍数/PS倍数,与anchor对应)"},
+                    "pe_multiples": {"type": "array", "items": {"type": "number"}, "description": "兼容旧参数:三个情景的PE倍数,等价于anchor=PE时传multiples"},
                     "currency": {"type": "string", "default": "CNY"},
                 },
-                "required": ["price", "eps", "shares_100m", "growth_rates", "pe_multiples"],
+                "required": ["price", "shares_100m", "growth_rates"],
             },
         },
     },
@@ -256,6 +260,42 @@ INDUSTRY_TOOL_SCHEMAS = [
     },
 ]
 
+# ==================== Broker Research Report Tool Schemas ====================
+
+BROKER_TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "fetch_broker_reports",
+            "description": "获取券商/机构研报数据（东方财富研报中心）：个股评级分布、机构一致预期（次年EPS/PE中位数、目标价区间）、最近研报列表（机构/日期/评级/标题）。仅支持A股6位代码（如600519），港股/美股返回covered=false。分析A股个股的估值、投资评级、市场预期时可调用。**报告中凡使用本工具返回的研报数据，必须在引用处标注来源：单篇研报（来源：<机构名> <日期> 研报），一致预期/评级分布（来源：东方财富研报中心，近一年N篇研报）。**",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "A股6位股票代码，如 600519 或 000001.SZ"},
+                    "days": {"type": "integer", "description": "统计近多少天研报，默认365", "default": 365},
+                },
+                "required": ["symbol"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "fetch_broker_report_detail",
+            "description": "读取一篇券商研报的正文内容（事件描述/事件点评）。先用 fetch_broker_reports 获取研报列表拿到 info_code，再传入读取具体研报观点。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "info_code": {"type": "string", "description": "研报的 info_code（来自 fetch_broker_reports 返回的 info_code 字段）"},
+                    "max_chars": {"type": "integer", "description": "最大读取字符数，默认6000", "default": 6000},
+                },
+                "required": ["info_code"],
+            },
+        },
+    },
+]
+
+
 # ==================== QuantTrader (QT) Quant Signal Tool Schemas ====================
 
 QUANT_TOOL_SCHEMAS = [
@@ -306,7 +346,7 @@ QUANT_TOOL_SCHEMAS = [
 ]
 
 # All tools available to agents
-ALL_TOOL_SCHEMAS = FINANCIAL_TOOL_SCHEMAS + DATA_TOOL_SCHEMAS + WEB_TOOL_SCHEMAS + INDUSTRY_TOOL_SCHEMAS + QUANT_TOOL_SCHEMAS
+ALL_TOOL_SCHEMAS = FINANCIAL_TOOL_SCHEMAS + DATA_TOOL_SCHEMAS + WEB_TOOL_SCHEMAS + INDUSTRY_TOOL_SCHEMAS + BROKER_TOOL_SCHEMAS + QUANT_TOOL_SCHEMAS
 
 
 # ==================== Tool Executor ====================
@@ -355,6 +395,9 @@ async def _execute_tool(tool_name: str, arguments: dict) -> str:
         search_company,
     )
 
+    # --- Broker research report tools (async) ---
+    from ..tools.broker_reports import get_rating_summary, get_report_detail
+
     # --- Web search tools (async) ---
     from ..tools.web_search import read_webpage, web_search
 
@@ -368,6 +411,8 @@ async def _execute_tool(tool_name: str, arguments: dict) -> str:
         "read_webpage": read_webpage,
         "search_industry_chain": search_industry_chain,
         "list_industry_sources": lambda category="": list_industry_sources(category),
+        "fetch_broker_reports": get_rating_summary,
+        "fetch_broker_report_detail": get_report_detail,
         "quant_factor_signal": quant_link.get_factor_signal,
         "quant_market_scores": quant_link.get_market_scores,
         "quant_bottom_thermometer": quant_link.get_bottom_thermometer,
@@ -529,6 +574,9 @@ TOOL_DEFS: dict[str, ToolDef] = {
     "read_webpage": ToolDef("read_webpage", timeout=20),
     "search_industry_chain": ToolDef("search_industry_chain", timeout=25),
     "list_industry_sources": ToolDef("list_industry_sources", timeout=10, cache_ttl=86400),
+    # broker research reports (东财研报中心) — 内部已有 SQLite 缓存
+    "fetch_broker_reports": ToolDef("fetch_broker_reports", timeout=25, retries=1),
+    "fetch_broker_report_detail": ToolDef("fetch_broker_report_detail", timeout=20, retries=1),
     # QuantTrader quant signals — 本机 HTTP，QT 侧信号扫描较慢故放宽超时
     "quant_factor_signal": ToolDef("quant_factor_signal", timeout=70, retries=0, cache_ttl=300),
     "quant_market_scores": ToolDef("quant_market_scores", timeout=25, cache_ttl=1800),

@@ -1305,6 +1305,8 @@ async function startResearch() {
   document.getElementById('report-content').innerHTML = '';
   document.getElementById('report-meta').style.display = 'none';
   document.getElementById('restore-banner').style.display = 'none';
+  var hint = document.getElementById('report-dblclick-hint');
+  if (hint) hint.style.display = 'none';
   document.getElementById('follow-up-area').style.display = 'none';
   document.getElementById('follow-up-qa').innerHTML = '';
   _followUpHistory = [];
@@ -1860,10 +1862,17 @@ function renderReport(md) {
   document.getElementById('report-content').innerHTML =
     DOMPurify.sanitize(marked.parse(md)) +
     '<div class="ai-disclaimer">该数据由AI在数据的基础上进行分析，仅供参考</div>';
+  // Show double-click hint (new-tab view)
+  var hint = document.getElementById('report-dblclick-hint');
+  if (hint) hint.style.display = 'block';
+  // Bind double-click → open report in new tab (once)
+  _bindReportDblClick();
   // Show follow-up area when a report is rendered
   document.getElementById('follow-up-area').style.display = 'block';
   // Restore follow-up Q&A history
   _loadFollowUpHistory();
+  // P0: attach financial / valuation chart panel for this report's target
+  if (window.attachFinancialCharts) window.attachFinancialCharts(md);
 }
 
 // ==================== Follow-up Q&A ====================
@@ -1994,9 +2003,10 @@ function _loadFollowUpHistory() {
     var html = '';
     items.forEach(function(item) {
       var cls = item.type === 'q' ? 'follow-up-q' : 'follow-up-a';
+      var mdCls = item.type === 'a' ? ' markdown-body' : '';
       html += '<div class="follow-up-qa-item ' + cls + '">' +
         '<div class="qa-label">' + escHtml(item.label) + '</div>' +
-        '<div class="qa-content">' + item.html + '</div>' +
+        '<div class="qa-content' + mdCls + '">' + item.html + '</div>' +
         '</div>';
     });
     qa.innerHTML = html;
@@ -2065,8 +2075,9 @@ async function submitFollowUp() {
       throw new Error(err.detail || '请求失败 (' + res.status + ')');
     }
     var data = await res.json();
-    document.getElementById(aId).querySelector('.qa-content').innerHTML =
-      DOMPurify.sanitize(marked.parse(data.answer || '(无回复)'));
+    var answerEl = document.getElementById(aId).querySelector('.qa-content');
+    answerEl.innerHTML = DOMPurify.sanitize(marked.parse(data.answer || '(无回复)'));
+    answerEl.classList.add('markdown-body');
     // Persist Q&A to localStorage
     _saveFollowUpHistory();
     // Attachments are single-shot — clear after a successful send
@@ -2148,6 +2159,50 @@ function copyReport() {
   });
 }
 
+// ⤢ 新窗口 — 把当前报告渲染成独立 HTML 文件，在新标签页打开（内容/字体不变）
+async function openReportNewTab() {
+  if (!currentReport) { showToast('没有可打开的报告', 'warning'); return; }
+  try {
+    var res = await fetch('/api/report/view', {
+      method: 'POST',
+      headers: Object.assign({ 'Content-Type': 'application/json' }, getAuthHeaders()),
+      body: JSON.stringify({ markdown: currentReport, filename: _reportFileBase() })
+    });
+    if (!res.ok) {
+      var err = await res.json().catch(function() { return {}; });
+      throw new Error(err.detail || '生成失败 (' + res.status + ')');
+    }
+    var data = await res.json();
+    if (data.url) {
+      // 同标签页跳转（不是新开标签页）——与“← 返回”按钮形成连续导航闭环
+      window.location.href = data.url;
+    } else {
+      showToast('未返回页面地址', 'error');
+    }
+  } catch (e) {
+    showToast('打开失败: ' + e.message, 'error');
+  }
+}
+
+// 双击报告内容区 → 新标签页；点击右侧提示条 → 新标签页
+function _bindReportDblClick() {
+  var rc = document.getElementById('report-content');
+  if (rc && !rc._dblclickBound) {
+    rc.addEventListener('dblclick', function(e) {
+      // 双击时如果正在选中文本/点击了链接/按钮，不拦截
+      var t = e.target;
+      if (t && (t.tagName === 'A' || t.tagName === 'BUTTON' || t.tagName === 'INPUT')) return;
+      openReportNewTab();
+    });
+    rc._dblclickBound = true;
+  }
+  var hint = document.getElementById('report-dblclick-hint');
+  if (hint && !hint._hintBound) {
+    hint.addEventListener('click', function() { openReportNewTab(); });
+    hint._hintBound = true;
+  }
+}
+
 function _reportFileBase() {
   var skill = currentSkill ? currentSkill.name : 'report';
   var args = (document.getElementById('arg-field').value || '').trim()
@@ -2166,6 +2221,31 @@ function downloadReport() {
   a.click();
   URL.revokeObjectURL(url);
   showToast('已下载', 'success');
+}
+
+function pushWechat() {
+  if (!currentReport) { showToast('没有可推送的内容', 'warning'); return; }
+  var title = _reportFileBase().replace(/[-_]/g, ' ') || 'AI Berkshire 报告';
+  var btn = event ? event.target : null;
+  if (btn) { btn.disabled = true; btn.textContent = '推送中...'; }
+  var headers = { 'Content-Type': 'application/json' };
+  var jwt = localStorage.getItem('ai_berkshire_jwt');
+  if (jwt) { headers['Authorization'] = 'Bearer ' + jwt; }
+  fetch('/api/export/wechat', {
+    method: 'POST',
+    headers: headers,
+    body: JSON.stringify({ markdown: currentReport, title: title })
+  })
+    .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+    .then(function (res) {
+      if (btn) { btn.disabled = false; btn.textContent = '📲 微信'; }
+      if (res.ok) { showToast('已推送到微信', 'success'); }
+      else { showToast('推送失败: ' + (res.d.detail || '未知错误'), 'warning'); }
+    })
+    .catch(function () {
+      if (btn) { btn.disabled = false; btn.textContent = '📲 微信'; }
+      showToast('推送失败', 'warning');
+    });
 }
 
 function exportHtml() {
@@ -2245,8 +2325,13 @@ function clearResult() {
   currentReport = '';
   document.getElementById('result-area').style.display = 'none';
   document.getElementById('report-content').innerHTML = '';
+  // P0: remove the financial charts panel if present
+  var fc = document.getElementById('financial-charts');
+  if (fc && fc.parentNode) fc.parentNode.removeChild(fc);
   document.getElementById('report-meta').style.display = 'none';
   document.getElementById('restore-banner').style.display = 'none';
+  var hint = document.getElementById('report-dblclick-hint');
+  if (hint) hint.style.display = 'none';
   document.getElementById('follow-up-area').style.display = 'none';
   document.getElementById('follow-up-qa').innerHTML = '';
   _followUpHistory = [];
@@ -2263,6 +2348,8 @@ function clearResult() {
 // ==================== History ====================
 function backToHome() {
   document.getElementById('result-area').style.display = 'none';
+  var hint = document.getElementById('report-dblclick-hint');
+  if (hint) hint.style.display = 'none';
   document.getElementById('progress-area').style.display = 'none';
   document.getElementById('history-area').style.display = 'none';
   document.getElementById('compare-area').style.display = 'none';

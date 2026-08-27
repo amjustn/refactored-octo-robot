@@ -181,6 +181,44 @@ async def api_search_company(q: str):
     return {"query": q, "results": results}
 
 
+# ── 券商/机构研报 ──────────────────────────────────────
+
+@router.get("/api/data/broker-reports/{symbol}")
+async def api_broker_reports(symbol: str, days: int = 365):
+    """Get broker research reports + rating summary for an A-share stock.
+
+    Returns rating distribution, consensus estimates (next-year EPS/PE,
+    target price range), and the most recent reports.
+    """
+    from ..tools.broker_reports import get_rating_summary
+    data = await get_rating_summary(symbol, days=days)
+    return data
+
+
+@router.get("/api/data/broker-reports/{symbol}/list")
+async def api_broker_reports_list(symbol: str, days: int = 90, limit: int = 20):
+    """Get the raw broker report list for an A-share stock."""
+    from ..tools.broker_reports import get_stock_reports
+    data = await get_stock_reports(symbol, days=days, limit=limit)
+    return data
+
+
+@router.get("/api/data/broker-reports/{symbol}/industry")
+async def api_broker_industry_reports(keyword: str = "", days: int = 30, limit: int = 15):
+    """Get industry-level broker reports, optionally filtered by keyword."""
+    from ..tools.broker_reports import get_industry_reports
+    data = await get_industry_reports(keyword=keyword, days=days, limit=limit)
+    return data
+
+
+@router.get("/api/data/broker-reports/detail/{info_code}")
+async def api_broker_report_detail(info_code: str, max_chars: int = 6000):
+    """Get the full text body of a broker report by its info_code."""
+    from ..tools.broker_reports import get_report_detail
+    data = await get_report_detail(info_code, max_chars=max_chars)
+    return data
+
+
 @router.get("/api/data/context")
 async def api_get_context(arguments: str = "", skill_name: str = ""):
     """Get the full real-world context that would be injected into agent prompts."""

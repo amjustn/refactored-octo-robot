@@ -1,6 +1,7 @@
 """Page routes: /, /manual, /app, /health, /favicon.ico (+ MANUAL_HTML)."""
 import json
 from datetime import datetime
+from html import escape as _html_escape
 
 from fastapi import APIRouter
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
@@ -13,6 +14,79 @@ from ..skills import list_skills
 from ..web_common import data_cache, static_dir, task_store, templates_dir
 
 router = APIRouter()
+
+
+# ==================== 使用手册 · 技能表（服务端动态生成，永不过期） ====================
+# 输入列短提示（手工维护一次性映射；新技能未收录时回退到 input_hint 截断）
+_SHORT_HINTS = {
+    "investment-research": "公司名/代码",
+    "investment-team": "公司名/代码",
+    "dyp-ask": "投资问题",
+    "investment-checklist": "多公司",
+    "management-deep-dive": "管理层+公司名",
+    "private-company-research": "公司名",
+    "broker-reports": "A股代码/公司名",
+    "deep-company-series": "公司名",
+    "global-macro-analysis": "宏观问题",
+    "china-macro-analysis": "宏观问题",
+    "wechat-article": "主题",
+    "earnings-review": "公司名+季度",
+    "earnings-team": "公司名+季度",
+    "financial-data": "股票代码",
+    "industry-research": "行业名",
+    "industry-funnel": "行业/方向",
+    "quality-screen": "个股/行业",
+    "bottleneck-hunter": "趋势名",
+    "portfolio-review": "持仓清单",
+    "thesis-tracker": "公司名",
+    "news-pulse": "公司名 [涨跌]",
+    "daily-briefing": "留空 / 关注方向",
+}
+
+
+def _short_hint(name: str, hint: str) -> str:
+    """输入列短提示：优先手工映射，否则从 input_hint 提取。"""
+    if name in _SHORT_HINTS:
+        return _SHORT_HINTS[name]
+    if not hint:
+        return "分析目标"
+    h = hint.split("如：")[0].strip().split("，")[0].strip()
+    for pre in (
+        "描述你的分析目标", "描述筛选目标", "描述研究目标", "描述想研究的",
+        "描述一个超级趋势", "描述你的持仓", "描述分析目标", "描述你想分析的",
+        "描述异动情况", "描述筛选对象", "描述需要的数据", "描述文章主题",
+    ):
+        h = h.replace(pre, "")
+    h = h.strip("，,、；;。 ")
+    if not h:
+        return "分析目标"
+    if len(h) > 14:
+        h = h[:13] + "…"
+    return h
+
+
+def _render_skills_table() -> str:
+    """按 category 分组渲染技能速查表（数据源 registry.SKILLS，随技能增减自动更新）。"""
+    groups = {}
+    for s in list_skills():
+        groups.setdefault(s.get("category", "其他"), []).append(s)
+    parts = []
+    for cat, skills in groups.items():
+        parts.append(f"<h3>{_html_escape(cat)}</h3>")
+        parts.append('<table><tr><th>技能名</th><th>显示名</th><th>输入</th><th>说明</th></tr>')
+        for s in skills:
+            name = s["name"]
+            disp = _html_escape(s.get("display_name", name))
+            if s.get("is_multi_agent") and s.get("agent_count"):
+                disp += f'<span class="tag">{int(s["agent_count"])}A</span>'
+            hint = _html_escape(_short_hint(name, s.get("input_hint", "")))
+            desc = _html_escape(s.get("description", ""))
+            parts.append(
+                f'<tr><td><code>{name}</code></td><td>{disp}</td>'
+                f"<td>{hint}</td><td>{desc}</td></tr>"
+            )
+        parts.append("</table>")
+    return "\n".join(parts)
 
 
 # ==================== 使用手册 ====================
@@ -48,47 +122,9 @@ MANUAL_HTML = """<!DOCTYPE html>
 <a href="/app" style="display:inline-block;background:#6b8e6b;color:#fff;padding:12px 32px;border-radius:4px;text-decoration:none;font-size:1rem;letter-spacing:0.06em;border:none">→ 进入研究工作站</a>
 </div>
 
-<h2>技能速查（19个技能）</h2>
+<h2>技能速查（@@SKILL_COUNT@@个技能）</h2>
 
-<h3>深度研究</h3>
-<table>
-<tr><th>技能名</th><th>显示名</th><th>输入</th><th>说明</th></tr>
-<tr><td><code>investment-team</code></td><td>多Agent投研团队<span class="tag">4A</span></td><td>公司名/代码</td><td>★推荐★ 商业模式/财务/护城河/估值 4Agent并行</td></tr>
-<tr><td><code>investment-research</code></td><td>四大师综合分析</td><td>公司名/代码</td><td>巴菲特+芒格+段永平+李录 四大视角</td></tr>
-<tr><td><code>dyp-ask</code></td><td>段永平问答</td><td>投资问题</td><td>以段永平思维框架回答投资问题</td></tr>
-<tr><td><code>investment-checklist</code></td><td>巴菲特Checklist</td><td>多公司</td><td>六关快速筛选，支持多公司对比</td></tr>
-<tr><td><code>management-deep-dive</code></td><td>管理层深研</td><td>管理层名 公司</td><td>履历/能力圈/诚信/资本配置 全景评估（输入公司名即可）</td></tr>
-<tr><td><code>private-company-research</code></td><td>未上市公司研究</td><td>公司名</td><td>侦探式公开信息挖掘</td></tr>
-<tr><td><code>deep-company-series</code></td><td>深度系列长文</td><td>公司名</td><td>8篇系列专题（~12万字），逐篇生成</td></tr>
-<tr><td><code>wechat-article</code></td><td>公众号文章<span class="tag">3A</span></td><td>主题</td><td>3Agent并行生成公众号风格长文</td></tr>
-</table>
-
-<h3>财报分析</h3>
-<table>
-<tr><td><code>earnings-review</code></td><td>财报精读</td><td>公司名 季度</td><td>单Agent深度解读，营收/利润/现金流拆解</td></tr>
-<tr><td><code>earnings-team</code></td><td>财报精读团队<span class="tag">6A</span></td><td>公司名 季度</td><td>6Agent并行 + 首席审稿，全面覆盖</td></tr>
-<tr><td><code>financial-data</code></td><td>财务数据规范</td><td>股票代码</td><td>交叉验证的财务数据提取</td></tr>
-</table>
-
-<h3>行业筛选</h3>
-<table>
-<tr><td><code>industry-research</code></td><td>产业链全景扫描</td><td>行业名</td><td>上中下游格局、竞争态势、政策环境</td></tr>
-<tr><td><code>industry-funnel</code></td><td>行业漏斗筛选</td><td>行业/方向</td><td>30-60家公司 → 精筛 → 终选3家</td></tr>
-<tr><td><code>quality-screen</code></td><td>去劣筛选</td><td>个股/行业</td><td>7项硬指标快速排除劣质公司</td></tr>
-<tr><td><code>bottleneck-hunter</code></td><td>瓶颈猎手</td><td>趋势名</td><td>产业链物理瓶颈识别</td></tr>
-</table>
-
-<h3>持仓管理</h3>
-<table>
-<tr><td><code>portfolio-review</code></td><td>组合审视</td><td>持仓清单</td><td>仓位体检 + 调仓建议</td></tr>
-<tr><td><code>thesis-tracker</code></td><td>持仓评估</td><td>公司名</td><td>持仓健康度评估：假设检查+红线触发+买卖信号</td></tr>
-<tr><td><code>news-pulse</code></td><td>股价异动归因<span class="tag">4A</span></td><td>公司名 [涨跌]</td><td>4Agent并行归因，信息不实时立即报错</td></tr>
-</table>
-
-<h3>日报</h3>
-<table>
-<tr><td><code>daily-briefing</code></td><td>金融日报</td><td>（可选）日期</td><td>★NEW★ 每日A股盘后综述：指数/板块/资金/要闻</td></tr>
-</table>
+@@SKILLS_TABLE@@
 
 <h2>典型使用场景</h2>
 <ol>
@@ -117,6 +153,28 @@ MANUAL_HTML = """<!DOCTYPE html>
 <tr><td>快捷键</td><td>Enter 直接开始研究</td><td>全局</td></tr>
 <tr><td>移动端适配</td><td>点击左上角 ☰ 展开/收起侧边栏</td><td>左上角按钮</td></tr>
 <tr><td>实时市场数据</td><td>研究时自动注入最新行情/财务/新闻</td><td>后台自动</td></tr>
+<tr><td>换肤系统</td><td>🎨 12套皮肤（6常规+6渐变）/ 强调色 / 背景照片 / 表面透明度，自动保存</td><td>右下角 🎨 按钮</td></tr>
+<tr><td>登录认证</td><td>本地 BasicAuth 登录 + JWT 自动注入，/manual 免登录</td><td>浏览器弹窗</td></tr>
+<tr><td>数据源健康</td><td>各行情/新闻数据源实时状态与自动熔断摘除</td><td>健康检查</td></tr>
+<tr><td>知识库自动更新</td><td>启动时自动更新市场知识与技能知识</td><td>后台自动</td></tr>
+<tr><td>LLM 模型选择</td><td>切换默认大模型，一键测试连通性</td><td>设置面板</td></tr>
+<tr><td>成本统计</td><td>查看 API 调用量/Token/费用，按模型与技能分布</td><td>设置面板</td></tr>
+<tr><td>任务恢复</td><td>中断/失败任务可一键恢复继续生成</td><td>历史报告</td></tr>
+<tr><td>报告追问</td><td>报告底部直接追问，深入某个细节</td><td>结果区</td></tr>
+<tr><td>报告对比</td><td>两份历史报告左右分栏对比</td><td>历史报告面板</td></tr>
+<tr><td>券商研报直查</td><td>按 A 股代码查询机构研报评级与一致预期</td><td>技能输入</td></tr>
+</table>
+
+<h2>换肤（渐变皮肤）</h2>
+<div class="note">右下角 <b>🎨</b> 悬浮按钮打开换肤面板。所有设置自动保存，并在本机两个站点（8001 / 8000）间同步。</div>
+<table>
+<tr><th>项目</th><th>说明</th></tr>
+<tr><td>常规皮肤（6套）</td><td>和風·禅 / 抹茶·清 / 桜·粉 / 紺青·夜 / 墨·黑 / 夜·紫</td></tr>
+<tr><td>渐变皮肤（6套）</td><td>雾蓝·樱粉 / 湖蓝·淡粉 / 晨雾·青 / 奶油·蜜桃 / 暮山·紫 / 深海·蓝 —— 柔和克制的莫兰迪色系，渐变铺满整页背景</td></tr>
+<tr><td>强调色</td><td>自定义强调色，或一键回到跟随皮肤</td></tr>
+<tr><td>背景照片</td><td>上传自己的照片作为背景，透明度/模糊可调；照片与渐变皮肤<b>叠加共存</b>，互不覆盖</td></tr>
+<tr><td>表面透明度</td><td>侧边栏/输入区半透明，透出背景（卡片保持实心保证可读性）</td></tr>
+<tr><td>一键浅色</td><td>照片场景下快速切换 透明度25% + 模糊8px + 侧边栏透出</td></tr>
 </table>
 
 <h2>AI 免责声明</h2>
@@ -132,10 +190,9 @@ MANUAL_HTML = """<!DOCTYPE html>
 
 @router.get("/manual", response_class=HTMLResponse)
 async def manual():
-    """使用手册"""
-    # F5: the skill count in the static HTML goes stale as skills are added —
-    # substitute the live count at serve time.
-    html = MANUAL_HTML.replace("技能速查（19个技能）", f"技能速查（{len(list_skills())}个技能）")
+    """使用手册 — 技能表由服务端按 registry 动态生成（数量/内容永不过期）"""
+    html = MANUAL_HTML.replace("@@SKILL_COUNT@@", str(len(list_skills())))
+    html = html.replace("@@SKILLS_TABLE@@", _render_skills_table())
     return HTMLResponse(html)
 
 

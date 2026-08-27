@@ -5,10 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>AI Berkshire Web - 价值投资研究工作站</title>
 <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
-<link rel="stylesheet" href="/static/css/style.css?v=20260813a">
-<script>window.__JWT__="eyJhbG...2gL8";localStorage.setItem("ai_berkshire_jwt","eyJhbG...2gL8");</script></head>
+<link rel="stylesheet" href="/static/css/style.css?v=20260819b"></head>
 <body>
 <div id="toast-container"></div>
+<div id="report-dblclick-hint" class="report-dblclick-hint" style="display:none" title="双击报告内容，可跳转到独立页面查看（内容与字体不变）">💡 双击报告<br>新页面查看</div>
 <button id="sidebar-toggle" onclick="toggleSidebar()" aria-label="菜单">☰</button>
 <div id="app">
   <aside id="sidebar">
@@ -93,10 +93,12 @@
     <div id="result-area" style="display:none">
       <div class="result-toolbar">
         <button onclick="backToHome()" class="btn-back">← 返回</button>
+        <button onclick="openReportNewTab()" title="在新页面查看报告（同标签页跳转，返回按钮回到应用）">⤢ 新页面</button>
         <button onclick="copyReport()">复制报告</button>
         <button onclick="downloadReport()">下载MD</button>
         <button onclick="exportHtml()">导出HTML</button>
         <button onclick="exportPdf()">导出PDF</button>
+        <button onclick="pushWechat()" title="推送报告到微信">📲 微信</button>
         <button onclick="printReport()">打印</button>
         <button onclick="toggleToc()" id="btn-toc">目录</button>
         <button onclick="clearResult()">清除</button>
@@ -260,6 +262,8 @@
 <script src="/static/js/marked.min.js"></script>
 <script src="/static/js/echarts.min.js"></script>
 <script src="https://cdn.bootcdn.net/ajax/libs/dompurify/3.0.6/purify.min.js"></script>
-<script src="/static/js/app.js?v=20260814b"></script>
+<script src="/static/js/app.js?v=20260819c"></script>
+<script src="/static/js/charts.js?v=20260822a"></script>
+<script src="/static/js/skin.js?v=20260819b"></script>
 </body>
 </html>

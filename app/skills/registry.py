@@ -58,6 +58,16 @@ SKILLS = [
         "input_hint": "描述研究目标，如：侦探式研究字节跳动的商业模式与估值水平",
     },
     {
+        "name": "broker-reports",
+        "display_name": "券商研报",
+        "description": "机构研报检索与分析：评级分布+一致预期+主流观点归纳+独立判断",
+        "category": "深度研究",
+        "is_multi_agent": False,
+        "agent_count": 1,
+        "tools_enabled": True,
+        "input_hint": "A股公司名或代码，如：查看贵州茅台(600519)的最新券商研报与机构观点",
+    },
+    {
         "name": "deep-company-series",
         "display_name": "深度系列长文",
         "description": "8篇长文系列拆解一家公司，公众号级深度(12万字)",
