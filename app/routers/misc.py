@@ -665,6 +665,17 @@ async def api_list_decisions():
     }
 
 
+@router.post("/api/decisions/{task_id}/resolve")
+async def api_resolve_decision(task_id: str):
+    """P3-闭环(2026-08-28): manually resolve a pending decision by task ID."""
+    from ..harness.decision_log import resolve_decision_by_task_id
+    ok = resolve_decision_by_task_id(task_id)
+    if not ok:
+        return {"resolved": False,
+                "message": "未找到该任务ID对应的待验证决策，或其已销账"}
+    return {"resolved": True, "task_id": task_id}
+
+
 # ── P4: PDF export ──────────────────────────────────────────────
 
 # 独立 HTML 查看页（双击报告 → 新标签页）内联样式。

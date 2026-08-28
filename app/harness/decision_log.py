@@ -93,12 +93,98 @@ def save_decision(
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(entry)
 
+        # P3-闭环(2026-08-28): 新决策已入库, 同股旧 pending 自动销账
+        try:
+            _resolve_superseded(log_path, stock, ts)
+        except Exception as e:
+            logger.warning(f"resolve_superseded skipped: {e}")
+
         logger.info(f"Decision saved: {stock} — {decision['conclusion']}")
         return True
 
     except Exception as e:
         logger.warning(f"Failed to save decision: {e}")
         return False
+
+
+def _resolve_superseded(log_path: Path, stock: str, new_ts: str) -> int:
+    """P3-闭环(2026-08-28): 同股票保存新决策时, 旧 pending 记录自动销账。
+
+    新分析覆盖了旧观点: 无论结论是重申还是反转, 旧条目都已不是"最新待验证"
+    状态 — 标记为 resolved（已被新分析覆盖）并注明覆盖来源, 避免旧 pending
+    永远滞留、时效提示无限循环。
+
+    Returns number of entries resolved.
+    """
+    try:
+        content = log_path.read_text(encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"resolve_superseded: cannot read log: {e}")
+        return 0
+
+    sections = re.split(r"(\n(?=## ))", content)
+    resolved = 0
+    # 时间戳精度为分钟, 同分钟写入的新旧条目标题完全相同, 无法靠标题区分。
+    # 语义: 最新一条(该股票最后一个匹配 section)就是刚写入的新决策, 保持
+    # pending; 之前所有同股 pending 一律销账 — "新分析覆盖旧观点"。
+    last_match = max(
+        (i for i, sec in enumerate(sections)
+         if sec.startswith("## ") and f"{stock} —" in sec.split("\n")[0]),
+        default=-1,
+    )
+    for i, sec in enumerate(sections):
+        if i == last_match:
+            continue
+        if not sec.startswith("## ") or f"{stock} —" not in sec.split("\n")[0]:
+            continue
+        if "**状态**: pending" in sec:
+            sections[i] = sec.replace(
+                "**状态**: pending",
+                f"**状态**: resolved\n- **复核**: 已被 {new_ts} 的同股新分析覆盖（自动销账）",
+                1,
+            )
+            resolved += 1
+
+    if resolved:
+        try:
+            log_path.write_text("".join(sections), encoding="utf-8")
+            logger.info(f"resolve_superseded: {stock} — {resolved} 条旧决策已销账")
+        except Exception as e:
+            logger.warning(f"resolve_superseded: write failed: {e}")
+            return 0
+    return resolved
+
+
+def resolve_decision_by_task_id(task_id: str, note: str = "人工复核销账") -> bool:
+    """Manually resolve a single pending decision by its task ID.
+
+    Returns True if the entry was found and resolved.
+    """
+    log_path = _ensure_log()
+    try:
+        content = log_path.read_text(encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"resolve_decision_by_task_id: read failed: {e}")
+        return False
+
+    sections = re.split(r"(\n(?=## ))", content)
+    for i, sec in enumerate(sections):
+        if sec.startswith("## ") and f"**任务ID**: {task_id}" in sec:
+            if "**状态**: pending" in sec:
+                ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+                sections[i] = sec.replace(
+                    "**状态**: pending",
+                    f"**状态**: resolved\n- **复核**: {note}（{ts}）",
+                    1,
+                )
+                try:
+                    log_path.write_text("".join(sections), encoding="utf-8")
+                    logger.info(f"Decision resolved by task_id {task_id}")
+                    return True
+                except Exception as e:
+                    logger.warning(f"resolve_decision_by_task_id: write failed: {e}")
+            return False
+    return False
 
 
 async def asave_decision(*args, **kwargs) -> bool:
