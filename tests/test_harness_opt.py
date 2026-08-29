@@ -8,6 +8,7 @@
 - P1-2：工具循环中 LLM 异常 → 无工具兜底沿用既有消息（保留工具结果）
 - P1-3：结构闸门只告警不注入横幅；超长报告仅由 OutputGuard 截断一次
 
+Run: cd . && venv/bin/python -m pytest tests/test_harness_opt.py -v
 """
 import os
 import sys
@@ -17,7 +18,7 @@ from types import SimpleNamespace
 
 os.environ.setdefault("LLM_API_KEY", "test-key")
 os.environ.setdefault("LLM_BASE_URL", "http://localhost:9999")
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+sys.path.insert(0, ".")
 
 import pytest
 

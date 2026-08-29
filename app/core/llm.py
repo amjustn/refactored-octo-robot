@@ -7,6 +7,7 @@ async function-calling support for financial + market data tools.
 import asyncio
 import json
 import logging
+import random
 import re
 from contextvars import ContextVar
 from typing import AsyncGenerator, Awaitable, Callable, Optional
@@ -138,6 +139,11 @@ def _record_usage(usage, model: Optional[str] = None) -> None:
 # Retry config
 _MAX_RETRIES = 3
 _RETRY_DELAYS = [2, 5, 10]  # seconds
+# Jitter spread added to every retry delay: parallel agents that hit the
+# same provider rate-limit all wait the same fixed delay and retry in a
+# lockstep wave, which re-hits the limit together (Cumora COORDINATION.md
+# lesson). A ±jitter spread breaks the wave without changing the schedule.
+_RETRY_JITTER_MAX = 1.5  # seconds
 _MAX_TOOL_ROUNDS = 6  # Max back-and-forth rounds for function calling
 
 # ==================== Tool-fallback (custom model can't function-call) ====================
@@ -178,8 +184,8 @@ async def _retry_async(coro_func, *args, **kwargs):
             last_exc = e
             if not _is_retryable(e) or attempt == _MAX_RETRIES - 1:
                 raise
-            delay = _RETRY_DELAYS[attempt]
-            logger.warning(f"LLM call failed (attempt {attempt+1}/{_MAX_RETRIES}), retrying in {delay}s: {e}")
+            delay = _RETRY_DELAYS[attempt] + random.uniform(0, _RETRY_JITTER_MAX)
+            logger.warning(f"LLM call failed (attempt {attempt+1}/{_MAX_RETRIES}), retrying in {delay:.1f}s: {e}")
             await asyncio.sleep(delay)
     raise last_exc  # type: ignore
 

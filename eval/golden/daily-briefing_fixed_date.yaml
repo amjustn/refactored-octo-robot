@@ -1,0 +1,15 @@
+skill: daily-briefing
+arguments: ""
+mock_date: "2026-07-31"
+expect:
+  sections: ["指数", "板块", "资金", "要闻"]
+  min_chars: 200
+  max_duration_s: 600
+  must_cite: ["指数"]
+  rubric_focus:
+    - 结构完整性
+    - 时效性
+  data_points:
+    # 2026-08-16 修正：原值 3500 为 7 月基线旧值；修复后实测指数 API
+    # (东财 akshare stock_zh_index_spot_em) 上证指数 3,927.18，按实测修正。
+    上证指数: 3927

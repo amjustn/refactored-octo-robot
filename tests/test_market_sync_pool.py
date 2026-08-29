@@ -8,6 +8,7 @@
 - fetch_market_indices 主源超时路径真实触发遥测（打桩，无网络/无真实线程）
 - /api/health/data-sources 响应包含 sync_pool 字段（加性，不破坏既有键）
 
+Run: cd . && venv/bin/python -m pytest tests/test_market_sync_pool.py -v
 """
 import asyncio
 import os
@@ -17,7 +18,7 @@ import time
 
 os.environ.setdefault("LLM_API_KEY", "test-key")
 os.environ.setdefault("LLM_BASE_URL", "http://localhost:9999")
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+sys.path.insert(0, ".")
 
 import pytest
 from fastapi.testclient import TestClient

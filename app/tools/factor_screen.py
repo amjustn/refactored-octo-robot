@@ -84,6 +84,10 @@ def _normalize_score(series: pd.Series, lower_better: bool) -> pd.Series:
     return pct
 
 
+# 2026-08-27: 最近一次筛选是否因时间预算提前截断 (数据不全时调用方可据此提示)
+last_screen_partial: bool = False
+
+
 def screen_stocks(
     stock_codes: Optional[list[str]] = None,
     categories: Optional[list[str]] = None,
@@ -94,6 +98,8 @@ def screen_stocks(
     If stock_codes is None, uses a predefined watchlist of major A-share stocks.
     Returns ranked list of FactorResult objects.
     """
+    global last_screen_partial
+    last_screen_partial = False
     try:
         import baostock as bs
     except ImportError:
@@ -114,9 +120,23 @@ def screen_stocks(
 
     results: list[FactorResult] = []
 
+    # 总时间预算(2026-08-27): 逐股串行查询无超时曾致 180s+ 挂死。
+    # 到点即停: 已算出的股票照常打分返回, 不足 top_n 时标注数据不全而非无限等待。
+    import time as _time
+    _DEADLINE_S = 25.0
+    _start = _time.monotonic()
+    _timeout_hit = False
+
     try:
         bs.login()
         for code in stock_codes[:50]:  # Limit to prevent timeout
+            if _time.monotonic() - _start > _DEADLINE_S:
+                last_screen_partial = True
+                logger.warning(
+                    f"Factor screening time budget ({_DEADLINE_S}s) hit after "
+                    f"{len(results)}/{len(stock_codes[:50])} stocks — returning partial results"
+                )
+                break
             try:
                 factors = _calc_factors(bs, code)
                 if factors:

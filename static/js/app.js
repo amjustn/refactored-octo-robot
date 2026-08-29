@@ -1,3 +1,4 @@
+// 无论本页是手动打开还是新开标签页，统一窗口名，实现「已开则复用、不重复新开」。
 // AI Berkshire Web - Application Logic
 let currentSkill = null;
 let allSkills = [];
@@ -1999,9 +2000,10 @@ function _loadFollowUpHistory() {
     var html = '';
     items.forEach(function(item) {
       var cls = item.type === 'q' ? 'follow-up-q' : 'follow-up-a';
+      var mdCls = item.type === 'a' ? ' markdown-body' : '';
       html += '<div class="follow-up-qa-item ' + cls + '">' +
         '<div class="qa-label">' + escHtml(item.label) + '</div>' +
-        '<div class="qa-content">' + item.html + '</div>' +
+        '<div class="qa-content' + mdCls + '">' + item.html + '</div>' +
         '</div>';
     });
     qa.innerHTML = html;
@@ -2070,8 +2072,9 @@ async function submitFollowUp() {
       throw new Error(err.detail || '请求失败 (' + res.status + ')');
     }
     var data = await res.json();
-    document.getElementById(aId).querySelector('.qa-content').innerHTML =
-      DOMPurify.sanitize(marked.parse(data.answer || '(无回复)'));
+    var answerEl = document.getElementById(aId).querySelector('.qa-content');
+    answerEl.innerHTML = DOMPurify.sanitize(marked.parse(data.answer || '(无回复)'));
+    answerEl.classList.add('markdown-body');
     // Persist Q&A to localStorage
     _saveFollowUpHistory();
     // Attachments are single-shot — clear after a successful send

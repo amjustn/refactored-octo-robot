@@ -70,18 +70,22 @@ FINANCIAL_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "three_scenario",
-            "description": "三情景估值：乐观/中性/悲观，返回目标价和上涨空间",
+            "description": "三情景估值：乐观/中性/悲观，返回目标价和上涨空间。支持三种估值锚，按公司类型动态选择：anchor=PE(默认,传统重资产/制造/消费,用eps+multiples)、anchor=PB(银行/保险/周期股,用bvps+multiples)、anchor=PS(轻资产/互联网/软件,用revenue_per_share+multiples)。目标价=未来基准值(1+增长率)×倍数",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "price": {"type": "number", "description": "当前股价"},
-                    "eps": {"type": "number", "description": "当前每股收益"},
                     "shares_100m": {"type": "number", "description": "总股本（亿股）"},
                     "growth_rates": {"type": "array", "items": {"type": "number"}, "description": "三个情景的增长率"},
-                    "pe_multiples": {"type": "array", "items": {"type": "number"}, "description": "三个情景的PE倍数"},
+                    "anchor": {"type": "string", "enum": ["PE", "PB", "PS"], "description": "估值锚：PE(重资产/消费)、PB(银行/保险/周期)、PS(轻资产/互联网),默认PE"},
+                    "eps": {"type": "number", "description": "当前每股收益(anchor=PE时必填)"},
+                    "bvps": {"type": "number", "description": "当前每股净资产(anchor=PB时必填)"},
+                    "revenue_per_share": {"type": "number", "description": "当前每股营收(anchor=PS时必填,=营收/股本)"},
+                    "multiples": {"type": "array", "items": {"type": "number"}, "description": "三个情景的估值倍数(PE倍数/PB倍数/PS倍数,与anchor对应)"},
+                    "pe_multiples": {"type": "array", "items": {"type": "number"}, "description": "兼容旧参数:三个情景的PE倍数,等价于anchor=PE时传multiples"},
                     "currency": {"type": "string", "default": "CNY"},
                 },
-                "required": ["price", "eps", "shares_100m", "growth_rates", "pe_multiples"],
+                "required": ["price", "shares_100m", "growth_rates"],
             },
         },
     },
@@ -292,6 +296,9 @@ BROKER_TOOL_SCHEMAS = [
 ]
 
 
+# ==================== QuantTrader (QT) Quant Signal Tool Schemas ====================
+
+
 # All tools available to agents
 ALL_TOOL_SCHEMAS = FINANCIAL_TOOL_SCHEMAS + DATA_TOOL_SCHEMAS + WEB_TOOL_SCHEMAS + INDUSTRY_TOOL_SCHEMAS + BROKER_TOOL_SCHEMAS
 
@@ -329,6 +336,7 @@ async def _execute_tool(tool_name: str, arguments: dict) -> str:
             return json.dumps({"error": str(e)}, ensure_ascii=False)
 
     # --- Market data tools (async) ---
+
     # --- Industry chain tools (async) ---
     from ..tools.industry_sources import list_industry_sources, search_industry_chain
     from ..tools.market_data import (

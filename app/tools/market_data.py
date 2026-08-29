@@ -118,9 +118,24 @@ COMPANY_NAME_MAP = {
     "五粮液": "000858.SZ",
     "宁德时代": "300750.SZ",
     "比亚迪A股": "002594.SZ",
-    "中国平安": "601318.SH", "平安": "601318.SH",
-    "招商银行": "600036.SH", "招行": "600036.SH",
+    "中国平安": "601318.SH", "平安集团": "601318.SH", "平安": "601318.SH",
+    "平安银行": "000001.SZ",
+    "招商银行": "600036.SH", "招行": "600036.SH", "招商银行A股": "600036.SH",
     "工商银行": "601398.SH", "工行": "601398.SH",
+    "农业银行": "601288.SH", "农行": "601288.SH",
+    "中国银行": "601988.SH", "中行": "601988.SH",
+    "交通银行": "601328.SH", "交行": "601328.SH",
+    "邮储银行": "601658.SH",
+    "兴业银行": "601166.SH",
+    "浦发银行": "600000.SH",
+    "民生银行": "600016.SH",
+    "中信银行": "601998.SH",
+    "光大银行": "601818.SH",
+    "华夏银行": "600015.SH",
+    "宁波银行": "002142.SZ",
+    "江苏银行": "600919.SH",
+    "杭州银行": "600926.SH",
+    "成都银行": "601838.SH",
     "建设银行": "601939.SH", "建行": "601939.SH",
     "中国石油": "601857.SH", "中石油": "601857.SH",
     "中国石化": "600028.SH", "中石化": "600028.SH",
@@ -331,7 +346,15 @@ async def _run_sync(func, *args, **kwargs):
 # ==================== A-Share Data (via akshare) ====================
 
 async def _fetch_a_share_price(symbol: str) -> dict:
-    """Fetch A-share real-time price via akshare (HTTP fallbacks downstream)."""
+    """Fetch A-share real-time price -- Dashboard API first, then akshare."""
+    # Try Dashboard rotator first (sina/tencent/eastmoney cycling)
+    try:
+        if dash_data:
+            return dash_data
+    except Exception:
+        pass
+
+    # Fall back to akshare
     code = _normalize_a_share_code(symbol)
     bare_code = code.split('.')[0]
 

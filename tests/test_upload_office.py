@@ -2,7 +2,7 @@
 import os, sys
 os.environ.setdefault("LLM_API_KEY", "test-key")
 os.environ.setdefault("LLM_BASE_URL", "http://localhost:9999")
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+sys.path.insert(0, ".")
 
 from io import BytesIO
 
@@ -140,11 +140,12 @@ def test_scanned_pdf_without_vision_model_errors():
     assert "text" not in f
 
 
-def test_text_pdf_still_uses_fitz_extraction():
+def test_text_pdf_still_extracts_text():
+    """文本PDF 主路径 markitdown(2026-08+), fitz 为兜底 — 两者都算提取成功。"""
     resp = _upload([("files", ("report.pdf", _make_text_pdf(), "application/pdf"))])
     assert resp.status_code == 200
     f = resp.json()["files"][0]
-    assert f["method"] == "pdf-extract"
+    assert f["method"] in ("pdf-markitdown", "pdf-extract")
     assert "Berkshire annual report" in f["text"]
     assert "error" not in f
 

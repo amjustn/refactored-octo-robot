@@ -4,6 +4,7 @@
 Tests market data, knowledge updater, context injection,
 orchestrator integration, and all existing v2.0 functionality.
 
+Run: cd . && venv/bin/python -m pytest tests/test_all.py -v
 """
 import sys
 import os
@@ -13,7 +14,7 @@ import tempfile
 from pathlib import Path
 from datetime import datetime, timedelta
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+sys.path.insert(0, '.')
 
 import pytest
 

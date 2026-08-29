@@ -9,6 +9,7 @@
    而非个股研报版 TEAM_LEAD_PROMPT；
 3. 回归：investment-team 的综合调用仍使用 TEAM_LEAD_PROMPT。
 
+Run: cd . && venv/bin/python -m pytest tests/test_synthesis_prompts.py -v
 """
 import os
 import sys
@@ -16,7 +17,7 @@ import asyncio
 
 os.environ.setdefault("LLM_API_KEY", "test-key")
 os.environ.setdefault("LLM_BASE_URL", "http://localhost:9999")
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+sys.path.insert(0, ".")
 
 import pytest
 

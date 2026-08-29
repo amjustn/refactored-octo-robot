@@ -141,30 +141,66 @@ def cross_validate(field: str, values: dict, unit: str = "") -> dict:
     }
 
 
-def three_scenario(price: float, eps: float, shares_100m: float,
-                   growth_rates: list, pe_multiples: list,
+def three_scenario(price: float, shares_100m: float, growth_rates: list,
+                   multiples: Optional[list] = None, anchor: str = "PE",
+                   eps: Optional[float] = None, bvps: Optional[float] = None,
+                   revenue_per_share: Optional[float] = None, pe_multiples: Optional[list] = None,
                    currency: str = "CNY") -> dict:
-    """Calculate target prices under optimistic/neutral/pessimistic scenarios."""
+    """三情景估值: 乐观/中性/悲观, 返回目标价和上涨空间。
+
+    支持三种估值锚(按公司类型动态选择, 与 financial-analyst 的
+    "估值指标行业适配表"对应):
+      anchor="PE" — 目标价 = 未来EPS × PE倍数(传统重资产/制造/消费)
+      anchor="PB" — 目标价 = 未来每股净资产(BVPS) × PB倍数(银行/保险/周期股)
+      anchor="PS" — 目标价 = 未来每股营收 × PS倍数(轻资产/互联网/软件)
+
+    向后兼容: 旧调用(eps + pe_multiples 风格)自动识别为 PE 锚。
+    """
+    # 兼容旧调用: 传了 pe_multiples 即按 PE 锚处理
+    if pe_multiples is not None:
+        multiples = pe_multiples
+        anchor = "PE"
+    if multiples is None:
+        return {"function": "three-scenario", "error": "缺少 multiples(估值倍数数组)"}
+
+    anchor = (anchor or "PE").upper()
+    if anchor == "PE":
+        if eps is None:
+            return {"function": "three-scenario", "error": "anchor=PE 需要提供 eps"}
+        base_name, base = "eps", Decimal(str(eps))
+        multiple_name = "pe_multiple"
+    elif anchor == "PB":
+        if bvps is None:
+            return {"function": "three-scenario", "error": "anchor=PB 需要提供 bvps(每股净资产)"}
+        base_name, base = "bvps", Decimal(str(bvps))
+        multiple_name = "pb_multiple"
+    elif anchor == "PS":
+        if revenue_per_share is None:
+            return {"function": "three-scenario", "error": "anchor=PS 需要提供 revenue_per_share(每股营收)"}
+        base_name, base = "revenue_per_share", Decimal(str(revenue_per_share))
+        multiple_name = "ps_multiple"
+    else:
+        return {"function": "three-scenario", "error": f"未知 anchor: {anchor}(可选 PE/PB/PS)"}
+
     p = Decimal(str(price))
-    e = Decimal(str(eps))
     sh = Decimal(str(shares_100m))
 
     labels = ["optimistic", "neutral", "pessimistic"]
     scenarios = []
 
-    for i, (growth, pe) in enumerate(zip(growth_rates, pe_multiples)):
+    for i, (growth, mult) in enumerate(zip(growth_rates, multiples)):
         if i >= 3:
             break
-        future_eps = e * (1 + Decimal(str(growth)))
-        target_price = future_eps * Decimal(str(pe))
+        future_base = base * (1 + Decimal(str(growth)))
+        target_price = future_base * Decimal(str(mult))
         upside = ((target_price - p) / p * 100) if p != 0 else Decimal('0')
         market_cap = target_price * sh
 
         scenarios.append({
             "scenario": labels[i] if i < len(labels) else f"scenario_{i}",
             "growth_rate": float(growth),
-            "pe_multiple": float(pe),
-            "future_eps": round(float(future_eps), 2),
+            multiple_name: float(mult),
+            f"future_{base_name}": round(float(future_base), 2),
             "target_price": round(float(target_price), 2),
             "upside_pct": round(float(upside), 1),
             "market_cap": round(float(market_cap), 0),
@@ -172,8 +208,9 @@ def three_scenario(price: float, eps: float, shares_100m: float,
 
     return {
         "function": "three-scenario",
+        "anchor": anchor,
         "current_price": float(p),
-        "current_eps": float(e),
+        f"current_{base_name}": float(base),
         "shares_100m": float(sh),
         "currency": currency,
         "scenarios": scenarios

@@ -9,6 +9,7 @@
   4. registry 中 daily-briefing 声明 tools_enabled
   5. harness run() 端到端：fatal 命中 → 任务 failed + partial 报告落盘
 
+Run: cd . && venv/bin/python -m pytest tests/test_dsml_leak_fix.py -v
 """
 from __future__ import annotations
 
@@ -278,10 +279,10 @@ class TestRegistryToolsEnabled:
         assert skill.get("is_multi_agent") is False
 
     def test_no_other_skill_flagged(self):
-        """扫描结论：仅 daily-briefing 一个单Agent技能在提示词中明确要求调工具。"""
+        """tools_enabled 白名单：broker-reports(2026-08-18 function-calling) + daily-briefing。"""
         from app.skills import list_skills
         flagged = [s["name"] for s in list_skills() if s.get("tools_enabled")]
-        assert flagged == ["daily-briefing"]
+        assert sorted(flagged) == ["broker-reports", "daily-briefing"]
 
 
 # ============================================================

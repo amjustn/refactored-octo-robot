@@ -219,6 +219,15 @@ DEFAULT_SKILL_KNOWLEDGE = {
         "update_notes": "关注货币政策框架演进(如利率走廊与买卖国债操作)与高频数据口径变化",
         "last_updated": "default_bootstrap",
     },
+    "broker-reports": {
+        "skill_name": "broker-reports",
+        "display_name": "券商研报",
+        "latest_frameworks": "券商研报分析三步式：1)评级分布与一致预期透视(近一年评级买卖中性占比+次年EPS/PE中位数+目标价区间) 2)单篇研报正文精读(投资逻辑+关键假设+目标价推导链条) 3)机构观点与独立判断对照(标出共识处与分歧处,分歧即超额收益来源)",
+        "key_criteria": "凡使用研报数据必须在引用处标注来源(来源:机构名 日期 研报)；区分评级调整与盈利预测调整的不同信号；一致预期仅作锚点不作结论",
+        "data_sources": "研报列表/正文via fetch_broker_reports工具(东方财富研报中心)，行情cross-check via get_stock_price",
+        "update_notes": "关注研报评级体系变化(如加排'确信'档)与东方财富接口字段变更; 未标注来源的研报数据不得出现在报告中",
+        "last_updated": "default_bootstrap",
+    },
 }
 
 

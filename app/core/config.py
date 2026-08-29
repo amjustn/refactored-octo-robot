@@ -63,7 +63,6 @@ GOAL_PARSE_CACHE_TTL = int(os.getenv("GOAL_PARSE_CACHE_TTL", "86400"))  # 24 hou
 MARKET_SYNC_WORKERS = int(os.getenv("MARKET_SYNC_WORKERS", "6"))
 
 
-
 # Knowledge Base Configuration
 KNOWLEDGE_REFRESH_INTERVAL = int(os.getenv("KNOWLEDGE_REFRESH_INTERVAL", "604800"))  # 7 days
 

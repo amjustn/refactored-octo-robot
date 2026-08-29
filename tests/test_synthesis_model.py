@@ -8,6 +8,7 @@
 3. LLMConfig.to_synthesis_config_dict 的单元行为；
 4. main._validate_llm_config 对 synthesis_model 的清洗与白名单校验。
 
+Run: cd . && venv/bin/python -m pytest tests/test_synthesis_model.py -v
 """
 import os
 import sys
@@ -15,7 +16,7 @@ import asyncio
 
 os.environ.setdefault("LLM_API_KEY", "test-key")
 os.environ.setdefault("LLM_BASE_URL", "http://localhost:9999")
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+sys.path.insert(0, ".")
 
 import pytest
 

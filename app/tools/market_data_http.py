@@ -59,7 +59,7 @@ async def close_client():
 #  A-Share Real-time Price — Dashboard API (multi-source rotator, PRIMARY)
 # ═══════════════════════════════════════════════════════
 
-# ═══════════════════════════════════════════════════════
+
 
 async def fetch_a_share_price_tencent(symbol: str) -> Optional[dict]:
     """Fetch A-share real-time price via Tencent Finance HTTP API.

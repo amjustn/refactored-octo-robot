@@ -389,40 +389,42 @@ async def build_full_context(arguments: str = "", skill_name: str = "", goal_hin
                     symbol = _resolve_company_name(_hint_company)
 
         if symbol is None:
-            # First, try resolving Chinese company names (腾讯, 茅台, 拼多多, etc.)
-            resolved = _resolve_company_name(arguments.strip())
-            if resolved:
-                symbol = resolved
-            else:
-                # Look for patterns like: 600519, AAPL, 0700.HK, 002555.SZ
-                # Also try case-insensitive US tickers
-                # Exclude common false positives: Q1-Q4, AI, PE, PB, ROE, ROI, etc.
-                _FALSE_POSITIVES = {
-                    "Q1", "Q2", "Q3", "Q4", "AI", "PE", "PB", "ROE", "ROI",
-                    "EPS", "CEO", "CFO", "CTO", "IPO", "SPAC", "ETF", "API",
-                    "GDP", "CPI", "PPI", "EBIT", "FCF", "DCA", "NAV", "AUM",
-                    "YTD", "MTD", "QTD", "H1", "H2", "YOY", "MOM",
-                    "IT", "HR", "PR", "US", "UK", "EU", "JP", "KR",
-                    "URL", "PDF", "CSV", "HTML", "JSON", "XML",
-                    # Single-letter false positives (A股, B股, H股, etc.)
-                    "A", "B", "H", "T", "F", "C", "S", "P", "V", "D", "E",
-                    "I", "K", "M", "N", "R", "U", "W", "X", "Y", "Z", "G", "L", "O", "J", "Q",
-                    # Common financial abbreviations that could be tickers
-                    "EBITDA", "CAPEX", "OPEX", "MARGIN", "CASH", "DEBT", "BOOK",
-                    "SALE", "ASSET", "EBIT", "REVENUE", "PROFIT", "LOSS", "COST",
-                    "BOOK", "DEEP", "GOOD", "REAL", "TICK", "BOND", "FUND",
-                }
-                symbol_match = re.search(
-                    r'\b([A-Za-z]{1,6}(?:\.HK)?|\d{6}(?:\.SH|\.SZ|\.HK)?)\b',
-                    arguments
-                )
-                if symbol_match:
-                    candidate = symbol_match.group(1).upper()
-                    # Skip common false positives (only for short purely-alpha codes)
-                    if candidate in _FALSE_POSITIVES and not re.match(r'^\d{6}', candidate):
-                        pass  # Don't use this as a symbol
-                    else:
-                        symbol = candidate
+            # 优先级: 显式股票代码(最强证据) > 公司名模糊匹配(最弱证据)
+            # 2026-08-27 修复: 原顺序名称匹配在前, "分析平安银行(000001)"因映射表
+            # 无"平安银行"全称而子串命中"平安"→601318(中国平安), 行情/新闻/研报
+            # 全部抓错标的。数字代码是用户显式给出的最强信号, 必须最先消费。
+            _FALSE_POSITIVES = {
+                "Q1", "Q2", "Q3", "Q4", "AI", "PE", "PB", "ROE", "ROI",
+                "EPS", "CEO", "CFO", "CTO", "IPO", "SPAC", "ETF", "API",
+                "GDP", "CPI", "PPI", "EBIT", "FCF", "DCA", "NAV", "AUM",
+                "YTD", "MTD", "QTD", "H1", "H2", "YOY", "MOM",
+                "IT", "HR", "PR", "US", "UK", "EU", "JP", "KR",
+                "URL", "PDF", "CSV", "HTML", "JSON", "XML",
+                # Single-letter false positives (A股, B股, H股, etc.)
+                "A", "B", "H", "T", "F", "C", "S", "P", "V", "D", "E",
+                "I", "K", "M", "N", "R", "U", "W", "X", "Y", "Z", "G", "L", "O", "J", "Q",
+                # Common financial abbreviations that could be tickers
+                "EBITDA", "CAPEX", "OPEX", "MARGIN", "CASH", "DEBT", "BOOK",
+                "SALE", "ASSET", "EBIT", "REVENUE", "PROFIT", "LOSS", "COST",
+                "BOOK", "DEEP", "GOOD", "REAL", "TICK", "BOND", "FUND",
+            }
+            symbol_match = re.search(
+                r'\b(\d{6}(?:\.SH|\.SZ|\.HK)?|[A-Za-z]{2,6}(?:\.HK)?)\b',
+                arguments
+            )
+            if symbol_match:
+                candidate = symbol_match.group(1).upper()
+                # Skip common false positives (only for short purely-alpha codes)
+                if candidate in _FALSE_POSITIVES and not re.match(r'^\d{6}', candidate):
+                    pass  # Don't use this as a symbol
+                else:
+                    symbol = candidate
+
+            if symbol is None:
+                # Fallback: resolve Chinese company names (腾讯, 茅台, 平安银行, etc.)
+                resolved = _resolve_company_name(arguments.strip())
+                if resolved:
+                    symbol = resolved
 
         _md = (fetch_market_indices, get_stock_price, fetch_company_news)
 

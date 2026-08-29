@@ -6,6 +6,7 @@ Covers every component in app/harness/:
   spec / events / prompts / guards / context / persist /
   decision_log / tools / runner / __init__ (run/cancel/resume)
 
+Run: cd . && venv/bin/python -m pytest tests/test_harness.py -v -x
 """
 from __future__ import annotations
 
@@ -539,8 +540,30 @@ class TestRunner:
         spec = _make_spec("investment-team")
         report = asyncio.run(AgentRunner(task_id=spec.task_id).run(spec))
         assert "Business OK" in report
-        assert "[错误]" not in report
         assert "3/4 Agent" in report
+        # Failure attribution now lands in the report itself, so the error
+        # text is expected in the "部分 Agent 执行失败" section (not silently
+        # dropped from the deliverable).
+        assert "部分 Agent 执行失败" in report
+        assert "financial-analyst" in report
+        assert "LLM调用失败" in report
+
+    def test_debate_failure_not_injected(self, mock_llm_harness, tmp_repo, monkeypatch):
+        """A failed peer debate must never reach the synthesis prompt as if it
+        were a real review — it stays in logs/progress only."""
+        import app.harness.runner as runner_mod
+        from app.harness.runner import AgentRunner
+
+        async def failing_debate(system, user, llm_config=None, **kw):
+            if "交叉评审" in (system or "") + (user or ""):
+                raise RuntimeError("debate API down")
+            return "complete output"
+
+        monkeypatch.setattr(runner_mod, "chat_complete", failing_debate)
+        spec = _make_spec("investment-team")
+        report = asyncio.run(AgentRunner(task_id=spec.task_id).run(spec))
+        assert "评审失败" not in report
+        assert "synthesized report content" in report
 
     def test_all_agents_fail(self, mock_llm_harness, tmp_repo):
         from app.harness.runner import AgentRunner
@@ -564,6 +587,46 @@ class TestRunner:
         # Non-DSML text passes through unchanged
         assert "conclusion" in result
         assert "agent name" in result
+
+
+class TestLLMRetry:
+    """Retry-with-jitter (Cumora lesson): parallel agents that hit the same
+    rate-limit must not retry in a lockstep wave — the fixed delay gets a
+    ±jitter spread so retries stagger instead of re-hitting the limit."""
+
+    def test_retry_jitter_spreads_delay(self, monkeypatch):
+        import app.core.llm as llm_mod
+        calls = {"n": 0}
+        sleeps = []
+
+        async def fake_sleep(delay):
+            sleeps.append(delay)
+
+        async def flaky():
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise RuntimeError("429 rate limit")
+            return "ok"
+
+        monkeypatch.setattr(llm_mod.random, "uniform", lambda a, b: 0.5)
+        monkeypatch.setattr(llm_mod.asyncio, "sleep", fake_sleep)
+        out = asyncio.run(llm_mod._retry_async(flaky))
+        assert out == "ok"
+        assert calls["n"] == 3
+        # Two retries: base [2, 5] + jitter 0.5 each
+        assert sleeps == [2.5, 5.5]
+
+    def test_retry_non_retryable_raises_immediately(self, monkeypatch):
+        import app.core.llm as llm_mod
+        calls = {"n": 0}
+
+        async def bad():
+            calls["n"] += 1
+            raise ValueError("bad request 400")
+
+        with pytest.raises(ValueError):
+            asyncio.run(llm_mod._retry_async(bad))
+        assert calls["n"] == 1
 
 
 # ============================================================

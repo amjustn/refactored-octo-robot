@@ -7,10 +7,11 @@
 3. 7 个新 Agent 角色在 AGENT_ROLE_PROMPTS 与 TOOL_ENABLED_AGENTS 中均可解析；
 4. TaskSpec.build 对每个技能推导出 strategy="multi" 与正确的 Agent 名单。
 
+Run: cd . && venv/bin/python -m pytest tests/test_macro_skills.py -v
 """
-import os, sys
+import sys
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+sys.path.insert(0, ".")
 
 import pytest
 

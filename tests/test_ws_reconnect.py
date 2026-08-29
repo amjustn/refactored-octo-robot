@@ -8,6 +8,7 @@
 - watch_task_id 指向已完成任务：合成 complete 帧，带回存档报告
 - /api/task/{id}：已完成任务带回 report（截断至 200k）、arguments、duration
 
+Run: cd . && venv/bin/python -m pytest tests/test_ws_reconnect.py -v
 """
 import os
 import sys
@@ -15,7 +16,7 @@ import json
 
 os.environ.setdefault("LLM_API_KEY", "test-key")
 os.environ.setdefault("LLM_BASE_URL", "http://localhost:9999")
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+sys.path.insert(0, ".")
 
 import pytest
 from fastapi.testclient import TestClient

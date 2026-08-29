@@ -7,6 +7,7 @@
 - run() 摘要管线：chat_complete 成功 → meta 用 LLM 摘要；
   LLM 异常 → 回退到确定性提取（首个标题 + 首段），报告保存不受影响
 
+Run: cd . && venv/bin/python -m pytest tests/test_report_summary.py -v
 """
 import os
 import sys
@@ -15,7 +16,7 @@ import asyncio
 
 os.environ.setdefault("LLM_API_KEY", "test-key")
 os.environ.setdefault("LLM_BASE_URL", "http://localhost:9999")
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+sys.path.insert(0, ".")
 
 import pytest
 from fastapi.testclient import TestClient

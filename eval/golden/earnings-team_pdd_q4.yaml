@@ -1,0 +1,13 @@
+skill: earnings-team
+arguments: "拼多多 2025Q4"
+mock_date: "2026-07-31"
+expect:
+  sections: ["营收", "利润", "现金流"]
+  min_chars: 400
+  max_duration_s: 600
+  must_cite: ["营收", "利润"]
+  rubric_focus:
+    - 管理层语气解读
+    - 承诺追踪
+  data_points:
+    营收: 1240
