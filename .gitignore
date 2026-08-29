@@ -14,3 +14,4 @@ _archive/
 *.service
 *.bak_*
 *.dbf
+*.zip
