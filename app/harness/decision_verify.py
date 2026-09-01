@@ -399,6 +399,12 @@ async def verify_pending_decisions(limit: int = 50) -> dict:
             summary["verified"] += 1
             logger.info(f"Verified {e.get('stock')}: {status} (record={record_price}, now={price:.2f})")
         else:
+            # 待验证也刷新最新价 — 复盘注入需要"记录价→当前价(涨跌幅)",
+            # 否则 LLM 看不到上次判断后来涨跌了多少。
+            update_entry_fields(
+                e.get("task_id") or "",
+                {"最新价": f"{price:.2f}"},
+            )
             summary["unchanged"] += 1
 
     return summary
