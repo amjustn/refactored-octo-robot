@@ -48,6 +48,8 @@ def save_decision(
     skill_name: str = "",
     task_id: str = "",
     company_hint: str = "",
+    stock_code: str = "",
+    record_price: Optional[float] = None,
 ) -> bool:
     """Extract decision from a completed report and append to decision log.
 
@@ -59,7 +61,9 @@ def save_decision(
     heuristic extraction from arguments.  When no credible name (>= 2
     chars after cleaning) can be determined, the entry is skipped entirely.
 
-    Returns True if a decision was extracted and saved.
+    stock_code / record_price: P4-验证闭环(2026-09-01). 代码与决策时点价格,
+    由后台任务对照真实行情验证结论对错。可缺省 — 验证任务会尝试回填,
+    回填失败则跳过该条目(不阻塞保存)。
     """
     # Try to extract decision from report
     decision = _extract_decision(report, arguments)
@@ -81,11 +85,14 @@ def save_decision(
         entry = (
             f"\n## {stock} — {ts}\n\n"
             f"- **技能**: {_one_line(skill_name) or '未指定'}\n"
+            f"- **代码**: {_one_line(stock_code) or '未指定'}\n"
+            f"- **记录价**: {f'{record_price:.2f}' if record_price else '未指定'}\n"
             f"- **结论**: {_one_line(decision['conclusion'])}\n"
             f"- **置信度**: {_one_line(decision['confidence'])}\n"
             f"- **关键假设**: {_one_line(decision['assumptions'])}\n"
             f"- **目标价/信号**: {_one_line(decision.get('target', '未指定'))}\n"
             f"- **状态**: pending\n"
+            f"- **验证**: 待验证\n"
             f"- **任务ID**: {_one_line(task_id)}\n"
             f"\n---\n"
         )
@@ -229,16 +236,73 @@ def list_decisions(max_entries: int = 100) -> list:
             "stock": stock.strip(),
             "time": ts.strip(),
             "skill": _field("技能"),
+            "code": _field("代码"),
+            "record_price": _field("记录价"),
+            "latest_price": _field("最新价"),
             "conclusion": _field("结论"),
             "confidence": _field("置信度"),
             "assumptions": _field("关键假设"),
             "target": _field("目标价/信号"),
             "status": _field("状态") or "pending",
+            "verify": _field("验证") or "待验证",
             "task_id": _field("任务ID"),
         })
 
     entries.reverse()  # file is append-only; newest last → newest first
     return entries[:max_entries]
+
+
+def update_entry_fields(task_id: str, fields: dict) -> bool:
+    """Update markdown fields of one decision-log entry by task ID.
+
+    Fields is {field_label: value} — label is the Chinese bold-label text
+    (e.g. "代码", "记录价", "验证", "上次验证").  Existing field lines are
+    replaced in place; missing field lines are inserted after the title.
+    Returns True if the entry was found and updated.
+    """
+    if not task_id:
+        return False
+    log_path = _ensure_log()
+    try:
+        content = log_path.read_text(encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"update_entry_fields: read failed: {e}")
+        return False
+
+    sections = re.split(r"(\n(?=## ))", content)
+    found = False
+    for i, sec in enumerate(sections):
+        if not sec.startswith("## "):
+            continue
+        # Only touch matching entries — 同一任务可能产生多条同名决策,
+        # 全部更新(不 break), 避免第二条漏更新。
+        lines = sec.split("\n")
+        matched = any(f"**任务ID**: {task_id}" in ln for ln in lines[:12])
+        if not matched:
+            continue
+        found = True
+        for label, value in fields.items():
+            new_line = f"- **{label}**: {value}"
+            replaced = False
+            for j, ln in enumerate(lines):
+                m = re.match(rf"^- \*\*{re.escape(label)}\*\*[：:]", ln.strip())
+                if m:
+                    lines[j] = new_line
+                    replaced = True
+                    break
+            if not replaced:
+                # Insert after the title line (index 0)
+                lines.insert(1, new_line)
+        sections[i] = "\n".join(lines)
+
+    if found:
+        try:
+            log_path.write_text("".join(sections), encoding="utf-8")
+            logger.info(f"update_entry_fields: task {task_id} → {fields}")
+        except Exception as e:
+            logger.warning(f"update_entry_fields: write failed: {e}")
+            return False
+    return found
 
 
 def load_decisions(arguments: str, max_entries: int = 5) -> str:
@@ -281,6 +345,9 @@ def load_decisions(arguments: str, max_entries: int = 5) -> str:
                 lines = section.strip().split("\n")
                 # Keep it compact: title + first 6 detail lines
                 compact = "\n".join(lines[:8])
+                # task_id 单独提取 — 字段增多后任务ID可能超出前8行截断
+                m_tid = re.search(r"\*\*任务ID\*\*: *(\w+)", section)
+                tid = m_tid.group(1) if m_tid else ""
 
                 # P3-闭环(2026-08-27): 超过14天仍pending的旧决策,
                 # 注入时明确标注"待你复核" — 防止旧观点被当作已验证结论沿用。
@@ -295,27 +362,48 @@ def load_decisions(arguments: str, max_entries: int = 5) -> str:
                         + f"\n- **⚠ 时效提示**: 本条决策记录于 {int(age)} 天前且尚未复核，"
                         "请先验证其关键假设是否仍然成立，再决定是否参考"
                     )
-                relevant.append(compact)
+                relevant.append((compact, tid))
 
         if not relevant:
             return ""
 
-        # Return most recent first, limited to max_entries
-        stale_note = (
-            f"（其中 {stale_pending} 条超过两周未复核——优先验证时效性）\n\n"
-            if stale_pending
-            else "\n\n"
-        )
-        context = (
-            "\n## 📋 历史决策记录（来自 decision-log.md）\n\n"
-            "你之前分析过这只股票，以下是历史结论。请参考这些记录，"
-            "验证之前的关键假设是否仍然成立，并据此给出更新后的分析。"
-            + stale_note
-        )
-        for entry in relevant[-max_entries:]:
-            context += entry + "\n"
+        # P4-验证闭环(2026-09-01): 注入带复盘的条目 — 上次结论 + 记录价
+        # + 最新价 + 涨跌幅 + 验证状态, 让 LLM 看到上次判断后来对不对,
+        # 而不是永远只见 pending 裸文本。
+        context = "\n## 📋 历史决策复盘（来自 decision-log.md）\n\n" \
+            "你之前分析过这只股票。以下是历史结论与后来走势的对照，请先复盘" \
+            "上次判断的对错，再给出更新分析：\n"
+        parsed_entries = list_decisions(max_entries=1000)
+        by_task = {pe.get("task_id"): pe for pe in parsed_entries}
+        matched = 0
+        for compact, tid in relevant[-max_entries:]:
+            pe = by_task.get(tid)
+            if not pe:
+                continue  # 结构化解析不到则跳过(不混入原始文本)
+            ts = pe.get("time") or ""
+            context += f"\n- **{ts}**"
+            if pe.get("code") and pe.get("code") != "未指定":
+                context += f"（{pe['code']}）"
+            context += f"\n  上次结论: {_one_line(pe.get('conclusion') or '')[:120]}"
+            rp = pe.get("record_price")
+            lp = pe.get("latest_price")
+            if rp and rp != "未指定":
+                context += f"\n  记录价: {rp}"
+            if lp and lp != "未指定":
+                try:
+                    ret = (float(lp) - float(rp)) / float(rp) * 100
+                    context += f"\n  最新价: {lp}（{ret:+.1f}%）"
+                except (TypeError, ValueError):
+                    context += f"\n  最新价: {lp}"
+            v = pe.get("verify") or "待验证"
+            context += f"\n  验证: {v}"
+            matched += 1
+        if not matched:
+            return ""
+        context += "\n\n请基于以上复盘更新你的分析，特别关注验证状态为" \
+            "已证伪/已过期的历史结论——它们意味着上次判断被市场否定或失效。\n"
 
-        logger.info(f"Loaded {len(relevant[-max_entries:])} past decisions for '{stock}'")
+        logger.info(f"Loaded {matched} past decisions for '{stock}'")
         return context
 
     except Exception as e:
@@ -350,17 +438,35 @@ def _extract_stock_name(arguments: str) -> str:
                 arg = arg[len(pre):].lstrip("，,。. 、的")
                 changed = True
 
-    # Try to extract first meaningful name segment
-    # Common patterns: "腾讯 2025Q4", "拼多多", "茅台 分析", "0700.HK"
-    # Remove common suffixes
-    for suffix in ["的分析", "分析", "研究", "财报", "2025", "2026", "Q1", "Q2", "Q3", "Q4"]:
+    # 剥离尾部疑问/分析短语,取最早出现的后缀截断。
+    # 覆盖 "的投资价值/基本面/现在还能买吗/怎么样" 等带"的"与不带"的"形态,
+    # 避免 "贵州茅台的投资价值"、"拼多多的基本面" 整句被当作股票名。
+    _SUFFIXES = [
+        "的投资价值", "投资价值", "的基本面", "基本面", "现在还能买吗", "还能买吗",
+        "值得买吗", "可以买吗", "能不能买", "值得入手吗", "你觉得怎么样", "怎么样", "怎么看",
+        "的走势", "走势", "的前景", "前景", "的估值", "估值", "的股价", "股价",
+        "的目标价", "目标价", "如何", "看下",
+        "的分析", "分析", "研究", "财报", "2026", "2025", "Q1", "Q2", "Q3", "Q4",
+    ]
+    cut = len(arg)
+    for suffix in _SUFFIXES:
         idx = arg.find(suffix)
-        if idx > 0:
-            arg = arg[:idx].strip()
+        if 0 < idx < cut:
+            cut = idx
+    if cut < len(arg):
+        arg = arg[:cut].strip()
+
+    # 纯数字股票代码: "601318你觉得怎么样" → "601318"(数字开头且后接中文问句/动词)
+    m = re.match(r"^(\d{4,6})", arg)
+    if m and len(arg) > len(m.group(1)) and re.search(r"[买卖看看评议走势估]", arg[len(m.group(1)):]):
+        return m.group(1)
 
     # If it's a stock code (digits + exchange suffix), keep as-is
     if re.match(r"^\d{4,6}\.[A-Z]{2,3}$", arg):
         return arg
+
+    # 空格截断: "中际旭创 300308" → "中际旭创"; "Tencent 2025Q4" → "Tencent"
+    arg = re.split(r"\s+", arg)[0].strip()
 
     # Otherwise take first 15 chars as company name
     return arg[:15].rstrip("，,。. ")

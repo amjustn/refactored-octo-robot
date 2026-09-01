@@ -261,6 +261,25 @@ async def _auto_update_skill_knowledge():
         await asyncio.sleep(7 * 86400)
 
 
+async def _verify_decision_log():
+    """P4-验证闭环(2026-09-01): 每6小时对照真实行情验证决策日志。
+
+    先回填缺价的条目, 再判定 pending 决策 — 让闭环自动运转,
+    不依赖人工触发。失败不静默: 每次跑完记 summary。
+    """
+    from .harness.decision_verify import backfill_missing_prices, verify_pending_decisions
+    while True:
+        try:
+            b = await backfill_missing_prices(limit=30)
+            v = await verify_pending_decisions(limit=30)
+            logger.info(
+                f"Decision-log verify cycle: backfill={b} verify={v}"
+            )
+        except Exception as e:
+            logger.error(f"Decision-log verify cycle failed: {e}")
+        await asyncio.sleep(6 * 3600)
+
+
 async def _seed_circuit_breakers():
     """启动健康检查 → ToolGateway 熔断器初始态（东财中断/雅虎 403 → 初始摘除）。"""
     try:
@@ -289,6 +308,7 @@ async def _startup():
     except Exception as e:
         logger.warning(f"Could not initialize skill knowledge: {e}")
     asyncio.create_task(_seed_circuit_breakers())
+    asyncio.create_task(_verify_decision_log())
     asyncio.create_task(_cleanup_old_reports())
     asyncio.create_task(_cleanup_old_tasks())
     asyncio.create_task(_cleanup_expired_cache())
