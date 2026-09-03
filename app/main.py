@@ -12,6 +12,7 @@ import asyncio
 import base64
 import json
 import os
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,7 +23,44 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from .core.config import BASE_DIR, HOST, MAX_REPORT_AGE_DAYS, PORT, REPORTS_DIR
 from .web_common import data_cache, logger, static_dir, task_store
 
-app = FastAPI(title="AI Berkshire Web", version="3.0.0")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Lifespan 启动钩子 — 迁移自 @app.on_event("startup")，语义等价保留。
+
+    注意：不再使用 on_event("startup")，避免与 lifespan 双跑导致下述
+    迁移/种子/后台任务执行两次。TestClient 须以 context manager 使用
+    （with TestClient(app)）才会触发本启动逻辑（REVIEW_FINDINGS.md Q6）。
+    """
+    task_store.mark_running_as_interrupted()
+    # Harness repository: idempotent billing-column migration at startup
+    get_repository()
+    # Ensure default knowledge base exists on first run
+    try:
+        from .tools.knowledge_updater import _ensure_default_knowledge
+        _ensure_default_knowledge()
+    except Exception as e:
+        logger.warning(f"Could not initialize default knowledge: {e}")
+    # Ensure ALL 21 skills have default domain knowledge on first run
+    try:
+        from .tools.skill_knowledge import _ensure_all_default_knowledge
+        _ensure_all_default_knowledge()
+    except Exception as e:
+        logger.warning(f"Could not initialize skill knowledge: {e}")
+    asyncio.create_task(_seed_circuit_breakers())
+    asyncio.create_task(_verify_decision_log())
+    asyncio.create_task(_cleanup_old_reports())
+    asyncio.create_task(_cleanup_old_tasks())
+    asyncio.create_task(_cleanup_expired_cache())
+    asyncio.create_task(_auto_update_knowledge())
+    asyncio.create_task(_auto_update_skill_knowledge())
+    logger.info("AI Berkshire Web v3.0.0 started (market data + knowledge auto-update + 21-skill auto-update)")
+    try:
+        yield
+    finally:
+        logger.info("AI Berkshire Web v3.0.0 shutting down")
+
+app = FastAPI(title="AI Berkshire Web", version="3.0.0", lifespan=lifespan)
 
 # Rate limiting & WS JWT verify live in web_common (re-exported below).
 # ==================== CORS ====================
@@ -289,32 +327,6 @@ async def _seed_circuit_breakers():
             logger.info(f"Circuit breakers seeded from startup health check: {seeded}")
     except Exception as e:
         logger.warning(f"Circuit breaker seeding failed: {e}")
-
-@app.on_event("startup")
-async def _startup():
-    task_store.mark_running_as_interrupted()
-    # Harness repository: idempotent billing-column migration at startup
-    get_repository()
-    # Ensure default knowledge base exists on first run
-    try:
-        from .tools.knowledge_updater import _ensure_default_knowledge
-        _ensure_default_knowledge()
-    except Exception as e:
-        logger.warning(f"Could not initialize default knowledge: {e}")
-    # Ensure ALL 21 skills have default domain knowledge on first run
-    try:
-        from .tools.skill_knowledge import _ensure_all_default_knowledge
-        _ensure_all_default_knowledge()
-    except Exception as e:
-        logger.warning(f"Could not initialize skill knowledge: {e}")
-    asyncio.create_task(_seed_circuit_breakers())
-    asyncio.create_task(_verify_decision_log())
-    asyncio.create_task(_cleanup_old_reports())
-    asyncio.create_task(_cleanup_old_tasks())
-    asyncio.create_task(_cleanup_expired_cache())
-    asyncio.create_task(_auto_update_knowledge())
-    asyncio.create_task(_auto_update_skill_knowledge())
-    logger.info("AI Berkshire Web v3.0.0 started (market data + knowledge auto-update + 21-skill auto-update)")
 
 if __name__ == "__main__":
     import uvicorn
