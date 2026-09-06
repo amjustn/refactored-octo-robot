@@ -1,8 +1,6 @@
 """Export routes: /api/export/* — wechat push for finished reports."""
 from fastapi import APIRouter, HTTPException, Request
 
-from ..web_common import logger
-
 router = APIRouter()
 
 

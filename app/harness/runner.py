@@ -29,6 +29,7 @@ from ..core.config import AGENT_TIMEOUT, MAX_PARALLEL_AGENTS
 from ..core.llm import chat_complete, chat_complete_with_tools, chat_stream, pop_tool_fallback
 from ..models.schemas import AgentProgress
 from ..skills import build_user_prompt, get_skill
+from ..tools.valuation_guard import annotate_report, check_report
 from .context import ContextBuilder
 
 # P3: decision log
@@ -46,7 +47,6 @@ from .prompts import (
 )
 from .spec import TaskSpec
 from .tools import ALL_TOOL_SCHEMAS, TOOL_ENABLED_AGENTS, get_gateway
-from ..tools.valuation_guard import annotate_report, check_report
 
 logger = logging.getLogger("ai_berkshire.harness.runner")
 
