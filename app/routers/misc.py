@@ -314,6 +314,7 @@ async def api_upload_file(request: "Request"):
                 item["method"] = ""
                 try:
                     import tempfile
+
                     from markitdown import MarkItDown
                     with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
                         tmp.write(data)

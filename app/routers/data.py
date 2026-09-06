@@ -53,7 +53,7 @@ async def api_screen_factors(
     categories: comma-separated list of factor categories
     top_n: number of top-ranked stocks to return
     """
-    from ..tools.factor_screen import CATEGORY_LABELS, FACTOR_DEFS, screen_stocks, last_screen_partial
+    from ..tools.factor_screen import CATEGORY_LABELS, FACTOR_DEFS, last_screen_partial, screen_stocks
 
     cat_list = [c.strip() for c in categories.split(",") if c.strip()]
     try:

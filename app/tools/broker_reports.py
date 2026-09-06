@@ -18,7 +18,6 @@
 缓存: SQLite DataCache, 列表 TTL 30min, 正文 TTL 24h。失败静默降级为空数据。
 """
 import asyncio
-import json
 import logging
 import re
 from datetime import datetime, timedelta
@@ -442,6 +441,7 @@ async def build_broker_context(symbol: str = "", arguments: str = "", skill_name
 
     try:
         import asyncio as _aio
+
         from ..tools.broker_reports import get_rating_summary
         summary = await _aio.wait_for(get_rating_summary(code, days=365), timeout=15.0)
         if not summary or not summary.get("covered") or summary.get("total_reports", 0) == 0:

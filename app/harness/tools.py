@@ -385,6 +385,9 @@ async def _execute_tool(tool_name: str, arguments: dict) -> str:
     # --- QuantTrader quant signal tools (async) ---
     from ..tools import quant_link
 
+    # --- Broker research report tools (async) ---
+    from ..tools.broker_reports import get_rating_summary, get_report_detail
+
     # --- Industry chain tools (async) ---
     from ..tools.industry_sources import list_industry_sources, search_industry_chain
     from ..tools.market_data import (
@@ -394,9 +397,6 @@ async def _execute_tool(tool_name: str, arguments: dict) -> str:
         get_stock_price,
         search_company,
     )
-
-    # --- Broker research report tools (async) ---
-    from ..tools.broker_reports import get_rating_summary, get_report_detail
 
     # --- Web search tools (async) ---
     from ..tools.web_search import read_webpage, web_search

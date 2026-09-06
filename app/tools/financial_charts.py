@@ -20,7 +20,6 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime
-from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger("ai_berkshire.charts")
@@ -223,7 +222,6 @@ def _fetch_yf_series(symbol: str) -> dict:
                             v = None
                         series.append(v)
                     if key == "gross_margin" and series:
-                        rev = [x for x in result["revenue"] if x]
                         result["gross_margin"] = [
                             round(g / r * 100, 2) if g is not None and r else None
                             for g, r in zip(series, result["revenue"])
