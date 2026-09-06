@@ -189,7 +189,6 @@ DATA_TOOL_SCHEMAS = [
     },
 ]
 
-
 # ==================== Web Search Tool Schemas ====================
 
 WEB_TOOL_SCHEMAS = [
@@ -224,7 +223,6 @@ WEB_TOOL_SCHEMAS = [
         },
     },
 ]
-
 
 # ==================== Industry Chain Tool Schemas ====================
 
@@ -295,13 +293,8 @@ BROKER_TOOL_SCHEMAS = [
     },
 ]
 
-
-# ==================== QuantTrader (QT) Quant Signal Tool Schemas ====================
-
-
 # All tools available to agents
 ALL_TOOL_SCHEMAS = FINANCIAL_TOOL_SCHEMAS + DATA_TOOL_SCHEMAS + WEB_TOOL_SCHEMAS + INDUSTRY_TOOL_SCHEMAS + BROKER_TOOL_SCHEMAS
-
 
 # ==================== Tool Executor ====================
 
@@ -336,7 +329,6 @@ async def _execute_tool(tool_name: str, arguments: dict) -> str:
             return json.dumps({"error": str(e)}, ensure_ascii=False)
 
     # --- Market data tools (async) ---
-
     # --- Industry chain tools (async) ---
     from ..tools.industry_sources import list_industry_sources, search_industry_chain
     from ..tools.market_data import (
@@ -376,7 +368,6 @@ async def _execute_tool(tool_name: str, arguments: dict) -> str:
 
     return json.dumps({"error": f"Unknown tool: {tool_name}"}, ensure_ascii=False)
 
-
 # Agents that have tool access (financial + market data)
 # All research/analysis agents get tools; editorial agents don't need them
 TOOL_ENABLED_AGENTS = {
@@ -388,7 +379,6 @@ TOOL_ENABLED_AGENTS = {
     "cn-policy-framework", "cn-data-cycle", "cn-fx-external", "cn-structure-trend",
 }
 
-
 # ==================== ToolGateway (PR-3) ====================
 
 import asyncio
@@ -396,7 +386,6 @@ import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Awaitable, Callable, Optional
-
 
 @dataclass
 class ToolDef:
@@ -413,7 +402,6 @@ class ToolDef:
     cache_ttl: Optional[int] = None      # seconds; None = no gateway-level cache
     fallback: list = field(default_factory=list)  # alternative tool names
 
-
 @dataclass
 class ToolResult:
     tool: str
@@ -426,16 +414,13 @@ class ToolResult:
     circuit: str = "closed"
     error: str = ""
 
-
 _BUSINESS_ERROR_HINTS = ("不存在", "未找到", "not found", "no data", "无法识别")
-
 
 def _is_business_error(msg: str) -> bool:
     """A legitimate 'no such data' answer is not a provider failure and must
     not trip the circuit breaker (e.g. querying a delisted/unknown symbol)."""
     m = (msg or "").lower()
     return any(h.lower() in m for h in _BUSINESS_ERROR_HINTS)
-
 
 class CircuitBreaker:
     """Per-tool circuit breaker.
@@ -499,7 +484,6 @@ class CircuitBreaker:
             "open_since_s": round(time.monotonic() - self.opened_at, 1) if self.opened_at else None,
         }
 
-
 # Tool registry with per-tool execution policy. cache_ttl mirrors the
 # DATA_CACHE_TTL_* tiers in core.config (market_data also caches
 # internally; the gateway cache short-circuits repeat calls within a run).
@@ -526,7 +510,6 @@ TOOL_DEFS: dict[str, ToolDef] = {
     "fetch_broker_reports": ToolDef("fetch_broker_reports", timeout=25, retries=1),
     "fetch_broker_report_detail": ToolDef("fetch_broker_report_detail", timeout=20, retries=1),
 }
-
 
 class ToolGateway:
     """Unified tool entry: circuit check → cache → timeout/retry →
@@ -950,9 +933,7 @@ class ToolGateway:
         result = await self.call(tool_name, arguments, task_id=task_id, agent=agent, bus=bus)
         return result.content
 
-
 _gateway: Optional[ToolGateway] = None
-
 
 def get_gateway() -> ToolGateway:
     global _gateway

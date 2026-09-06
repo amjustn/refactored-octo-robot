@@ -495,10 +495,12 @@
     panel.querySelector('#bkSkinWpClear').onclick = function () {
       state.wallpaper = '';  // 只清照片，当前皮肤的渐变底色保留
       applyAll(); saveState();
+      pushToServer({ wallpaper: null });  // 显式移除标记：服务端据此清除共享壁纸
     };
     panel.querySelector('#bkSkinReset').onclick = function () {
       state = { skin: 'default', accent: '', wallpaper: '', wpOpacity: 0.5, wpBlur: 0, sidebarAlpha: 0.85, gradient: '' };
       applyAll(); saveState(); markSelected();
+      pushToServer({ wallpaper: null });  // 恢复默认同样视为主动移除共享壁纸
       opRange.value = 50; opVal.textContent = '50%';
       blurRange.value = 0; blurVal.textContent = '0px';
       sbRange.value = 85; sbVal.textContent = '85%';

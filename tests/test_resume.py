@@ -8,7 +8,7 @@
 - save_report overwrite + task_id：成功续跑覆盖 partial 报告、meta 去 partial
 - POST /api/tasks/{id}/resume：200 + skipped/rerun 名单；未知任务 400
 
-Run: cd . && venv/bin/python -m pytest tests/test_resume.py -v
+Run: cd <repo-root> && venv/bin/python -m pytest tests/test_resume.py -v
 """
 import asyncio
 import json
@@ -19,7 +19,7 @@ from datetime import datetime
 
 os.environ.setdefault("LLM_API_KEY", "test-key")
 os.environ.setdefault("LLM_BASE_URL", "http://localhost:9999")
-sys.path.insert(0, ".")
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import pytest
 from fastapi.testclient import TestClient

@@ -32,7 +32,28 @@ async def get_skin():
 @router.post("/api/skin")
 async def save_skin(body: dict):
     payload = {k: v for k, v in body.items() if k in _ALLOWED}
-    raw = json.dumps(payload, ensure_ascii=False)
+    # 合并写入而非整体覆盖：多个服务实例可共享同一文件且字段集不同，
+    # 整体覆盖会让任一站一次常规保存就抹掉对方的 wallpaper/gradient/sidebarAlpha。
+    merged = {}
+    if os.path.exists(_SKIN_FILE):
+        try:
+            with open(_SKIN_FILE, "r", encoding="utf-8") as f:
+                old = json.load(f)
+                if isinstance(old, dict):
+                    merged.update(old)
+        except Exception:
+            pass
+    for k, v in payload.items():
+        if k == "wallpaper":
+            # 壁纸保护：仅显式 null 表示“用户主动移除”；
+            # 空串/缺省一律不覆盖已有壁纸（防无壁纸端的常规保存误删共享壁纸）
+            if v is None:
+                merged[k] = ""
+            elif v != "":
+                merged[k] = v
+        else:
+            merged[k] = v
+    raw = json.dumps(merged, ensure_ascii=False)
     if len(raw.encode("utf-8")) > _MAX_BYTES:
         return {"code": 1, "message": "设置数据过大（>4MB），请换更小的壁纸图片"}
     os.makedirs(_DATA_DIR, exist_ok=True)

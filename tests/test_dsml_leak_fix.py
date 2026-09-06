@@ -9,7 +9,7 @@
   4. registry 中 daily-briefing 声明 tools_enabled
   5. harness run() 端到端：fatal 命中 → 任务 failed + partial 报告落盘
 
-Run: cd . && venv/bin/python -m pytest tests/test_dsml_leak_fix.py -v
+Run: cd <repo-root> && venv/bin/python -m pytest tests/test_dsml_leak_fix.py -v
 """
 from __future__ import annotations
 

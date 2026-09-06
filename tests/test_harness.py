@@ -6,7 +6,7 @@ Covers every component in app/harness/:
   spec / events / prompts / guards / context / persist /
   decision_log / tools / runner / __init__ (run/cancel/resume)
 
-Run: cd . && venv/bin/python -m pytest tests/test_harness.py -v -x
+Run: cd <repo-root> && venv/bin/python -m pytest tests/test_harness.py -v -x
 """
 from __future__ import annotations
 
@@ -443,6 +443,12 @@ class TestDecisionLog:
         from app.harness.decision_log import _extract_stock_name
         assert _extract_stock_name("Tencent 2025Q4") == "Tencent"
         assert _extract_stock_name("0700.HK") == "0700.HK"
+        # 2026-09-01: 后缀/疑问剥离 + 空格截断增强, 修复整句被当股票名
+        assert _extract_stock_name("分析一下贵州茅台的投资价值") == "贵州茅台"
+        assert _extract_stock_name("研究拼多多的基本面") == "拼多多"
+        assert _extract_stock_name("贵州茅台(600519)现在还能买吗") == "贵州茅台"
+        assert _extract_stock_name("看看中际旭创 300308") == "中际旭创"
+        assert _extract_stock_name("601318你觉得怎么样") == "601318"
 
     def test_extract_decision(self):
         from app.harness.decision_log import _extract_decision
@@ -466,6 +472,120 @@ class TestDecisionLog:
         from app.harness import decision_log
         monkeypatch.setattr(decision_log, "DECISION_LOG_PATH", tmp_path / "d.md")
         assert decision_log.load_decisions("UnknownCo") == ""
+
+
+# ============================================================
+# 7b. decision_verify.py — P4 验证闭环(2026-09-01)
+# ============================================================
+
+class TestDecisionVerify:
+    def test_judge_buy_fulfilled(self):
+        from app.harness.decision_verify import judge_entry
+        from datetime import datetime, timezone
+        now = datetime(2026, 9, 1, tzinfo=timezone.utc)
+        e = {"conclusion": "买入", "record_price": "100", "time": "2026-08-10 10:00 UTC", "target": "未指定"}
+        assert judge_entry(e, 114, now) == "已兑现"   # +14% → 兑现
+        assert judge_entry(e, 88, now) == "已证伪"    # -12% → 证伪
+        assert judge_entry(e, 103, now) == "待验证"   # +3% → 未定
+
+    def test_judge_sell(self):
+        from app.harness.decision_verify import judge_entry
+        from datetime import datetime, timezone
+        now = datetime(2026, 9, 1, tzinfo=timezone.utc)
+        e = {"conclusion": "卖出", "record_price": "100", "time": "2026-08-10 10:00 UTC", "target": "未指定"}
+        assert judge_entry(e, 90, now) == "已兑现"    # 避损成功
+        assert judge_entry(e, 110, now) == "已证伪"   # 卖飞
+
+    def test_judge_target_price_priority(self):
+        from app.harness.decision_verify import judge_entry
+        from datetime import datetime, timezone
+        now = datetime(2026, 9, 1, tzinfo=timezone.utc)
+        e = {"conclusion": "买入", "record_price": "100", "time": "2026-08-10 10:00 UTC", "target": "目标价 110"}
+        assert judge_entry(e, 115, now) == "已兑现"   # 现价达目标价 → 兑现(即便涨幅<8%)
+        assert judge_entry(e, 88, now) == "已证伪"    # 跌穿-8% → 证伪
+        assert judge_entry(e, 103, now) == "待验证"   # 未达标未跌穿 → 待验证
+
+    def test_judge_hold_no_auto(self):
+        from app.harness.decision_verify import judge_entry
+        from datetime import datetime, timezone
+        now = datetime(2026, 9, 1, tzinfo=timezone.utc)
+        e = {"conclusion": "持有观望", "record_price": "100", "time": "2026-08-10 10:00 UTC", "target": "未指定"}
+        assert judge_entry(e, 120, now) == "待验证"   # 持有方向不自动判定
+
+    def test_judge_expired(self):
+        from app.harness.decision_verify import judge_entry
+        from datetime import datetime, timezone
+        now = datetime(2026, 9, 1, tzinfo=timezone.utc)
+        e = {"conclusion": "买入", "record_price": "100", "time": "2026-05-01 10:00 UTC", "target": "未指定"}
+        assert judge_entry(e, 101, now) == "已过期"   # 超90天无定论 → 过期
+
+    def test_judge_no_record_price(self):
+        from app.harness.decision_verify import judge_entry
+        from datetime import datetime, timezone
+        now = datetime(2026, 9, 1, tzinfo=timezone.utc)
+        e = {"conclusion": "买入", "record_price": "未指定", "time": "2026-08-10 10:00 UTC", "target": "未指定"}
+        assert judge_entry(e, 114, now) == "待验证"   # 无基准价 → 无法判定
+
+    def test_judge_bad_record_price(self):
+        """错误注入: record_price 非数字 → 待验证, 不抛异常"""
+        from app.harness.decision_verify import judge_entry
+        from datetime import datetime, timezone
+        now = datetime(2026, 9, 1, tzinfo=timezone.utc)
+        e = {"conclusion": "买入", "record_price": "abc", "time": "2026-08-10 10:00 UTC", "target": "未指定"}
+        assert judge_entry(e, 114, now) == "待验证"
+
+    def test_judge_bad_time(self):
+        """错误注入: 时间无法解析 → 不做过期检查, 直接按涨跌判定(不抛异常)"""
+        from app.harness.decision_verify import judge_entry
+        from datetime import datetime, timezone
+        now = datetime(2026, 9, 1, tzinfo=timezone.utc)
+        e = {"conclusion": "买入", "record_price": "100", "time": "not-a-date", "target": "未指定"}
+        # 时间解析失败 → 年龄未知 → 不误标过期, 按涨跌正常判定
+        assert judge_entry(e, 114, now) == "已兑现"
+
+    def test_classify_conclusion(self):
+        from app.harness.decision_verify import _classify_conclusion
+        assert _classify_conclusion("建议买入") == "buy"
+        assert _classify_conclusion("卖出回避") == "sell"
+        assert _classify_conclusion("持有观望") == "hold"
+        assert _classify_conclusion("综合来看基本面稳健") == "unknown"
+
+    def test_tencent_symbol(self):
+        from app.harness.decision_verify import _tencent_symbol
+        assert _tencent_symbol("600519.SH") == "sh600519"
+        assert _tencent_symbol("000001.SZ") == "sz000001"
+        assert _tencent_symbol("0700.HK") == "hk00700"
+        assert _tencent_symbol("PDD") == "usPDD"
+        assert _tencent_symbol("601318") == "sh601318"
+        assert _tencent_symbol("垃圾输入") is None
+
+    def test_update_entry_fields_replaces_and_inserts(self, monkeypatch, tmp_path):
+        from app.harness import decision_log
+        from pathlib import Path
+        log = tmp_path / "d.md"
+        log.write_text(
+            "# 决策日志\n\n"
+            "## 测试股份 — 2026-08-10 10:00 UTC\n\n"
+            "- **技能**: test\n"
+            "- **结论**: 买入\n"
+            "- **任务ID**: T1\n\n"
+            "---\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(decision_log, "DECISION_LOG_PATH", log)
+        assert decision_log.update_entry_fields("T1", {"验证": "已证伪", "代码": "600000.SH"})
+        content = log.read_text(encoding="utf-8")
+        assert "- **验证**: 已证伪" in content     # 替换已有? 不, 验证不存在 → 插入
+        assert "- **代码**: 600000.SH" in content   # 插入
+        assert "- **结论**: 买入" in content         # 原字段保留
+
+    def test_update_entry_fields_not_found(self, monkeypatch, tmp_path):
+        from app.harness import decision_log
+        from pathlib import Path
+        log = tmp_path / "d.md"
+        log.write_text("# 决策日志\n\n", encoding="utf-8")
+        monkeypatch.setattr(decision_log, "DECISION_LOG_PATH", log)
+        assert decision_log.update_entry_fields("NOPE", {"验证": "x"}) is False
 
 
 # ============================================================

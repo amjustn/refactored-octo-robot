@@ -156,6 +156,9 @@ COMPANY_NAME_MAP = {
     "三一重工": "600031.SH", "三一": "600031.SH",
     "东方财富": "300059.SZ",
     "同花顺": "300033.SZ",
+    "金山办公": "688111.SH",
+    "中际旭创": "300308.SZ",
+    "中际讯创": "300308.SZ",
     "爱尔眼科": "300015.SZ",
     "片仔癀": "600436.SH",
     "云南白药": "000538.SZ",
@@ -346,14 +349,7 @@ async def _run_sync(func, *args, **kwargs):
 # ==================== A-Share Data (via akshare) ====================
 
 async def _fetch_a_share_price(symbol: str) -> dict:
-    """Fetch A-share real-time price -- Dashboard API first, then akshare."""
-    # Try Dashboard rotator first (sina/tencent/eastmoney cycling)
-    try:
-        if dash_data:
-            return dash_data
-    except Exception:
-        pass
-
+    """Fetch A-share real-time price via akshare, HTTP fallback chain as backup."""
     # Fall back to akshare
     code = _normalize_a_share_code(symbol)
     bare_code = code.split('.')[0]

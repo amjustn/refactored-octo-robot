@@ -1,4 +1,5 @@
 // 无论本页是手动打开还是新开标签页，统一窗口名，实现「已开则复用、不重复新开」。
+// window.name 在后续导航中自动保留，这里只需在首次加载时设一次。
 // AI Berkshire Web - Application Logic
 let currentSkill = null;
 let allSkills = [];

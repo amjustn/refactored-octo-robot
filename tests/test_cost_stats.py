@@ -7,7 +7,7 @@
 - days 窗口按自然日（含今天）计算，窗口外的老任务不计入
 - API 形状：JWT 鉴权、默认 days=30、days 越界校验（422）
 
-Run: cd . && venv/bin/python -m pytest tests/test_cost_stats.py -v
+Run: cd <repo-root> && venv/bin/python -m pytest tests/test_cost_stats.py -v
 """
 import os
 import sys
@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 
 os.environ.setdefault("LLM_API_KEY", "test-key")
 os.environ.setdefault("LLM_BASE_URL", "http://localhost:9999")
-sys.path.insert(0, ".")
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import pytest
 from fastapi.testclient import TestClient
