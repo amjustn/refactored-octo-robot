@@ -145,17 +145,41 @@ def three_scenario(price: float, shares_100m: float, growth_rates: list,
                    multiples: Optional[list] = None, anchor: str = "PE",
                    eps: Optional[float] = None, bvps: Optional[float] = None,
                    revenue_per_share: Optional[float] = None, pe_multiples: Optional[list] = None,
-                   currency: str = "CNY") -> dict:
+                   currency: str = "CNY", dps: Optional[float] = None,
+                   discount_rates: Optional[list] = None,
+                   risk_free_rate: Optional[float] = None) -> dict:
     """三情景估值: 乐观/中性/悲观, 返回目标价和上涨空间。
 
-    支持三种估值锚(按公司类型动态选择, 与 financial-analyst 的
+    支持四种估值锚(按公司类型动态选择, 与 financial-analyst 的
     "估值指标行业适配表"对应):
       anchor="PE" — 目标价 = 未来EPS × PE倍数(传统重资产/制造/消费)
       anchor="PB" — 目标价 = 未来每股净资产(BVPS) × PB倍数(银行/保险/周期股)
       anchor="PS" — 目标价 = 未来每股营收 × PS倍数(轻资产/互联网/软件)
+      anchor="DDM" — 反向戈登(1959)敏感性: 需 dps(预期未来12个月每股分红 D1)
+                     + discount_rates(三档贴现率), growth_rates 作为增长率网格
+                     (可省, 默认=中档贴现率的隐含增长率 ±1 个百分点);
+                     返回"隐含增长率 + 敏感性矩阵", 不返回单点目标价;
+                     不分红/象征性分红的标的会被直接拒绝(DDM 对其无意义)
 
     向后兼容: 旧调用(eps + pe_multiples 风格)自动识别为 PE 锚。
     """
+    # DDM(反向戈登)分支: 输出结构与倍数锚不同(隐含 + 敏感性矩阵), 需前置处理
+    if (anchor or "").upper() == "DDM":
+        if dps is None:
+            return {"function": "three-scenario", "anchor": "DDM",
+                    "error": "anchor=DDM 需要提供 dps(预期未来 12 个月的每股分红 D1)"}
+        if not discount_rates:
+            return {"function": "three-scenario", "anchor": "DDM",
+                    "error": "anchor=DDM 需要提供 discount_rates(贴现率档, 建议三档)"}
+        out = reverse_gordon(price=price, dividend_per_share=dps,
+                             discount_rates=discount_rates,
+                             risk_free_rate=risk_free_rate,
+                             growth_grid=growth_rates if growth_rates else None,
+                             shares_100m=shares_100m, currency=currency)
+        out["function"] = "three-scenario"
+        out["anchor"] = "DDM"
+        return out
+
     # 兼容旧调用: 传了 pe_multiples 即按 PE 锚处理
     if pe_multiples is not None:
         multiples = pe_multiples
@@ -180,7 +204,7 @@ def three_scenario(price: float, shares_100m: float, growth_rates: list,
         base_name, base = "revenue_per_share", Decimal(str(revenue_per_share))
         multiple_name = "ps_multiple"
     else:
-        return {"function": "three-scenario", "error": f"未知 anchor: {anchor}(可选 PE/PB/PS)"}
+        return {"function": "three-scenario", "error": f"未知 anchor: {anchor}(可选 PE/PB/PS/DDM)"}
 
     p = Decimal(str(price))
     sh = Decimal(str(shares_100m))
@@ -214,6 +238,133 @@ def three_scenario(price: float, shares_100m: float, growth_rates: list,
         "shares_100m": float(sh),
         "currency": currency,
         "scenarios": scenarios
+    }
+
+
+def reverse_gordon(price: float, dividend_per_share: float, discount_rates: list,
+                   risk_free_rate: Optional[float] = None,
+                   growth_grid: Optional[list] = None,
+                   shares_100m: Optional[float] = None,
+                   currency: str = "CNY") -> dict:
+    """反向戈登(DDM)敏感性分析 — Gordon(1959) 常数增长模型。
+
+    模型: P = D1 / (r - g)，等价 r = D1 / P + g
+      * 正向: 给定 r、g 算目标价(sensitivity 部分)
+      * 反向: 给定市价 P 与每股分红 D1，解出市场隐含增长率 g = r - D1/P
+
+    为什么必须反向用: 正向单点目标价对 (r - g) 极度敏感(g 挪 0.5 个百分点, 估值差
+    10%+)，单点数字等于给假设化妆；反向解出隐含假设 + 敏感性矩阵，才能回答
+    "这个价格里市场信了什么、这个假设站不站得住"。
+
+    口径与铁律:
+      * dividend_per_share 必须是**预期未来 12 个月**的每股分红(D1)，不是已派发历史
+      * D1 <= 0(不分红/象征性分红) → 直接拒绝: DDM 对这类公司无意义, 应改用 PB/PE/股息率
+      * 每格必须满足 r > g; g >= r 的格子标记 model_failed 且不给目标价(模型发散)
+      * 所有格子都失效 → 整体报错; r <= 0 / price <= 0 / rates 为空 → 报错
+      * 股息率 > 12% → warning(可能含特别股息或分红口径有误)
+      * 默认网格 = 中档贴现率下的隐含增长率 ± 1 个百分点(三点)
+    """
+    p = Decimal(str(price))
+    if p <= 0:
+        return {"function": "reverse-gordon", "error": "price 必须为正数"}
+
+    dps = Decimal(str(dividend_per_share))
+    if dps <= 0:
+        return {"function": "reverse-gordon",
+                "error": "不分红或每股分红 <= 0，戈登/DDM 模型无意义（应改用 PB/PE/股息率锚）"}
+
+    if not discount_rates:
+        return {"function": "reverse-gordon", "error": "缺少 discount_rates(贴现率数组)"}
+
+    rates = [Decimal(str(x)) for x in discount_rates]
+    if any(x <= 0 for x in rates):
+        return {"function": "reverse-gordon", "error": "贴现率必须为正数"}
+
+    div_yield = dps / p * 100
+    implied = [r - dps / p for r in rates]
+
+    if growth_grid is None:
+        center = implied[len(rates) // 2]
+        grid = [center - Decimal("0.01"), center, center + Decimal("0.01")]
+    else:
+        if not growth_grid:
+            return {"function": "reverse-gordon", "error": "growth_grid 不能为空数组"}
+        grid = [Decimal(str(x)) for x in growth_grid]
+
+    warnings = []
+    if div_yield > Decimal("12"):
+        warnings.append(
+            f"股息率 {float(div_yield):.2f}% 异常高：请核实是否含特别股息/一次性分红，"
+            "或每股分红口径有误（D1 须为预期未来 12 个月）"
+        )
+    if any(g < 0 for g in implied):
+        warnings.append(
+            f"反解出现负的隐含增长率（最低 {float(min(implied)) * 100:.2f}%）："
+            "按该贴现率市场已 price-in 分红下降，需与公司分红政策对照"
+        )
+
+    rows = []
+    valid_cells = 0
+    for r in rates:
+        cells = []
+        for g in grid:
+            if g >= r:
+                cells.append({
+                    "growth_pct": round(float(g) * 100, 2),
+                    "model_failed": True,
+                    "reason": "g >= r，戈登模型发散(估值趋于无穷)，该格不给目标价",
+                })
+                continue
+            target = dps / (r - g)
+            upside = (target - p) / p * 100
+            cell = {
+                "growth_pct": round(float(g) * 100, 2),
+                "target_price": round(float(target), 2),
+                "upside_pct": round(float(upside), 1),
+                "model_failed": False,
+            }
+            if shares_100m is not None:
+                cell["market_cap"] = round(float(target * Decimal(str(shares_100m))), 0)
+            cells.append(cell)
+            valid_cells += 1
+        rows.append({
+            "discount_rate_pct": round(float(r) * 100, 2),
+            "cells": cells,
+        })
+
+    if valid_cells == 0:
+        return {"function": "reverse-gordon",
+                "error": "全部情景满足 g >= r，戈登模型失效（检查增长/贴现率假设，或改用其它估值锚）"}
+
+    rf = Decimal(str(risk_free_rate)) if risk_free_rate is not None else None
+    implied_out = []
+    for r, g in zip(rates, implied):
+        item = {
+            "discount_rate_pct": round(float(r) * 100, 2),
+            "implied_growth_pct": round(float(g) * 100, 2),
+        }
+        if rf is not None:
+            item["risk_premium_pct"] = round(float(r - rf) * 100, 2)
+            item["dividend_yield_spread_pct"] = round(float(div_yield - rf * 100), 2)
+        implied_out.append(item)
+
+    if rf is not None and rf >= min(rates):
+        warnings.append("无风险利率 >= 最低贴现率档，风险补偿为负，请检查输入")
+
+    return {
+        "function": "reverse-gordon",
+        "model": "Gordon growth (1959): P = D1/(r-g)；反向解 g_implied = r - D1/P",
+        "current_price": float(p),
+        "dividend_per_share": float(dps),
+        "dividend_yield_pct": round(float(div_yield), 2),
+        "shares_100m": float(shares_100m) if shares_100m is not None else None,
+        "currency": currency,
+        "discount_rates_pct": [round(float(x) * 100, 2) for x in rates],
+        "growth_grid_pct": [round(float(x) * 100, 2) for x in grid],
+        "risk_free_rate_pct": round(float(rf) * 100, 2) if rf is not None else None,
+        "implied": implied_out,
+        "sensitivity": rows,
+        "warnings": warnings,
     }
 
 
