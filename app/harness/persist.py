@@ -247,6 +247,25 @@ _NEW_COLUMNS = {
 }
 
 
+def _one_line_str(v) -> str:
+    """把任意值压成单行字符串 —— meta 字段不允许换行，否则列表渲染会错位。"""
+    return " ".join(str(v or "").split())
+
+
+def _dominant_model(tokens: Optional[dict]) -> str:
+    """从 tokens.by_model 推断本次报告的主模型（meta 的"模型版本"字段）。
+
+    单模型 → 模型名；多模型（per-agent 混用）→ `mixed(a,b)`；无信息 → ''。
+    """
+    by_model = (tokens or {}).get("by_model") or {}
+    if not isinstance(by_model, dict) or not by_model:
+        return ""
+    names = sorted(str(k) for k in by_model.keys())
+    if len(names) == 1:
+        return names[0][:80]
+    return ("mixed(" + ",".join(names) + ")")[:80]
+
+
 def _sanitize_filename(name: str) -> str:
     name = Path(name).name
     name = re.sub(r"[^a-zA-Z0-9_\-\.]", "_", name)
@@ -281,6 +300,39 @@ class Repository:
             logger.error(f"tasks table migration failed: {e}")
         finally:
             conn.close()
+        self._migrate_checkpoints()
+
+    def _migrate_checkpoints(self):
+        """幂等创建 task_checkpoints 表（checkpoint 级断点续跑）。
+
+        CREATE TABLE IF NOT EXISTS 本身幂等，启动跑多次无副作用；与上方
+        tasks 列迁移分开 try/except，一边失败不拖累另一边。进程重启后
+        prepare_resume 依赖本表恢复阶段产出（辩论结论 / 系列单篇 /
+        单Agent上下文等）。与 tasks 表共用同一 DB 文件。
+        """
+        conn = sqlite3.connect(str(self.store.db_path), timeout=10)
+        try:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS task_checkpoints (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id TEXT NOT NULL,
+                    phase TEXT NOT NULL,
+                    agent TEXT DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'ok',
+                    content TEXT DEFAULT '',
+                    usage_json TEXT DEFAULT '',
+                    created_at REAL NOT NULL
+                )
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_task_checkpoints_task
+                ON task_checkpoints(task_id)
+            """)
+            conn.commit()
+        except Exception as e:
+            logger.error(f"task_checkpoints table migration failed: {e}")
+        finally:
+            conn.close()
 
     # ---------- task passthrough ----------
 
@@ -304,7 +356,21 @@ class Repository:
         self.store.delete_task(task_id)
 
     def cleanup_old_tasks(self, max_age_days: int = 7):
-        return self.store.cleanup_old_tasks(max_age_days)
+        """清理过期任务；连带删除孤儿检查点（任务行已删的残留）。"""
+        deleted = self.store.cleanup_old_tasks(max_age_days)
+        conn = None
+        try:
+            conn = sqlite3.connect(str(self.store.db_path), timeout=10)
+            conn.execute(
+                "DELETE FROM task_checkpoints WHERE task_id NOT IN (SELECT task_id FROM tasks)"
+            )
+            conn.commit()
+        except Exception as e:
+            logger.warning(f"orphan checkpoint cleanup failed: {e}")
+        finally:
+            if conn is not None:
+                conn.close()
+        return deleted
 
     def mark_running_as_interrupted(self):
         return self.store.mark_running_as_interrupted()
@@ -319,6 +385,105 @@ class Repository:
 
     def get_artifacts(self, task_id: str) -> list[tuple[str, str]]:
         return self.store.get_artifacts(task_id)
+
+    # ---------- checkpoints (阶段级断点续跑) ----------
+
+    def save_checkpoint(self, task_id: str, phase: str, agent: str = "",
+                        content: str = "", usage: Optional[dict] = None,
+                        status: str = "ok"):
+        """追加一条阶段检查点（append-only，与 task_artifacts 同风格）。
+
+        phase：research / debate / synthesis / post_synthesis / single /
+        series_episode_N；agent 可空（辩论结论等阶段级产出不属于单个
+        Agent）。usage 为当时的任务累计 token 用量快照
+        （core.llm.get_usage），仅供计费审计；content 为阶段中间产出
+        文本。绝不写 api_key。失败只记日志，绝不阻断主流程。
+        """
+        import time as _time
+        conn = sqlite3.connect(str(self.store.db_path), timeout=10)
+        try:
+            conn.execute(
+                """INSERT INTO task_checkpoints
+                       (task_id, phase, agent, status, content, usage_json, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    task_id, (phase or "")[:80], (agent or "")[:120],
+                    (status or "ok")[:20], content or "",
+                    json.dumps(usage, ensure_ascii=False, default=str) if usage else "",
+                    _time.time(),
+                ),
+            )
+            conn.commit()
+        except Exception as e:
+            logger.error(f"Failed to save checkpoint {task_id}/{phase}/{agent}: {e}")
+        finally:
+            conn.close()
+
+    def load_checkpoints(self, task_id: str) -> list[dict]:
+        """按写入顺序返回某任务的全部检查点（最旧在前，append-only 后写为准）。"""
+        conn = sqlite3.connect(str(self.store.db_path), timeout=10)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                """SELECT id, phase, agent, status, content, usage_json, created_at
+                   FROM task_checkpoints WHERE task_id = ?
+                   ORDER BY created_at, id""",
+                (task_id,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def clear_checkpoints(self, task_id: str):
+        """任务成功完成后清空其检查点（失败/取消时保留，供续跑）。"""
+        conn = sqlite3.connect(str(self.store.db_path), timeout=10)
+        try:
+            conn.execute(
+                "DELETE FROM task_checkpoints WHERE task_id = ?", (task_id,)
+            )
+            conn.commit()
+        except Exception as e:
+            logger.error(f"Failed to clear checkpoints for {task_id}: {e}")
+        finally:
+            conn.close()
+
+    def has_checkpoints(self, task_id: str) -> bool:
+        """该任务是否留有检查点（/api/task/{id} 据此提示「可恢复」）。"""
+        conn = sqlite3.connect(str(self.store.db_path), timeout=10)
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM task_checkpoints WHERE task_id = ? LIMIT 1",
+                (task_id,),
+            ).fetchone()
+            return row is not None
+        except Exception as e:
+            logger.warning(f"has_checkpoints failed for {task_id}: {e}")
+            return False
+        finally:
+            conn.close()
+
+    def list_interrupted_with_checkpoints(self) -> list[dict]:
+        """启动扫描：interrupted 且留有检查点的任务（可恢复名单）。
+
+        只登记、绝不自动重跑（避免重启即烧 token）；任务状态保持
+        interrupted，由用户显式调 /api/tasks/{id}/resume 触发续跑。
+        """
+        conn = sqlite3.connect(str(self.store.db_path), timeout=10)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                """SELECT t.task_id, t.skill_name, t.arguments, t.updated_at,
+                          COUNT(c.id) AS checkpoint_count,
+                          GROUP_CONCAT(DISTINCT c.phase) AS phases
+                   FROM tasks t
+                   JOIN task_checkpoints c ON c.task_id = t.task_id
+                   WHERE t.status = 'interrupted'
+                   GROUP BY t.task_id
+                   ORDER BY t.updated_at DESC"""
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
 
     # ---------- async wrappers (offload blocking I/O from the loop) ----------
 
@@ -340,6 +505,18 @@ class Repository:
 
     async def aget_artifacts(self, task_id: str) -> list[tuple[str, str]]:
         return await asyncio.to_thread(self.get_artifacts, task_id)
+
+    async def asave_checkpoint(self, *args, **kwargs):
+        await asyncio.to_thread(self.save_checkpoint, *args, **kwargs)
+
+    async def aload_checkpoints(self, task_id: str) -> list[dict]:
+        return await asyncio.to_thread(self.load_checkpoints, task_id)
+
+    async def aclear_checkpoints(self, task_id: str):
+        await asyncio.to_thread(self.clear_checkpoints, task_id)
+
+    async def alist_interrupted_with_checkpoints(self) -> list[dict]:
+        return await asyncio.to_thread(self.list_interrupted_with_checkpoints)
 
     async def aget_cost_stats(self, days: int = 30, model: str = None) -> dict:
         return await asyncio.to_thread(self.get_cost_stats, days, model)
@@ -456,7 +633,12 @@ class Repository:
             conn.close()
 
     def get_task_extras(self, task_id: str) -> dict:
-        """arguments + billing duration/cost for the /api/task/{id} payload."""
+        """arguments + billing duration/cost for the /api/task/{id} payload.
+
+        附带 has_checkpoints / checkpoint_phases：interrupted 任务是否
+        留有可恢复检查点（前端据此提示「可恢复」）；检查点查询失败时
+        安全回落 False / []，不影响主字段返回。
+        """
         conn = sqlite3.connect(str(self.store.db_path), timeout=10)
         conn.row_factory = sqlite3.Row
         try:
@@ -465,7 +647,20 @@ class Repository:
                    FROM tasks WHERE task_id = ?""",
                 (task_id,),
             ).fetchone()
-            return dict(row) if row else {}
+            out = dict(row) if row else {}
+            try:
+                ck_rows = conn.execute(
+                    """SELECT phase, MAX(created_at) AS ts
+                       FROM task_checkpoints WHERE task_id = ?
+                       GROUP BY phase ORDER BY ts""",
+                    (task_id,),
+                ).fetchall()
+                out["has_checkpoints"] = bool(ck_rows)
+                out["checkpoint_phases"] = [r["phase"] for r in ck_rows]
+            except Exception:
+                out["has_checkpoints"] = False
+                out["checkpoint_phases"] = []
+            return out
         finally:
             conn.close()
 
@@ -482,6 +677,9 @@ class Repository:
         summary: Optional[str] = None,
         task_id: Optional[str] = None,
         overwrite_name: Optional[str] = None,
+        model: str = "",
+        guard_warnings: Optional[list] = None,
+        data_status: Optional[dict] = None,
     ) -> Path:
         """Save report markdown + a metadata sidecar (.meta.json).
 
@@ -493,6 +691,11 @@ class Repository:
         (resume flow). overwrite_name reuses an existing report filename —
         a successful resume replaces the partial report in place instead of
         adding a duplicate row to the history list.
+
+        批D(2026-09-11): model / guard_warnings / data_status 三个审计字段
+        随报告落盘，供历史列表显示「模型版本 / 降级 / 数据状态」。
+        此前这些信息只存在于 tasks 表（guard_warnings/model 列），报告列表
+        完全看不到 —— 报告一旦离开运行态就无法自证是怎么跑出来的。
         """
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         safe_skill = _sanitize_filename(skill_name)
@@ -514,6 +717,24 @@ class Repository:
             meta["partial"] = True
         if summary:
             meta["summary"] = summary
+        # ── 批D 审计字段 ────────────────────────────────────────
+        eff_model = _one_line_str(model)
+        if not eff_model:
+            eff_model = _dominant_model(tokens)
+        if eff_model:
+            meta["model"] = eff_model
+        clean_warnings = [
+            {"gate": _one_line_str(w.get("gate"))[:40], "detail": _one_line_str(w.get("detail"))[:300]}
+            for w in (guard_warnings or []) if isinstance(w, dict)
+        ][:10]
+        if clean_warnings:
+            meta["guard_warnings"] = clean_warnings
+        if data_status or clean_warnings:
+            status = dict(data_status or {})
+            status.setdefault("state", "degraded" if clean_warnings else "ok")
+            if clean_warnings and not status.get("gates"):
+                status["gates"] = sorted({w["gate"] for w in clean_warnings if w["gate"]})
+            meta["data_status"] = status
         try:
             report_path.with_suffix(".meta.json").write_text(
                 json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"

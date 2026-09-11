@@ -42,7 +42,7 @@
 
   function authHeaders() {
     var headers = {};
-    var jwt = localStorage.getItem('ai_berkshire_jwt');
+    var jwt = _getJwt();
     if (jwt) headers['Authorization'] = 'Bearer ' + jwt;
     return headers;
   }

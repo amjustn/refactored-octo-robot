@@ -217,9 +217,12 @@ async def app_index():
     # Never share an /app page URL — whoever holds the URL holds the token.
     if BERKSHIRE_API_TOKEN:
         jwt_token = create_token(BERKSHIRE_API_TOKEN)
+        # 批A(2026-09-11) 凭据收紧：注入到会话级 sessionStorage，并清掉历史遗留的
+        # localStorage 副本（旧版写入，长期留存无必要）。
         script_tag = (
             f'<script>window.__JWT__={json.dumps(jwt_token)};'
-            f'localStorage.setItem("ai_berkshire_jwt",{json.dumps(jwt_token)});</script>'
+            f'try{{localStorage.removeItem("ai_berkshire_jwt");'
+            f'sessionStorage.setItem("ai_berkshire_jwt",{json.dumps(jwt_token)});}}catch(e){{}}</script>'
         )
         html = html.replace("</head>", script_tag + "</head>")
 

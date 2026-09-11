@@ -4,7 +4,8 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/home/q/ai_berkshire_web/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8001 --log-level info
+# 批F(2026-09-11): 监听 127.0.0.1 —— 仅本机与 Windows localhost 可达（局域网路径关闭）
+ExecStart=/home/q/ai_berkshire_web/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8001 --log-level info
 WorkingDirectory=/home/q/ai_berkshire_web
 Environment="PATH=/home/q/ai_berkshire_web/venv/bin:/usr/local/bin:/usr/bin:/bin"
 EnvironmentFile=/home/q/ai_berkshire_web/.env

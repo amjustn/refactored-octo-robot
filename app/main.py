@@ -13,10 +13,11 @@ import base64
 import json
 import os
 from contextlib import asynccontextmanager
+from ipaddress import ip_address, ip_network
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 
@@ -34,7 +35,23 @@ async def lifespan(_app: FastAPI):
     """
     task_store.mark_running_as_interrupted()
     # Harness repository: idempotent billing-column migration at startup
-    get_repository()
+    repo = get_repository()
+    # 断点续跑：扫描留有检查点的 interrupted 任务并登记日志。
+    # 安全起见绝不自动重跑（避免重启即烧 token）；任务状态保持
+    # interrupted，前端经 /api/task/{id} 的 has_checkpoints 感知，
+    # 用户显式调 /api/tasks/{task_id}/resume 时 prepare_resume 自会
+    # 利用 checkpoints 恢复现场。
+    try:
+        resumable = repo.list_interrupted_with_checkpoints()
+        for item in resumable:
+            logger.info(
+                f"可恢复任务 {item['task_id']}（{item['skill_name']}）："
+                f"{item['checkpoint_count']} 个检查点，阶段 {item.get('phases') or '-'}"
+            )
+        if resumable:
+            logger.info(f"共 {len(resumable)} 个中断任务可从检查点恢复（需手动触发 resume，不自动重跑）")
+    except Exception as e:
+        logger.warning(f"可恢复任务扫描失败: {e}")
     # Ensure default knowledge base exists on first run
     try:
         from .tools.knowledge_updater import _ensure_default_knowledge
@@ -120,6 +137,122 @@ class BasicAuthMiddleware(BaseHTTPMiddleware):
 
 
 app.add_middleware(BasicAuthMiddleware)
+
+# ==================== 客户端来源白名单（批F 2026-09-11） ====================
+# 目的：不用账号密码、不用输任何东西，就把"谁能调用本服务"限制住。
+# 背景：服务端持有默认 LLM Key，任何能访问 /app 的人都能烧这条 Key；
+# 目前还有零配置即可开跑的入口（批A），所以来源限制比密码更划算。
+# 策略（.env 可调，默认值不改变本机与局域网内既有用法）：
+#   * 未配置                         → auto：放行 loopback / 私网 / 链路本地，拒绝公网来源
+#   * BERKSHIRE_CLIENT_ALLOWLIST=... → strict：只放行列表内来源，关键字支持
+#                                      loopback / gateway / private，其余写 IP 或 CIDR
+#   * BERKSHIRE_CLIENT_GUARD=off     → 完全关闭（回到旧行为）
+# 只依据 TCP 对端地址判定，**不信任 X-Forwarded-For**（请求头可伪造）。
+_ALLOWLIST_RAW = os.getenv("BERKSHIRE_CLIENT_ALLOWLIST", "").strip()
+_GUARD_MODE = os.getenv("BERKSHIRE_CLIENT_GUARD", "").strip().lower()
+_logged_clients: set = set()
+
+
+def _detect_default_gateway() -> str:
+    """WSL/NAT 环境下的默认网关（= Windows 宿主机）地址；取不到返回 ''。"""
+    try:
+        import socket as _socket
+        import struct as _struct
+        with open("/proc/net/route", "r", encoding="utf-8") as f:
+            for line in f.readlines()[1:]:
+                parts = line.split()
+                if len(parts) > 2 and parts[1] == "00000000":
+                    return _socket.inet_ntoa(_struct.pack("<L", int(parts[2], 16)))
+    except Exception:
+        pass
+    return ""
+
+
+_WSL_GATEWAY = _detect_default_gateway()
+
+
+def _parse_allowlist(raw: str) -> list:
+    """规则统一为 ('kw', 'loopback'|'gateway'|'private') 或 ('net', ip_network)。"""
+    rules: list = []
+    for part in [p.strip() for p in (raw or "").split(",") if p.strip()]:
+        low = part.lower()
+        if low in ("loopback", "gateway", "private"):
+            rules.append(("kw", low))
+            continue
+        try:
+            rules.append(("net", ip_network(part, strict=False)))
+        except ValueError:
+            logger.warning(f"BERKSHIRE_CLIENT_ALLOWLIST 条目无法解析，已忽略: {part}")
+    return rules
+
+
+_RULES = _parse_allowlist(_ALLOWLIST_RAW)
+
+# auto 模式放行范围：只认"本机 / 局域网 / 链路本地"这些确定的可信网段。
+# 刻意不用 addr.is_private —— Python 把 192.0.2.0/24、198.51.100.0/24、203.0.113.0/24、
+# 240.0.0.0/4 等保留/文档网段也算进 is_private，用它会把这些"非局域网"一起放进来自。
+# 若日后加了 Tailscale/隧道（100.64.0.0/10 等），把对应网段写进 BERKSHIRE_CLIENT_ALLOWLIST。
+_AUTO_ALLOW = [
+    ip_network("127.0.0.0/8"), ip_network("::1/128"),
+    ip_network("10.0.0.0/8"), ip_network("172.16.0.0/12"), ip_network("192.168.0.0/16"),
+    ip_network("169.254.0.0/16"), ip_network("fe80::/10"),
+]
+
+
+def _in_auto_allow(addr) -> bool:
+    return any(addr.version == n.version and addr in n for n in _AUTO_ALLOW)
+
+
+def client_allowed(ip: str) -> bool:
+    """纯函数：该客户端地址是否放行（便于单测/回归，不依赖请求上下文）。"""
+    if _GUARD_MODE == "off":
+        return True
+    try:
+        addr = ip_address(ip or "")
+    except ValueError:
+        # starlette TestClient 把 client.host 置为字面量 'testclient'（非 IP）。
+        # 真实部署里 uvicorn 必然给出 TCP 对端 IP，所以这里只对测试客户端放行，
+        # 其它无法解析的来源一律拒绝。
+        return ip == "testclient"
+    # 双栈监听时 IPv4 客户端可能呈现为 ::ffff:a.b.c.d，先归一化再判定
+    mapped = getattr(addr, "ipv4_mapped", None)
+    if mapped is not None:
+        addr = mapped
+    if not _ALLOWLIST_RAW:  # auto：只挡"非本机/非局域网"来源
+        return _in_auto_allow(addr)
+    for kind, val in _RULES:  # strict：只放行白名单
+        if kind == "kw":
+            if val == "loopback" and addr.is_loopback:
+                return True
+            if val == "private" and _in_auto_allow(addr):
+                return True
+            if val == "gateway" and _WSL_GATEWAY and str(addr) == _WSL_GATEWAY:
+                return True
+        else:
+            if addr.version == val.version and addr in val:
+                return True
+    return False
+
+
+class ClientGuardMiddleware(BaseHTTPMiddleware):
+    """来源白名单：不在允许范围内直接 403，并留痕。"""
+
+    async def dispatch(self, request: Request, call_next):
+        ip = request.client.host if request.client else ""
+        if not client_allowed(ip):
+            logger.warning(f"拦截白名单外的客户端: {ip} {request.method} {request.url.path}")
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "来源不在允许范围内（见 BERKSHIRE_CLIENT_ALLOWLIST）"},
+            )
+        if not (ip == "127.0.0.1" or ip == "::1") and ip not in _logged_clients:
+            # 非本机来源首次出现时留一行审计，便于判断要不要收紧
+            _logged_clients.add(ip)
+            logger.info(f"非本机客户端访问（已放行）: {ip} {request.method} {request.url.path}")
+        return await call_next(request)
+
+
+app.add_middleware(ClientGuardMiddleware)
 
 # ==================== Auth (JWT) ====================
 from .core.config import BERKSHIRE_API_TOKEN
@@ -236,7 +369,7 @@ async def _cleanup_old_tasks():
     while True:
         await asyncio.sleep(86400)
         try:
-            task_store.cleanup_old_tasks(max_age_days=7)
+            get_repository().cleanup_old_tasks(max_age_days=7)  # 连带清理孤儿检查点
         except Exception as e:
             logger.warning(f"Task cleanup failed: {e}")
         # E6: per-task scratchpad JSONL files expire together with tasks.

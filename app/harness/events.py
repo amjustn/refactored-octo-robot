@@ -13,6 +13,8 @@ consumes these):
   the new ``{"type": "cancelled"}``.
 - New types ``context_ready / tool_call / guard_warning`` are pure
   additions; old frontends must ignore unknown types.
+- ``awaiting_confirmation``（HITL 人工确认门）同样是纯新增类型；
+  未开启确认门的任务永不发出该事件。
 """
 from __future__ import annotations
 
@@ -35,6 +37,9 @@ class EventType(StrEnum):
     COMPLETE = "complete"
     ERROR = "error"
     CANCELLED = "cancelled"              # new: explicit cancel type (additive)
+    # HITL：multi 辩论完成后的人工确认门（默认关闭；spec.require_debate_confirm
+    # 开启时在 Team Lead 综合前发出，payload 含 gate/votes/reviews/timeout_s）。
+    AWAITING_CONFIRMATION = "awaiting_confirmation"
 
 
 @dataclass

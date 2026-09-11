@@ -27,7 +27,13 @@ from ..harness import (
     is_active as harness_is_active,
 )
 from ..harness import (
+    pending_confirmation as harness_pending_confirmation,
+)
+from ..harness import (
     prepare_resume as harness_prepare_resume,
+)
+from ..harness import (
+    resolve_confirmation as harness_resolve_confirmation,
 )
 from ..harness import (
     run as harness_run,
@@ -69,6 +75,7 @@ async def api_start_research(request: "Request", req: ResearchRequest):
         skill, req.arguments, llm_override=llm_config,
         caller="http", stream=False,
         attachments=req.attachments or "",
+        debate_confirm=bool(getattr(req, "debate_confirm", False)),
     )
     result = await harness_run(spec)
 
@@ -93,6 +100,30 @@ async def api_cancel_research(task_id: str):
     return harness_cancel(task_id)
 
 
+@router.post("/api/task/{task_id}/confirm")
+async def api_confirm_task(task_id: str, request: "Request"):
+    """HITL 辩论后人工确认门决议：approve 放行 / modify 批注后放行 / reject 终止。
+
+    JWT 由全局中间件统一把关（/api/*）；无等待中的确认门（不存在、
+    已决议或已超时清理）返回 404。reject 复用标准取消路径：状态落库
+    cancelled、已消耗 token 照常计费、已完成 Agent 成果存 partial 报告。
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    action = str(body.get("action") or "").strip()
+    note = str(body.get("note") or "").strip()[:2000]
+    if action not in ("approve", "reject", "modify"):
+        raise HTTPException(status_code=400, detail="action 必须是 approve / reject / modify")
+    ok = harness_resolve_confirmation(task_id, action, note)
+    if not ok:
+        raise HTTPException(status_code=404, detail="该任务没有等待中的确认门（不存在、已处理或已超时）")
+    return {"task_id": task_id, "status": "confirmed", "action": action}
+
+
 @router.post("/api/tasks/{task_id}/resume")
 async def api_resume_task(request: "Request", task_id: str):
     """断点续跑：复用上次成功的 Agent 成果，只重跑失败的 Agent。
@@ -107,8 +138,11 @@ async def api_resume_task(request: "Request", task_id: str):
     except Exception:
         body = {}
     llm_config = _validate_llm_config(body.get("llm_config") if isinstance(body, dict) else None)
+    # HITL：续跑任务可同样开启辩论后人工确认门
+    debate_confirm = bool(body.get("debate_confirm", False)) if isinstance(body, dict) else False
 
-    plan, error = await harness_prepare_resume(task_id, llm_override=llm_config)
+    plan, error = await harness_prepare_resume(task_id, llm_override=llm_config,
+                                               debate_confirm=debate_confirm)
     if error:
         raise HTTPException(status_code=400, detail=error)
 
@@ -119,6 +153,10 @@ async def api_resume_task(request: "Request", task_id: str):
             prefill_results=plan["prefill_results"],
             report_overwrite=plan["report_overwrite"],
             billing_accumulate=True,
+            prefill_context=plan.get("prefill_context"),
+            prefill_goal_hints=plan.get("prefill_goal_hints"),
+            prefill_articles=plan.get("prefill_articles"),
+            prefill_debate=plan.get("prefill_debate"),
         )
     )
     return {
@@ -148,12 +186,15 @@ async def ws_research(websocket: WebSocket, skill_name: str):
         token = req.get("token", "")
         watch_task_id = req.get("watch_task_id", "") or ""
         llm_config = _validate_llm_config(req.get("llm_config"))
+        # HITL：辩论后人工确认门开关（默认关闭，缺失/非真值皆为关）
+        debate_confirm = bool(req.get("debate_confirm", False))
     except json.JSONDecodeError:
         arguments = data
         attachments = ""
         token = ""
         watch_task_id = ""
         llm_config = None
+        debate_confirm = False
 
     if not _wc._ws_verify_jwt(token):
         await websocket.send_json({"type": "error", "message": "Unauthorized"})
@@ -192,6 +233,7 @@ async def ws_research(websocket: WebSocket, skill_name: str):
     spec = TaskSpec.build(
         skill, arguments, llm_override=llm_config, caller="ws", stream=True,
         attachments=attachments,
+        debate_confirm=debate_confirm,
     )
 
     # Subscribe BEFORE run() so no events are lost; forward bus → websocket.
@@ -287,6 +329,15 @@ async def _ws_watch_task(websocket: WebSocket, task_id: str):
                 })
             return
 
+        # HITL：任务正停在人工确认门时，向重连订阅者重放 awaiting_confirmation
+        # 帧，前端据此重新渲染确认卡片（帧为注册表中的完整 WS 载荷）。
+        pending = harness_pending_confirmation(task_id)
+        if pending:
+            try:
+                await websocket.send_json(pending)
+            except Exception:
+                return
+
         async def _client_gone():
             try:
                 await websocket.receive_text()
@@ -332,6 +383,10 @@ async def api_task_status(task_id: str):
         payload["duration_seconds"] = extras["duration_s"]
     if extras.get("cost_yuan") is not None:
         payload["cost_yuan"] = extras["cost_yuan"]
+    # 断点续跑：interrupted 任务留有检查点时前端可提示「可恢复」
+    payload["has_checkpoints"] = bool(extras.get("has_checkpoints"))
+    if extras.get("checkpoint_phases"):
+        payload["checkpoint_phases"] = extras["checkpoint_phases"]
     return payload
 
 

@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>AI Berkshire Web - 价值投资研究工作站</title>
 <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
-<link rel="stylesheet" href="/static/css/style.css?v=20260819b"></head>
+<link rel="stylesheet" href="/static/css/style.css?v=20260911e"></head>
 <body>
 <div id="toast-container"></div>
 <div id="report-dblclick-hint" class="report-dblclick-hint" style="display:none" title="双击报告内容，可跳转到独立页面查看（内容与字体不变）">💡 双击报告<br>新页面查看</div>
@@ -64,13 +64,16 @@
           </div>
           <div id="file-preview" class="file-preview" style="display:none"></div>
         </div>
-        <div id="llm-notice" class="llm-notice" style="display:none" onclick="openLlmModal()">
-          ⚠ 你还没有配置模型。点击此处填写供应商、模型和 API Key →
+        <div id="llm-notice" class="llm-notice warn" style="display:none" onclick="openLlmModal()"
+             role="button" tabindex="0" aria-label="打开模型设置"
+             onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openLlmModal();}">
+          <span id="llm-notice-text">⚠ 你还没有配置模型。点击此处填写供应商、模型和 API Key →</span>
         </div>
         <div class="actions">
           <button id="btn-research" class="btn-primary" onclick="startResearch()">开始研究</button>
           <button id="btn-cancel" class="btn-cancel" style="display:none" onclick="cancelResearch()">✕ 取消</button>
           <label class="stream-toggle"><input type="checkbox" id="stream-mode" checked><span>流式输出</span></label>
+          <label class="stream-toggle" title="开启后，多Agent辩论完成后会暂停，由你确认或批注后再生成最终报告"><input type="checkbox" id="debate-confirm"><span>辩论后人工确认</span></label>
         </div>
         <span class="char-count" id="charCount"></span>
       </div>
@@ -131,6 +134,17 @@
         <h2>历史报告</h2>
         <div class="history-toolbar">
           <input type="text" class="history-search" id="historySearch" placeholder="搜索报告（文件名/分析目标/技能）..." oninput="filterHistory()">
+          <select id="historySkillFilter" class="history-filter" onchange="filterHistory()" title="按技能筛选">
+            <option value="">全部技能</option>
+          </select>
+          <select id="historySort" class="history-filter" onchange="filterHistory()" title="排序">
+            <option value="time_desc">最新优先</option>
+            <option value="time_asc">最早优先</option>
+            <option value="target">按标的</option>
+            <option value="skill">按技能</option>
+            <option value="size_desc">按文件大小</option>
+          </select>
+          <span class="history-count" id="historyCount"></span>
           <button id="btn-compare" class="btn-compare" onclick="compareSelected()" disabled>对比所选</button>
         </div>
         <div id="history-list"></div>
@@ -207,11 +221,13 @@
 <div id="llm-modal" class="modal-mask" style="display:none" onclick="if(event.target===this)closeLlmModal()">
   <div class="modal-card">
     <h3>模型设置</h3>
-    <p class="modal-tip">配置保存在你的浏览器 localStorage，随请求发送，服务器不落盘。</p>
+    <p class="modal-tip">凭据保存策略：默认只存当前会话（关闭标签页即失效）；勾选「在本机记住」才写入浏览器持久存储。
+      服务器不落盘任何访客 Key，请求只带当前配置。随时可点「清除已保存凭据」删除本机副本（不做导出）。</p>
 
     <label>服务商</label>
     <select id="llm-preset" onchange="onProviderChange()">
-      <option value="deepseek">DeepSeek</option>
+      <option value="server">服务端网关（免配置）</option>
+      <option value="deepseek">DeepSeek（自带 Key）</option>
       <option value="openai">OpenAI</option>
       <option value="anthropic">Anthropic（Claude）</option>
       <option value="google">Google（Gemini）</option>
@@ -239,6 +255,8 @@
       <input type="password" id="llm-api-key" placeholder="sk-..." autocomplete="off">
     </div>
 
+    <p class="modal-tip" id="llm-preset-hint" style="margin:6px 0 0"></p>
+
     <div id="llm-per-agent-block" style="display:none">
       <label class="llm-synthesis-toggle">
         <input type="checkbox" id="llm-per-agent-enabled" onchange="onPerAgentToggle()">
@@ -250,9 +268,15 @@
       </div>
     </div>
 
+    <label class="llm-synthesis-toggle" style="margin-top:10px">
+      <input type="checkbox" id="llm-remember" onchange="onRememberToggle()">
+      <span>在本机记住配置（不勾选＝只保留到本次会话结束）</span>
+    </label>
+
     <div class="modal-actions">
       <button id="btn-llm-test" onclick="testLlmConfig()">测试连接</button>
       <button class="btn-primary" onclick="saveLlmConfig()">保存</button>
+      <button id="btn-llm-clear" onclick="clearLlmCredentials()">清除已保存凭据</button>
       <button onclick="resetLlmConfig()">恢复默认</button>
       <button onclick="closeLlmModal()">关闭</button>
     </div>
@@ -261,16 +285,16 @@
 </div>
 <script src="/static/js/marked.min.js"></script>
 <script src="/static/js/echarts.min.js"></script>
-<script src="https://cdn.bootcdn.net/ajax/libs/dompurify/3.0.6/purify.min.js"></script>
-<script src="/static/js/core.js?v=20260903"></script>
-<script src="/static/js/skills-nav.js?v=20260903"></script>
-<script src="/static/js/llm-config.js?v=20260903"></script>
-<script src="/static/js/research.js?v=20260903"></script>
+<script src="/static/js/purify.min.js?v=20260911"></script>
+<script src="/static/js/core.js?v=20260911"></script>
+<script src="/static/js/skills-nav.js?v=20260911"></script>
+<script src="/static/js/llm-config.js?v=20260911"></script>
+<script src="/static/js/research.js?v=20260911"></script>
 <script src="/static/js/render.js?v=20260903"></script>
-<script src="/static/js/report-actions.js?v=20260903"></script>
-<script src="/static/js/stats.js?v=20260903"></script>
-<script src="/static/js/init.js?v=20260903"></script>
-<script src="/static/js/charts.js?v=20260822a"></script>
-<script src="/static/js/skin.js?v=20260819b"></script>
+<script src="/static/js/report-actions.js?v=20260911"></script>
+<script src="/static/js/stats.js?v=20260911"></script>
+<script src="/static/js/init.js?v=20260911"></script>
+<script src="/static/js/charts.js?v=20260911"></script>
+<script src="/static/js/skin.js?v=20260911"></script>
 </body>
 </html>

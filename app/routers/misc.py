@@ -583,8 +583,19 @@ async def api_list_reports():
                         item["partial"] = True
                     if meta.get("task_id"):
                         item["task_id"] = meta["task_id"]
+                    if meta.get("model"):
+                        item["model"] = meta["model"]
+                    if meta.get("guard_warnings"):
+                        item["guard_warnings"] = len(meta["guard_warnings"])
+                        item["degraded"] = True
+                    if meta.get("data_status"):
+                        item["data_status"] = meta["data_status"]
                 except Exception:
                     pass
+            else:
+                # 批C(2026-09-11): 显式标记"无元数据" —— 旧报告只有文件名，
+                # 前端据此显示「未记录」，不猜测补值。
+                item["meta_missing"] = True
             if not item["skill_name"]:
                 # Legacy reports: derive skill from filename prefix
                 item["skill_name"] = f.name.rsplit("_", 2)[0] if "_" in f.name else ""
@@ -609,7 +620,9 @@ async def api_list_reports():
             continue
         if any(not c.startswith("[错误]") for _, c in artifacts):
             item["resumable"] = True
-    return {"reports": reports[:50]}
+    # 批C(2026-09-11): 取消 50 条硬截断 —— 139 条约 55KB，前端一次性渲染即可。
+    # 旧行为让最新 50 条之外的报告（当时 89 份）在 UI 里彻底不可见。
+    return {"reports": reports, "total": len(reports)}
 
 
 @router.get("/api/reports/{filename}")

@@ -59,9 +59,11 @@ function renderDecisions(data) {
   var list = document.getElementById('decisions-list');
   var summary = document.getElementById('decisions-summary');
   var decisions = data.decisions || [];
+  var legacyCount = decisions.filter(function(d) { return d.legacy; }).length;
 
   summary.textContent = decisions.length
-    ? ('共 ' + data.total + ' 条 | ' + data.pending + ' 条待验证')
+    ? ('共 ' + data.total + ' 条 | ' + data.pending + ' 条待验证' +
+       (legacyCount ? ' | ' + legacyCount + ' 条旧条目（标的不明，已排除同股匹配）' : ''))
     : '';
 
   if (!decisions.length) {
@@ -76,13 +78,20 @@ function renderDecisions(data) {
     if (d.confidence) rows += '<div class="decision-row"><b>置信度</b>：' + escHtml(d.confidence) + '</div>';
     if (d.assumptions && d.assumptions !== '未指定') rows += '<div class="decision-row"><b>关键假设</b>：' + escHtml(d.assumptions) + '</div>';
     if (d.target && d.target !== '未指定') rows += '<div class="decision-row"><b>目标价/信号</b>：' + escHtml(d.target) + '</div>';
+    // 批B 补充：历史脏条目标记后显式提示 —— 不把它当正常结论看，
+    // 并给出原标题，保证审计可追溯（条目标题已不再参与同股匹配）
+    if (d.legacy) {
+      rows += '<div class="decision-row"><b>历史条目</b>：' + escHtml(d.legacy_note || '标的不明') +
+        (d.legacy_title ? '（原标题：' + escHtml(d.legacy_title) + '）' : '') + '</div>';
+    }
     var meta = [];
     if (d.skill) meta.push(d.skill);
     if (d.time) meta.push(d.time);
-    return '<div class="decision-item">' +
+    return '<div class="decision-item' + (d.legacy ? ' legacy' : '') + '">' +
       '<div class="decision-head">' +
         '<span class="decision-stock">' + escHtml(d.stock || '未知标的') + '</span>' +
         '<span class="decision-badge ' + status + '">' + statusLabel + '</span>' +
+        (d.legacy ? '<span class="nodata-badge" title="该条目标题是历史脏数据，已排除同股匹配">旧条目</span>' : '') +
         '<span class="decision-time">' + escHtml(meta.join(' | ')) + '</span>' +
       '</div>' +
       '<div class="decision-conclusion">' + escHtml(d.conclusion || '') + '</div>' +
