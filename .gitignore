@@ -14,3 +14,5 @@ data/data_cache.db
 data/skin_settings.json
 *.bak_*
 data_cache.db
+# 运行时追加的失败留痕（每次 eval replay / 自检都会增长，入库后工作区会持续变脏）
+data/decision-skip-log.jsonl
