@@ -49,3 +49,57 @@
 ## 期望输出格式
 
 请按「Q1: [采纳/部分采纳/反驳] + 一句话理由 + 落到计划的动作」逐条回应，并给出更新后的步骤清单（标注哪些步骤因上述回应而调整）。
+
+---
+
+# 复核回应（2026-09-11，全部为实测值，非口头）
+
+> 隔周复核：Q1~Q6 相关改动均已入库并跑通本地 CI。复核所用实测命令：
+> - `bash scripts/check.sh` → 退出码 0，末行 ALL CHECKS PASSED（ruff 全过 / pytest 416 passed / 脚本测试 18+44 全过 / eval replay 140 cassette 全 HIT、6 用例 score=95.0 / 批C 注入层 15+18 全过），用时 1 分 04 秒
+> - `venv/bin/python scripts/verify_ai_berkshire.py --base http://127.0.0.1:8001` → 39 项：PASS 38 / FAIL 0 / PENDING 1（pytest 回归未加 --with-pytest）
+> - 同批提交 ea430ca：`data/decision-skip-log.jsonl` 加入 .gitignore（`git check-ignore` 命中 .gitignore:18；文件仍在磁盘，319 行 / 48,649 字节；跑完 check.sh 后工作区仍干净）
+
+## Q1. `_archive/` 历史备份的范围与处置 → 采纳（untrack，保留磁盘）
+
+- 处置：采纳建议的 untrack，未做物理删除。提交 6856198「untrack _archive historical backups (keep files on disk)」。
+- 实测：`git ls-files _archive | wc -l` = 0；`ls _archive | wc -l` = 18（磁盘条目全在，可回看旧实现）。
+- 同类：`app/main.py.bak_20260817`、`app/main.py.bak_20260908` 均未入库，留在磁盘（`git ls-files | grep -c bak` = 0）。
+
+## Q2. `data/knowledge/*.json` 的 26 个改动不是垃圾 → 采纳（单独 commit，与重构隔离）
+
+- 提交 e664c49「chore: 知识库自动更新快照（4 位大师 + 22 个技能）」，共 26 个文件，全部位于 `data/knowledge/`（非该目录文件数 = 0）。
+- 与重构提交 7ef1f4c / 0f90bfd / d2bfa35 完全分离；未执行任何 `git checkout --` 还原。
+
+## Q3. 8001 运行方式与重启验证 → 采纳（验证流程已落成脚本，不留口头）
+
+- 运行方式确认：裸 uvicorn 进程，非 systemd（无 ai_berkshire unit）。当前 PID 324：`uvicorn app.main:app --host 127.0.0.1 --port 8001 --log-level info`；同批 `/home/q/berk_proxy.py` PID 325。
+- 重启命令：根目录 `start.sh`（`cd ~/ai_berkshire_web && source venv/bin/activate && exec uvicorn app.main:app --host 0.0.0.0 --port 8001 --log-level info`），后台起 → 等端口就绪 → 再验证。
+- 重启前检查：`data/tasks.db` running=0（completed 111 / cancelled 12 / interrupted 10 / failed 1），此刻重启不会打断进行中任务。
+- 重启后确认（实测）：`scripts/verify_ai_berkshire.py --base http://127.0.0.1:8001` → 38 PASS / 0 FAIL（含 BasicAuth 两组合 401/200/401、生产未配 BasicAuth 时 `/app` HTTP 200、前端 10 个脚本 `node --check` 语法全过）。
+- 实操坑（写进流程）：`/api/health` 走统一鉴权中间件，裸 curl 返回 401 Missing Authorization header —— 不能用未带凭据的 curl 判定服务死活，须用上述脚本或带 Authorization。
+- 启动阶段后台任务留痕实测（logs/app.log 2026-09-11 20:17）：`数据源熔断器初始摘除: ['yahoo', 'eastmoney']`、`Circuit breakers seeded from startup health check: ['yahoo', 'eastmoney']`、`Decision-log verify cycle: backfill={'backfilled': 1, 'skipped': 0, 'retry_later': 0, 'failed': 0} verify={'verified': 1, 'unchanged': 24, 'skipped': 1}` —— 种子与决策日志验证在 lifespan 启动阶段确实执行。
+
+## Q4. `.env` 密钥不得出现在汇报中 → 采纳（承诺成立且已核查）
+
+- `.env` 未被 git 跟踪（`git check-ignore -v .env` → .gitignore 第 4 行）。
+- 入库的 REVIEW_FINDINGS.md 做过密钥模式扫描（`sk-xxxx` / `api_key=` / `token=`），无命中；本文所有实测输出只含配置项结构与结构性日志，不含任何 secret 值。审查稿入库不含密钥内容。
+
+## Q5. app.js（2880 行）拆分 → 采纳（先定边界、无构建、按序引入、分批验证）
+
+- 模块边界（提交 0f90bfd）：core（共享状态 / helpers / toast，加载第 1）→ skills-nav → llm-config → research → render → report-actions → stats → init（唯一 DOMContentLoaded，最后），加既有 charts.js / skin.js，前端共 10 个业务脚本。
+- 无构建：`templates/index.html` 按上述顺序共 13 个 script 标签引入（含 marked / echarts / purify 三个第三方），均带 `?v=YYYYMMDD` 缓存击穿参数；未引入任何 JS 工具链。
+- 分批验证：每批后复跑自检脚本；终检 `verify_ai_berkshire.py` 前端静态资产 10 项全 PASS，S10「全部前端脚本语法通过 node --check」（node --check 仅作语法门，不作为构建链）失败=无。
+- 全局引用完整性抽查：`window.name='berkshire_deeplink'`（与 8000 仪表盘复用标签页）已迁至 core.js；research.js 保留 `_batchFallback`；无遗漏。
+
+## Q6. 装配期两个已知坑 → 均已纳入并通过回归门
+
+- 坑1（路由注册方式）：未改动，仍为 `app.router.routes.extend(...)`，未引入 `include_router`；pytest 416 passed，依赖 `app.main` re-export 与 routes 列表的用例未受影响。此条对原计划做了调整：路由装配不再作为重构项。
+- 坑2（lifespan 与 TestClient）：提交 d2bfa35 将 `@app.on_event("startup")` 整体迁移至 lifespan，删除 on_event 防双跑，并新增启动回归门 `tests/test_lifespan_startup.py`（+42 行，使用 `with TestClient(app)` context manager 触发 lifespan，覆盖幂等与 7 个后台任务等价保留）；全量 `pytest tests/` 416 passed 为总回归门。
+
+## 复核新增的有价值项（1 条，待裁定）
+
+### N1. `static/js/app.js` 已是死代码，但仍被 git 跟踪
+
+- 实测：2880 行 / 118,935 字节；`templates/*.html` 的 13 个 script 标签已不含它；`scripts/verify_ai_berkshire.py` 的 LOADED_JS 白名单（10 个）也不含它；全仓仅剩拆分模块注释与本文提到它（`grep -rn "app\.js"` 无任何加载/引用点）。
+- 风险：真实前端入口是 core→…→init 十模块，留着一份 118KB 的旧件会让后来者误判入口，且与拆分前内容重复。
+- 建议（未执行，等裁定）：按 Q1 同法 `git rm --cached static/js/app.js`（保留磁盘，随时可回滚）；若确认无人回看，物理删除亦可，拆分前实现可由提交 0f90bfd 从 git 历史取回。
