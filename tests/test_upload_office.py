@@ -156,3 +156,53 @@ def test_txt_upload_still_works():
     f = resp.json()["files"][0]
     assert f["method"] == "text-extract"
     assert "股东大会" in f["text"]
+
+
+def test_xlsx_upload_extracts_text():
+    """.xlsx 分支回归（openpyxl 路径）。"""
+    from openpyxl import Workbook
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "财务"
+    ws.append(["指标", "数值"])
+    ws.append(["营业收入", "6600亿"])
+    buf = BytesIO()
+    wb.save(buf)
+    resp = _upload([("files", ("financials.xlsx", buf.getvalue(),
+                              "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))])
+    assert resp.status_code == 200
+    f = resp.json()["files"][0]
+    assert f["method"] == "excel-extract"
+    assert "6600亿" in f["text"]
+    assert "error" not in f
+
+
+def test_legacy_xls_upload_extracts_text():
+    """旧版 .xls（OLE2）走 xlrd 分支 —— 回归外部审查报告第 2 条。
+
+    样本 tests/data/sample_legacy.xls 是 2026-09-12 用 xlwt 一次性生成后入库的
+    （xlwt 只是为了造样本，未列入 requirements；要重建样本可选装 xlwt 再跑
+    Workbook().add_sheet/write/save 即可）。
+    """
+    from pathlib import Path
+    sample = Path(__file__).parent / "data" / "sample_legacy.xls"
+    if not sample.exists():
+        pytest.skip("缺少 tests/data/sample_legacy.xls 样本")
+    resp = _upload([("files", ("legacy.xls", sample.read_bytes(), "application/vnd.ms-excel"))])
+    assert resp.status_code == 200
+    f = resp.json()["files"][0]
+    assert f["method"] == "excel-extract"
+    assert "6600亿" in f["text"]
+    assert "error" not in f
+
+
+def test_broken_xls_returns_error_not_zip_message():
+    """损坏的 .xls：返回可读错误，且不再漏出 openpyxl 的英文原文。"""
+    resp = _upload([("files", ("broken.xls", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1 fake ole",
+                              "application/vnd.ms-excel"))])
+    assert resp.status_code == 200
+    f = resp.json()["files"][0]
+    assert "text" not in f
+    assert "error" in f
+    assert "zip" not in f["error"].lower()
+    assert "无法解析" in f["error"]
