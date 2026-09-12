@@ -103,3 +103,17 @@
 - 实测：2880 行 / 118,935 字节；`templates/*.html` 的 13 个 script 标签已不含它；`scripts/verify_ai_berkshire.py` 的 LOADED_JS 白名单（10 个）也不含它；全仓仅剩拆分模块注释与本文提到它（`grep -rn "app\.js"` 无任何加载/引用点）。
 - 风险：真实前端入口是 core→…→init 十模块，留着一份 118KB 的旧件会让后来者误判入口，且与拆分前内容重复。
 - 建议（未执行，等裁定）：按 Q1 同法 `git rm --cached static/js/app.js`（保留磁盘，随时可回滚）；若确认无人回看，物理删除亦可，拆分前实现可由提交 0f90bfd 从 git 历史取回。
+
+---
+
+# 复核补充（2026-09-12）
+
+## Q3 更正：8001 已改由 systemd --user 托管
+
+- 上文 Q3 与 09-11 复核回复里记载的"**裸 uvicorn 进程、非 systemd、无 ai_berkshire unit、重启命令为 start.sh**"**均已过期**。
+- 2026-09-12 实测：`systemctl --user status ai_berkshire` → active (running)、enabled、`Restart=always`、Main PID 155356；`ExecStart=/home/q/ai_berkshire_web/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8001 --log-level info`。unit 由批F（2026-09-11 提交 7ef1f4c）带入仓库根目录，09-12 已安装并启用（`~/.config/systemd/user/ai_berkshire.service`，与仓库内副本内容一致）。
+- **重启命令更正为**：`systemctl --user restart ai_berkshire`。
+- 踩坑留痕：2026-09-12 按旧说法 kill 进程后手动跑 `start.sh`，与 systemd 的 `Restart=always` 抢端口（手动进程先占住 8001，systemd 拉起失败并重试；再次 kill 后 systemd 才成功接管）。`start.sh` 顶部已加注释，指明它只是手动入口以及正确重启命令。
+- 同批实测补充：`/home/q/berk_proxy.py`（8099）实际绑定 `0.0.0.0:8099` 且无任何鉴权，与其自身文档"仅监听本机可访问地址"不符；它持有 `BERKSHIRE_API_TOKEN`，但只代理 `/price/{symbol}`、`/financials/{symbol}` 两个只读端点（不碰研究接口、不烧 LLM Key）。当前安全前提是 WSL2 NAT + Windows `netsh portproxy` 未转发 8099；要对外开放须先加请求头口令并复测 Dify 链路。
+- 另：8001 的局域网可达性经实测收窄——`.wslconfig` 无 mirrored 网络设置（NAT 模式），`netsh portproxy` 全表只有 `0.0.0.0:8000` 一条转发，故 8001 仅本机与 Windows 宿主可达；"Basic Auth 未配置 + /app 注入 JWT"在本机面不增加攻击面，但一旦开远程访问即刻升级为 P0。
+- 详见 Obsidian `项目/AI_Berkshire/AI_Berkshire_外部审查核验_20260912.md`。
