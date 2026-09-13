@@ -241,12 +241,12 @@ class TestRunSingleToolRouting:
         from app.harness.runner import AgentRunner
         calls = self._patch_llm(monkeypatch)
         runner = AgentRunner(task_id="t-route-3")
-        # dyp-ask 未开启 tools_enabled：非流式走 chat_complete
-        r1 = asyncio.run(runner.run_single("dyp-ask", "护城河是什么", context="ctx"))
+        # quality-screen 未开启 tools_enabled：非流式走 chat_complete
+        r1 = asyncio.run(runner.run_single("quality-screen", "沪深300", context="ctx"))
         assert r1 == "plain complete"
         # 流式走 chat_stream
         r2 = asyncio.run(
-            runner.run_single("dyp-ask", "护城河是什么", context="ctx", stream=True)
+            runner.run_single("quality-screen", "沪深300", context="ctx", stream=True)
         )
         assert r2 == "piece"
         assert calls["with_tools"] == []
@@ -259,7 +259,7 @@ class TestRunSingleToolRouting:
         # agent_role 在 TOOL_ENABLED_AGENTS 中，即使技能未开 tools_enabled
         # 也走工具循环（既有行为不变）
         result = asyncio.run(
-            runner.run_single("dyp-ask", "目标", agent_role="researcher", context="ctx")
+            runner.run_single("quality-screen", "目标", agent_role="researcher", context="ctx")
         )
         assert result == "tool-loop result"
         assert len(calls["with_tools"]) == 1

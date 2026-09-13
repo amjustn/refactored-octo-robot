@@ -109,7 +109,7 @@ def test_prepare_resume_rejects(tmp_repo):
     conn = sqlite3.connect(str(tmp_repo.store.db_path), timeout=10)
     conn.execute(
         """INSERT INTO tasks (task_id, skill_name, status, arguments, created_at, updated_at)
-           VALUES ('t-single', 'dyp-ask', 'failed', 'X', ?, ?)""",
+           VALUES ('t-single', 'quality-screen', 'failed', 'X', ?, ?)""",
         (now, now),
     )
     conn.commit()

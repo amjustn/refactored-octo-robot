@@ -48,15 +48,6 @@ DEFAULT_SKILL_KNOWLEDGE = {
         "update_notes": "关注多Agent协作模式下的信息冗余和遗漏问题",
         "last_updated": "default_bootstrap",
     },
-    "investment-checklist": {
-        "skill_name": "investment-checklist",
-        "display_name": "巴菲特Checklist",
-        "latest_frameworks": "六关筛选：1)能力圈 2)好生意(差异化+定价权) 3)护城河(品牌/转换成本/网络效应/规模) 4)管理层(诚信+能力) 5)安全边际(>30%) 6)决策纪律",
-        "key_criteria": "一票否决制：任何一关不通过即排除，不打太极",
-        "data_sources": "公司年报+行业研报+竞争对手对比",
-        "update_notes": "关注新兴行业(如AI、Web3)对传统护城河定义的挑战",
-        "last_updated": "default_bootstrap",
-    },
     "earnings-review": {
         "skill_name": "earnings-review",
         "display_name": "财报精读",
@@ -163,15 +154,6 @@ DEFAULT_SKILL_KNOWLEDGE = {
         "key_criteria": "每篇3000-5000字，数据来源明确，观点鲜明，公众号级深度",
         "data_sources": "实时行情+财务数据+新闻+历史年报，全部通过工具获取",
         "update_notes": "关注长文写作中的信息密度与可读性平衡",
-        "last_updated": "default_bootstrap",
-    },
-    "dyp-ask": {
-        "skill_name": "dyp-ask",
-        "display_name": "段永平问答",
-        "latest_frameworks": "段永平思维模型：1)好生意(差异化+定价权) 2)本分文化 3)用户导向 4)长期主义 5)Stop doing list",
-        "key_criteria": "投资判断标准：懂的生意+好生意+好价格+长期持有",
-        "data_sources": "段永平雪球发言+步步高/OPPO/苹果投资案例",
-        "update_notes": "关注段永平最新雪球发言和投资观点更新",
         "last_updated": "default_bootstrap",
     },
     "financial-data": {
