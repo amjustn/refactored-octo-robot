@@ -342,6 +342,43 @@ def _entry(url: str, title: str, channel: str) -> dict:
 #  公开 API — 列表
 # ═══════════════════════════════════════════════════════
 
+# ── 未来日期过滤（2026-09-13，静态审计第 2 条）────────────────────
+# 慧博列表页偶尔出现"源日期晚于抓取日"的条目：实测 2026-09-13 抓取时，
+# 港美研究 / 公司调研 / 行业分析 三个频道各有 1 条日期为 2026-09-14
+# （华鑫证券-传媒行业动态研究报告-260914）。这类条目会让报告把"明天"的研报
+# 当"最新"，故在返回前剔除并留痕（剔除数量 + 样例写进 warning 日志）。
+def _today_str() -> str:
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def is_future_date(date_str: str, today: str = "") -> bool:
+    """日期字符串晚于今天 → True；空值/非法日期 → False（不误删）。"""
+    d = str(date_str or "").strip()
+    t = str(today or "").strip() or _today_str()
+    try:
+        dd = datetime.strptime(d, "%Y-%m-%d").date()
+        tt = datetime.strptime(t, "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        return False
+    return dd > tt
+
+
+def drop_future_entries(entries: list, channel: str = "") -> list:
+    """剔除日期晚于今天的条目；有剔除时记 warning（含数量与样例）。"""
+    kept, dropped = [], []
+    for e in entries or []:
+        if isinstance(e, dict) and is_future_date(e.get("date")):
+            dropped.append(e)
+        else:
+            kept.append(e)
+    if dropped:
+        sample = "；".join(f"{e.get('date')} {str(e.get('title') or '')[:40]}" for e in dropped[:3])
+        logger.warning(
+            f"HIBOR 剔除 {len(dropped)} 条未来日期条目（频道={channel or '-'}）：{sample}"
+        )
+    return kept
+
+
 def fetch_hibor_reports(channel: str = "精选研报", keyword: str = "", limit: int = 20) -> list:
     """抓取慧博某频道的研报列表，可按标题关键词过滤。
 
@@ -368,7 +405,9 @@ def fetch_hibor_reports(channel: str = "精选研报", keyword: str = "", limit:
 
     cached = _cache_get(cache_key)
     if cached is not None:
-        return cached
+        # 缓存里可能存着过滤规则上线之前抓的条目（TTL 30 分钟），
+        # 返回前同样过一遍未来日期过滤，避免旧缓存绕过规则。
+        return drop_future_entries(cached, channel)
 
     html = _fetch_list_page(HIBOR_CHANNELS[channel])
     if not html:
@@ -381,6 +420,9 @@ def fetch_hibor_reports(channel: str = "精选研报", keyword: str = "", limit:
         if kw and kw not in title.lower():
             continue
         reports.append(_entry(r["url"], title, channel))
+
+    # 剔除源日期晚于今天的条目（见 is_future_date/drop_future_entries 注释）
+    reports = drop_future_entries(reports, channel)
 
     # 有日期的在前，按日期倒序；无日期保持原顺序垫底
     reports.sort(key=lambda x: (x.get("date") or "0000-00-00"), reverse=True)

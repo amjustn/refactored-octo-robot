@@ -322,6 +322,58 @@ else:
 
 
 # ═══════════════════════════════════════════════════════
+#  D. 未来日期过滤（2026-09-13，静态审计第 2 条）
+# ═══════════════════════════════════════════════════════
+section("D. 未来日期过滤（源日期晚于抓取日）")
+from app.tools.hibor_reports import drop_future_entries, is_future_date  # noqa: E402
+from datetime import date as _date, timedelta as _td  # noqa: E402
+
+_today = _date.today().isoformat()
+_tomorrow = (_date.today() + _td(days=1)).isoformat()
+_yesterday = (_date.today() - _td(days=1)).isoformat()
+
+check("D1 明天日期判定为未来", is_future_date(_tomorrow, _today) is True)
+check("D2 今天日期不算未来", is_future_date(_today, _today) is False)
+check("D3 昨天日期不算未来", is_future_date(_yesterday, _today) is False)
+check("D4 空日期不误判", is_future_date("", _today) is False and is_future_date(None, _today) is False)
+check("D5 非法日期格式不误判", is_future_date("2026-13-45", _today) is False and is_future_date("明天", _today) is False)
+
+_sample = [
+    {"title": "A-正常", "date": _today},
+    {"title": "B-未来", "date": _tomorrow},
+    {"title": "C-无日期", "date": ""},
+    {"title": "D-更早", "date": _yesterday},
+]
+_kept = drop_future_entries(_sample, "验证频道")
+check("D6 未来日期条目被剔除，其余保留", len(_kept) == 3 and all("未来" not in k["title"] for k in _kept),
+      f"kept={[k['title'] for k in _kept]}")
+check("D7 剔除不改变其余条目顺序与内容",
+      [k["title"] for k in _kept] == ["A-正常", "C-无日期", "D-更早"])
+check("D8 全为未来日期时返回空列表", drop_future_entries([{"title": "x", "date": _tomorrow}]) == [])
+check("D9 空输入 / 非 dict 元素不抛异常", drop_future_entries([]) == [] and drop_future_entries(None) == [])
+
+# 联网：真实频道里不得再出现未来日期
+_chan_future = {}
+for _ch in ("港美研究", "公司调研", "行业分析"):
+    _rows = fetch_hibor_reports(channel=_ch, limit=60)
+    _fut = [r for r in _rows if r.get("date") and r["date"] > _today]
+    _chan_future[_ch] = (len(_rows), len(_fut))
+    print(f"  ▌{_ch}: {len(_rows)} 条，未来日期 {len(_fut)} 条")
+check("D10 真实频道返回中无未来日期条目", all(f == 0 for _, f in _chan_future.values()), str(_chan_future))
+check("D11 过滤后仍保留足量条目（>=20 条/频道）", all(n >= 20 for n, _ in _chan_future.values()), str(_chan_future))
+
+# 注入块同样不得含未来日期
+_ctx = format_hibor_context(keyword="半导体设备", limit=10)
+check("D12 注入块不含未来日期", _tomorrow not in (_ctx or ""))
+
+# 源码级：过滤接在唯一入口 fetch_hibor_reports 上（fetch_hibor_for_symbol/_search_keyword 都经它）
+_src = (ROOT / "app" / "tools" / "hibor_reports.py").read_text(encoding="utf-8")
+check("D13 过滤接在 fetch_hibor_reports 的返回路径上", "reports = drop_future_entries(reports, channel)" in _src)
+check("D14 剔除时留 warning 日志（含数量与样例）",
+      "HIBOR 剔除" in _src and "len(dropped)" in _src)
+
+
+# ═══════════════════════════════════════════════════════
 #  汇总
 # ═══════════════════════════════════════════════════════
 section("汇总")
