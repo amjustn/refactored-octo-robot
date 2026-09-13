@@ -52,6 +52,12 @@ logger = logging.getLogger("ai_berkshire.harness.runner")
 
 # ── P1: soft loop limits ────────────────────────────────────────
 MAX_SAME_TOOL_CALLS = 3  # per agent per tool name within one task
+# 单Agent技能（skill_tools_enabled）走同一条 function-calling 循环，但它是"一个
+# Agent 干完整篇深度研究"，3 次/工具会直接卡死研究：2026-09-13 端到端实测
+# 报告里出现"网络检索工具本次调用已达上限，部分治理细节以已获取的公开数据为限"
+# （web_search 3 次命中上限、calc 2 次被拒）。多Agent成员是并行分工、每个角色
+# 只需要几次调用，故保持 3 不变；单Agent给到 8。
+MAX_SAME_TOOL_CALLS_SINGLE = 8
 
 # ── P2: audit trail / scratchpad ─────────────────────────────────
 SCRATCHPAD_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "scratchpad"
@@ -395,9 +401,10 @@ class AgentRunner:
         except Exception:
             pass  # never let scratchpad failure block research
 
-    def _tool_executor(self, agent: Optional[str] = None):
+    def _tool_executor(self, agent: Optional[str] = None, max_same_tool_calls: int = MAX_SAME_TOOL_CALLS):
         """P1: function-calling tool executor with soft loop limits.
-        Each agent can call the same tool at most MAX_SAME_TOOL_CALLS times.
+        Each agent can call the same tool at most ``max_same_tool_calls`` times
+        (single-agent tool loops get a larger budget, see the constants above).
         Exceeding returns a limit message instead of executing.
         P2: every call is logged to the scratchpad JSONL.
 
@@ -417,10 +424,10 @@ class AgentRunner:
             current = counts.get(name, 0)
 
             # P1: soft loop limit check
-            if current >= MAX_SAME_TOOL_CALLS:
+            if current >= max_same_tool_calls:
                 limit_msg = json.dumps({
                     "error": "TOOL_LOOP_LIMIT",
-                    "message": f"已调用 {name} {current} 次，达到上限 {MAX_SAME_TOOL_CALLS} 次。"
+                    "message": f"已调用 {name} {current} 次，达到上限 {max_same_tool_calls} 次。"
                                f"请基于已有数据直接输出结论，不要再调用此工具。",
                 }, ensure_ascii=False)
                 # Log the limit hit to scratchpad
@@ -498,11 +505,13 @@ class AgentRunner:
         )
         if agent_role in TOOL_ENABLED_AGENTS or skill_tools_enabled:
             tool_label = agent_role or skill_name or "default"
+            # 单Agent技能一个人干完整篇研究 → 放宽每工具循环上限（见常量注释）
+            _cap = MAX_SAME_TOOL_CALLS_SINGLE if skill_tools_enabled else MAX_SAME_TOOL_CALLS
             # Function-calling loop is non-streaming; emit whole result.
             result = await chat_complete_with_tools(
                 system_prompt, user_msg,
                 tools=ALL_TOOL_SCHEMAS,
-                tool_executor=self._tool_executor(tool_label),
+                tool_executor=self._tool_executor(tool_label, max_same_tool_calls=_cap),
                 llm_config=llm_config,
             )
             self._note_tool_fallback(tool_label)
