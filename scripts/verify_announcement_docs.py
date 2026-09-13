@@ -153,6 +153,20 @@ async def part_b_live() -> None:
     check("B14 对比：公告详情页被标注为非正文（quality != ok）",
           em.get("quality") in ("shell", "thin"), f"quality={em.get('quality')} len={len(em.get('content') or '')}")
 
+    # 注入白名单在真实上下文里生效（第1步）：管理层技能拿到年报正文摘录块，
+    # 非白名单技能不注入（避免给全部技能加首次下载成本）
+    from app.core.context import build_full_context
+    ctx_mgmt = await build_full_context(
+        arguments="澜起科技你给我一个深度报告", skill_name="management-deep-dive")
+    check("B15 管理层技能上下文含年报正文摘录块", "定期报告正文摘录" in ctx_mgmt,
+          f"len={len(ctx_mgmt)}")
+    check("B16 摘录块带董监高章节锚点与来源",
+          "董事和高级管理人员的情况" in ctx_mgmt and "static.cninfo.com.cn" in ctx_mgmt)
+    ctx_ind = await build_full_context(
+        arguments="澜起科技你给我一个深度报告", skill_name="industry-research")
+    check("B17 非白名单技能不注入该块（成本只在需要处付）",
+          "定期报告正文摘录" not in ctx_ind, f"len={len(ctx_ind)}")
+
 
 def main() -> int:
     part_a_offline()
