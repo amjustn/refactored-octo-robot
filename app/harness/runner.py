@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Optional
 
 from ..core.config import AGENT_TIMEOUT, MAX_PARALLEL_AGENTS
+from ..core.context import data_source_label  # 定义在 core/context.py，非 harness/context.py
 from ..core.llm import chat_complete, chat_complete_with_tools, chat_stream, get_usage, pop_tool_fallback
 from ..models.schemas import AgentProgress
 from ..skills import build_user_prompt, get_skill
@@ -965,12 +966,15 @@ class AgentRunner:
                 await self._save_artifact(agent_name, post_result)
 
         all_agent_count = len(agent_names)
+        # 2026-09-13：大师知识库已按技能白名单注入（见 core/context.MASTER_KB_SKILLS），
+        # 报告头不能对非白名单技能继续声称用了大师知识库 —— 那会变成假陈述。
+        _data_source = data_source_label((skill or {}).get("name", ""))
         final_report = f"""# AI Berkshire 投研报告
 
 **目标**：{arguments}
 **框架**：{skill['display_name']}
 **执行模式**：{success_count}/{all_agent_count} Agent 成功{'（' + str(failed_count) + ' 个失败）' if failed_count else ''}{'，分阶段执行' if post_synthesis_agents else ''}
-**数据源**：实时市场数据 + 投资大师知识库
+**数据源**：{_data_source}
 
 {synthesis}
 
@@ -1123,7 +1127,7 @@ class AgentRunner:
             f"# 深度系列长文：{arguments}\n",
             f"**框架**：{skill['display_name']}",
             f"**执行模式**：系列生成（{success_count}/{total} 篇成功{f'，{failed_count} 篇失败' if failed_count else ''}）",
-            "**数据源**：实时市场数据 + 投资大师知识库\n",
+            "**数据源**：" + data_source_label((skill or {}).get("name", "")) + "\n",
         ]
 
         for i, (topic, article) in enumerate(articles):

@@ -138,10 +138,41 @@ def build_company_context(symbol: str, price_data: dict = None, news_data: list 
     return "\n".join(parts) if parts else ""
 
 
-def build_knowledge_context() -> str:
-    """Build investment philosophy context from knowledge base."""
+# ── 大师知识库注入范围（2026-09-13）────────────────────────────
+# 该知识库是四位投资大师（巴菲特/芒格/段永平/李录）的理念摘要，实测 4317 字符/次，
+# 原先在 build_full_context 里【无条件】注入给全部 21 个技能 —— 用户指出管理层深研 /
+# 未上市公司研究 / 券商研报这类技能与"大师视角"无关，属重复包装，要求删减。
+# 现改为按技能白名单注入；白名单依据 = 技能本体就是四大师框架（见各技能 .md）。
+# 知识库本身与定时抓取任务保留，白名单内技能照旧使用。
+MASTER_KB_SKILLS = {
+    "investment-research",   # 四大师综合分析（7 模块按四位大师视角编排）
+    "investment-team",       # 多 Agent 投研团队（4 个 Agent 各按一位大师视角）
+    "earnings-team",         # 财报精读团队（4 个 Agent 各按一位大师视角）
+    "thesis-tracker",        # 持仓评估（技能文件内即段永平/李录语录）
+}
+
+
+def build_knowledge_context(skill_name: str = "") -> str:
+    """Build investment philosophy context from knowledge base.
+
+    只对 MASTER_KB_SKILLS 内的技能注入；其余技能返回空串。
+    skill_name 缺省（无技能上下文）时同样不注入 —— 缺省关闭，避免"无条件注入"回归。
+    """
+    if skill_name not in MASTER_KB_SKILLS:
+        return ""
     from ..tools.knowledge_updater import get_knowledge_summary_for_prompt
     return get_knowledge_summary_for_prompt()
+
+
+def data_source_label(skill_name: str = "") -> str:
+    """报告头「数据源」标注。
+
+    只对 MASTER_KB_SKILLS 内的技能声称使用了大师知识库 —— 否则报告头会对
+    非白名单技能做出假陈述（2026-09-13 白名单化后同步收紧）。
+    """
+    return "实时市场数据" + (
+        " + 投资大师知识库" if skill_name in MASTER_KB_SKILLS else ""
+    )
 
 
 # ── 定期报告正文摘录（董监高/持股/薪酬）注入范围（2026-09-13）──────
@@ -600,9 +631,9 @@ async def build_full_context(arguments: str = "", skill_name: str = "", goal_hin
         except Exception as e:
             logger.debug(f"Skill knowledge context failed: {e}")
 
-    # Add investment philosophy knowledge
+    # Add investment philosophy knowledge（仅 MASTER_KB_SKILLS 内的技能，2026-09-13）
     try:
-        knowledge = build_knowledge_context()
+        knowledge = build_knowledge_context(skill_name)
         if knowledge:
             parts.append(knowledge)
     except Exception as e:
