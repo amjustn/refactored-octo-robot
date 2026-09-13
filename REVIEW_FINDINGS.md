@@ -199,3 +199,70 @@
 - 慧博研报全文需登录，匿名只能拿列表与摘要预览；中盘个股有时不在当天列表页快照内（返回空块，不编造）。
 - 新开工具的技能输出改为整段非流式（机制如此）；单Agent prompt tokens 由 ~4k 涨到 ~180-210k，成本与耗时（109s → 252s）上升需观察。
 - 单Agent 每工具调用上限已从 3 放宽到 8（`MAX_SAME_TOOL_CALLS_SINGLE`）；若成本过高可回调该常量。
+
+---
+
+# 静态审计后续收紧（2026-09-13 第1~4步）
+
+外部静态审计（Codex，`C:\Users\13531\Documents\Codex\2026-09-13\...\static-audit-20260913.md`）
+结论为"通过，无阻断性问题"，同时提出 3 条收紧项 + 1 条风险项。逐条实测复核后全部成立，按 1→2→3→4
+顺序落地（每步跑自检再进下一步）。
+
+## 第 1 步（提交 b4d2b46）：公告正文打通
+
+**审计原文**：read_webpage 验收把"51 字符通用风险声明"判为"公告页可读"，不能证明取得正文。
+
+**实测复核（比审计说的更严重）**：
+- 东财公告详情页：read_webpage 得 51 字符"郑重声明…以交易所公告为准"，`quality` 为空判据下算成功。
+- 巨潮公告详情页：264 字符全是 `{{stockName}}` 这类 Vue 占位符 —— 也是 JS 空壳。
+- 结论：公告正文经网页**根本读不到**，此前"公告源已接入"只对元数据成立。
+
+**修复**：新增 `app/tools/announcement_docs.py` —— 由巨潮链接里的 announcementId +
+announcementTime 拼静态 PDF（`http://static.cninfo.com.cn/finalpage/<日期>/<id>.PDF`，实测
+2025 年报 248 页 3.72MB、2026 半年报 196 页 3.29MB 均可下载），PyMuPDF 抽全文后按"字符间允许
+空白"的锚点正则定位「董事和高级管理人员的情况」章节（含主板/科创板/回退共 7 个锚点变体），
+只缓存章节摘录（TTL 30 天，缓存键不含 max_chars）。命中摘录实测含杨崇和、持股变动、薪酬字段；
+冷启动 2.2s、缓存命中 <0.01s。
+
+接入：`core/context.py` 公告分支追加正文摘录（仅对 7 个管理层/财务精读技能开启，避免给全部技能
+加首次下载成本）；新增工具 `fetch_announcement_fulltext` 供带工具技能按需核实。
+`read_webpage` 增加 `quality` 标记（ok/shell/thin）：模板占位符或 <200 字符判 shell、<400 判 thin，
+并在 note 指向 PDF 工具 —— 调用方再也不会把落地页当正文。
+
+自检：`scripts/verify_announcement_docs.py` **34 项**（离线 20 + 联网 14）；
+`scripts/verify_read_webpage_redirect.py` 断言由"内容非空"收紧为"必须如实标注为非正文"，16 项。
+
+## 第 2 步（提交 d0bf5ca）：慧博列表剔除未来日期条目
+
+**审计原文**：慧博列表出现 2026-09-14（抓取日为 09-13）的条目，建议拒绝/标记并纳入回归。
+
+**实测复核**：港美研究 / 公司调研 / 行业分析 三频道各 60 条里各有 1 条日期为 2026-09-14
+（华鑫证券-传媒行业动态研究报告-260914），占 1.7%；是源站自身日期，非解析错误。
+
+**修复**：`is_future_date`（strptime 真解析，空值/非法日期不误删）+ `drop_future_entries`
+（剔除并按数量+样例记 warning），接在唯一入口 `fetch_hibor_reports` 的返回路径上，
+**缓存路径同样过滤**（否则 TTL 30 分钟的旧缓存会绕过新规则 —— 自检 D10 抓出来的）。
+实测三频道由"60 条含 1 条未来"变为"59 条含 0 条"。
+
+自检：`scripts/verify_hibor.py` 新增 D 段 14 项（离线 9 + 联网 3 + 源码级 2），35 → **49 项**。
+
+## 第 3 步（提交 ad8f99b）：报告 meta 记录工具调用汇总
+
+**审计原文**：单Agent 工具链把 prompt 从 ~3.8k 提到 180k–210k tokens、每工具可调 8 次，
+应在真实流量上加观测/告警。
+
+**实测复核**：91 份 meta.json 键集合为 skill_name/arguments/duration_seconds/tokens/created_at/
+summary/task_id/model/guard_warnings/data_status —— **无任何工具字段**；工具调用只在
+`data/scratchpad/<task>.jsonl`（69 文件 2932 条）。审计说得对，而且比它描述的更彻底。
+
+**修复**：runner 在 run() 末尾留痕（含撞上限次数 `limit_hits`，被拒调用不计入计数但"撞上限"
+本身要观测）；`persist.save_report` 写 `meta["tool_calls"]`（total / by_tool / by_agent /
+agents_with_tools / limit_hits，各表 ≤20 条；total=0 不写字段）。
+
+自检：`scripts/verify_tool_call_meta.py` **25 项**（汇总函数 13 + 落盘 6 + 接线 6）。
+
+## 第 4 步：重新打包审计包（同一 HEAD）
+
+第 3 条审计项指出包内 `manifest.md` 的 HEAD（ab8925a）与交接文档提交（49badfa）不一致 ——
+成立，是打包时序问题。重打包后 manifest / patches / handoff 全部基于同一 HEAD，
+并把本轮的 4 个提交补丁、全部自检输出一并纳入。
