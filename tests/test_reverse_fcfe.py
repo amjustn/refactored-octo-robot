@@ -223,6 +223,42 @@ def test_fcfe_basis_echoed():
 
 # ── 与 three_scenario 的接线 ────────────────────────────────
 
+def test_growth_rates_omitted_still_works_for_fcfe_and_ddm():
+    """线上实测踩过的坑（2026-09-13 E2E）：模型按 schema 描述省略 growth_rates →
+    原实现把它写成位置必填 → TypeError → 连续失败把 three_scenario 熔断，三个锚全废。
+    现在必须：DDM/FCFE 省略 growth_rates 可用；PE/PB/PS 省略得到可读错误而非 TypeError。"""
+    fx = three_scenario(price=191.96, shares_100m=12.222, anchor="FCFE",
+                        fcfe_per_share=0.3405, discount_rates=[0.09, 0.10, 0.11])
+    assert "sensitivity" in fx and "error" not in fx
+    ddm = three_scenario(price=41.35, shares_100m=252.2, anchor="DDM",
+                         dps=1.97, discount_rates=[0.065, 0.075, 0.085])
+    assert "sensitivity" in ddm and "error" not in ddm
+    pe = three_scenario(price=100.0, shares_100m=10.0, anchor="PE", eps=5.0,
+                        multiples=[20, 25, 30])
+    assert "error" in pe and "growth_rates" in pe["error"]
+    assert "TypeError" not in pe["error"]
+
+
+def test_growth_rates_omitted_pe_pb_ps_all_readable_error():
+    for anchor, kw in (("PE", {"eps": 5.0}), ("PB", {"bvps": 10.0}),
+                       ("PS", {"revenue_per_share": 8.0})):
+        out = three_scenario(price=100.0, shares_100m=10.0, anchor=anchor,
+                             multiples=[2, 3, 4], **kw)
+        assert "error" in out and anchor in out["error"]
+
+
+def test_multiples_omitted_returns_readable_error():
+    out = three_scenario(price=100.0, shares_100m=10.0, anchor="PE",
+                         eps=5.0, growth_rates=[0.05, 0.1, 0.15])
+    assert "error" in out and "multiples" in out["error"]
+
+
+def test_unknown_anchor_lists_fcfe():
+    out = three_scenario(price=100.0, shares_100m=10.0, anchor="DCF",
+                         growth_rates=[0.1], multiples=[10])
+    assert "error" in out and "FCFE" in out["error"]
+
+
 def test_fcfe_anchor_delegates_to_reverse_fcfe():
     price, fcfe, rates, sh = 100.0, 6.0, [0.09, 0.10, 0.11], 12.2
     direct = reverse_fcfe(price=price, fcfe_per_share=fcfe, discount_rates=rates, shares_100m=sh)

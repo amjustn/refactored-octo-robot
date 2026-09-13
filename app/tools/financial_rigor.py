@@ -141,7 +141,7 @@ def cross_validate(field: str, values: dict, unit: str = "") -> dict:
     }
 
 
-def three_scenario(price: float, shares_100m: float, growth_rates: list,
+def three_scenario(price: float, shares_100m: float, growth_rates: Optional[list] = None,
                    multiples: Optional[list] = None, anchor: str = "PE",
                    eps: Optional[float] = None, bvps: Optional[float] = None,
                    revenue_per_share: Optional[float] = None, pe_multiples: Optional[list] = None,
@@ -166,6 +166,12 @@ def three_scenario(price: float, shares_100m: float, growth_rates: list,
                      输出结构与 DDM 相同(隐含增长率 + 敏感性矩阵);
                      **适用于低分红/不分红但股东自由现金流为正的标的**
                      (高股息稳定分红仍以 DDM 为主锚); FCFE1 <= 0 会被直接拒绝
+
+    growth_rates 的必填性是**按锚定**的: PE/PB/PS 必填(三个情景的增长率);
+    DDM/FCFE 可省。⚠️ 2026-09-13 实测踩坑: 原先写成位置必填参数, 模型按 schema
+    描述"可省"省略后被 TypeError 顶掉, 连续失败还把 three_scenario 熔断 ——
+    于是**三个锚一起失效**(FCFE/DDM/PE 全调不动)。故此处给默认值 None,
+    倍数锚缺 growth_rates 时返回可读错误。
 
     向后兼容: 旧调用(eps + pe_multiples 风格)自动识别为 PE 锚。
     """
@@ -227,7 +233,16 @@ def three_scenario(price: float, shares_100m: float, growth_rates: list,
         base_name, base = "revenue_per_share", Decimal(str(revenue_per_share))
         multiple_name = "ps_multiple"
     else:
-        return {"function": "three-scenario", "error": f"未知 anchor: {anchor}(可选 PE/PB/PS/DDM)"}
+        return {"function": "three-scenario",
+                "error": f"未知 anchor: {anchor}(可选 PE/PB/PS/DDM/FCFE)"}
+
+    # 倍数锚需要三情景增长率与倍数(DDM/FCFE 已在上面分支前置返回, 不吃这两项)
+    if not growth_rates:
+        return {"function": "three-scenario", "anchor": anchor,
+                "error": f"anchor={anchor} 需要提供 growth_rates(三个情景的增长率)"}
+    if not multiples:
+        return {"function": "three-scenario", "anchor": anchor,
+                "error": f"anchor={anchor} 需要提供 multiples(三个情景的估值倍数)"}
 
     p = Decimal(str(price))
     sh = Decimal(str(shares_100m))

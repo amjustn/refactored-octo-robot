@@ -76,7 +76,7 @@ FINANCIAL_TOOL_SCHEMAS = [
                 "properties": {
                     "price": {"type": "number", "description": "当前股价"},
                     "shares_100m": {"type": "number", "description": "总股本（亿股）"},
-                    "growth_rates": {"type": "array", "items": {"type": "number"}, "description": "三个情景的增长率；anchor=DDM/FCFE 时作为增长率网格(可省，默认=中档折现率下的隐含增长率±1个百分点)"},
+                    "growth_rates": {"type": "array", "items": {"type": "number"}, "description": "三个情景的增长率。anchor=PE/PB/PS 必填；anchor=DDM/FCFE 可省(默认=中档折现率下的隐含增长率±1个百分点)"},
                     "anchor": {"type": "string", "enum": ["PE", "PB", "PS", "DDM", "FCFE"], "description": "估值锚：PE(重资产/消费)、PB(银行/保险/周期)、PS(轻资产/互联网)、DDM(高股息稳定分红,反向戈登)、FCFE(低分红/不分红但现金流为正,反向 FCFE),默认PE"},
                     "eps": {"type": "number", "description": "当前每股收益(anchor=PE时必填)"},
                     "bvps": {"type": "number", "description": "当前每股净资产(anchor=PB时必填)"},
@@ -89,7 +89,7 @@ FINANCIAL_TOOL_SCHEMAS = [
                     "risk_free_rate": {"type": "number", "description": "无风险利率(anchor=DDM/FCFE 可选,如10年国债1.8%=0.018,用于给出风险补偿与收益率利差)"},
                     "currency": {"type": "string", "default": "CNY"},
                 },
-                "required": ["price", "shares_100m", "growth_rates"],
+                "required": ["price", "shares_100m"],
             },
         },
     },
