@@ -465,6 +465,7 @@ async def run(
                 "by_model": billing.get("by_model", []),
                 "priced": billing.get("priced", True),
             }
+            from .runner import get_tool_counts as _get_tool_counts
             report_path = await repo.asave_report(
                 spec.skill_name, spec.arguments, report, duration, tokens,
                 summary=summary,
@@ -478,6 +479,8 @@ async def run(
                     "gates": sorted({str(w.get("gate") or "") for w in guard_warnings
                                      if isinstance(w, dict) and w.get("gate")}),
                 },
+                # 第3步(2026-09-13): 工具调用汇总随报告落盘（此前只在 scratchpad JSONL）
+                tool_calls=_get_tool_counts(spec.task_id),
             )
             report_saved = True
 

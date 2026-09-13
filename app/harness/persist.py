@@ -680,6 +680,7 @@ class Repository:
         model: str = "",
         guard_warnings: Optional[list] = None,
         data_status: Optional[dict] = None,
+        tool_calls: Optional[dict] = None,
     ) -> Path:
         """Save report markdown + a metadata sidecar (.meta.json).
 
@@ -735,6 +736,19 @@ class Repository:
             if clean_warnings and not status.get("gates"):
                 status["gates"] = sorted({w["gate"] for w in clean_warnings if w["gate"]})
             meta["data_status"] = status
+        # ── 工具调用汇总（第3步，2026-09-13）────────────────────
+        # 让"这份报告调了多少次工具、有没有撞上限"在报告侧可观测
+        # （此前只在 data/scratchpad/<task>.jsonl 里，报告列表读不到）。
+        if isinstance(tool_calls, dict) and tool_calls.get("total"):
+            clean_tc = {
+                "total": int(tool_calls.get("total") or 0),
+                "by_tool": dict(list((tool_calls.get("by_tool") or {}).items())[:20]),
+                "by_agent": dict(list((tool_calls.get("by_agent") or {}).items())[:20]),
+                "agents_with_tools": int(tool_calls.get("agents_with_tools") or 0),
+            }
+            if tool_calls.get("limit_hits"):
+                clean_tc["limit_hits"] = dict(list(tool_calls["limit_hits"].items())[:20])
+            meta["tool_calls"] = clean_tc
         try:
             report_path.with_suffix(".meta.json").write_text(
                 json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"

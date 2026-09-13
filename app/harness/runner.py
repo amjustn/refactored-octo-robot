@@ -22,6 +22,7 @@ import asyncio
 import json
 import logging
 import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import Optional
 
@@ -147,6 +148,71 @@ def _summarize_debate(debate_output: str) -> tuple[dict, list]:
     return votes, reviews
 
 
+# ── 工具调用汇总留痕（第3步，2026-09-13）────────────────────────
+# meta.json 里此前没有任何工具字段，工具调用只落在 data/scratchpad/<task>.jsonl；
+# 于是"每任务工具调用数 / 是否撞上限"在报告侧完全不可观测（静态审计风险项）。
+# 这里按 task_id 留一份汇总，由 persist.save_report 写进 meta["tool_calls"]。
+_TOOL_COUNTS: "OrderedDict[str, dict]" = OrderedDict()
+_TOOL_COUNTS_MAX = 64
+
+
+def summarize_tool_calls(counts: dict, limit_hits: dict = None) -> dict:
+    """把 {agent: {tool: n}} + {tool: 撞上限次数} 汇总成 meta 友好的结构。"""
+    by_tool: dict = {}
+    by_agent: dict = {}
+    total = 0
+    for agent, tools in (counts or {}).items():
+        for tool, n in (tools or {}).items():
+            try:
+                n = int(n)
+            except (TypeError, ValueError):
+                continue
+            if n <= 0:
+                continue
+            by_tool[tool] = by_tool.get(tool, 0) + n
+            by_agent[agent] = by_agent.get(agent, 0) + n
+            total += n
+    hits = {}
+    for tool, n in (limit_hits or {}).items():
+        try:
+            n = int(n)
+        except (TypeError, ValueError):
+            continue
+        if n > 0:
+            hits[tool] = n
+    out = {
+        "total": total,
+        "by_tool": dict(sorted(by_tool.items(), key=lambda kv: (-kv[1], kv[0]))),
+        "by_agent": dict(sorted(by_agent.items(), key=lambda kv: (-kv[1], kv[0]))),
+        "agents_with_tools": len([k for k, v in by_agent.items() if v]),
+    }
+    if hits:
+        out["limit_hits"] = dict(sorted(hits.items(), key=lambda kv: (-kv[1], kv[0])))
+    return out
+
+
+def record_tool_counts(task_id: str, counts: dict, limit_hits: dict = None) -> dict:
+    """记录某任务的工具调用汇总（有界字典，失败一律吞掉）。"""
+    summary = summarize_tool_calls(counts, limit_hits)
+    try:
+        if task_id:
+            _TOOL_COUNTS[task_id] = summary
+            _TOOL_COUNTS.move_to_end(task_id)
+            while len(_TOOL_COUNTS) > _TOOL_COUNTS_MAX:
+                _TOOL_COUNTS.popitem(last=False)
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"record_tool_counts failed: {e}")
+    return summary
+
+
+def get_tool_counts(task_id: str) -> dict:
+    """取回某任务的工具调用汇总；没有留痕返回 {}。"""
+    try:
+        return _TOOL_COUNTS.get(task_id or "", {}) or {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 class AllAgentsFailedError(RuntimeError):
     """Raised when every research agent in a multi-agent run failed."""
 
@@ -159,6 +225,9 @@ class AgentRunner:
         self.task_id = task_id or "adhoc"
         # P1: per-agent per-tool call counts — reset each run()
         self._tool_call_counts: dict[str, dict[str, int]] = {}
+        # 撞上每工具循环上限的次数（按工具名）——被拒的调用不计入 _tool_call_counts，
+        # 但"撞上限"本身是要观测的信号（第3步）
+        self._tool_limit_hits: dict[str, int] = {}
         # P2: scratchpad path — written once on first tool call
         self._scratchpad_path: Optional[Path] = None
         # Custom-model tool fallbacks — merged into guard_warnings by harness run()
@@ -292,6 +361,7 @@ class AgentRunner:
         """
         # P1: reset tool call counters at the start of each run
         self._tool_call_counts.clear()
+        self._tool_limit_hits.clear()
         self._scratchpad_path = None
         llm_config = spec.llm.to_llm_config_dict()
 
@@ -338,6 +408,9 @@ class AgentRunner:
                 task_id=self.task_id,
                 company_hint=(self._last_goal_hints or {}).get("company") or "",
             )
+
+        # 工具调用汇总留痕：供 persist 写进 meta["tool_calls"]（第3步，2026-09-13）
+        record_tool_counts(self.task_id, self._tool_call_counts, self._tool_limit_hits)
 
         return report
 
@@ -425,6 +498,7 @@ class AgentRunner:
 
             # P1: soft loop limit check
             if current >= max_same_tool_calls:
+                runner._tool_limit_hits[name] = runner._tool_limit_hits.get(name, 0) + 1
                 limit_msg = json.dumps({
                     "error": "TOOL_LOOP_LIMIT",
                     "message": f"已调用 {name} {current} 次，达到上限 {max_same_tool_calls} 次。"
