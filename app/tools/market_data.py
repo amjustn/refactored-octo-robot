@@ -349,7 +349,8 @@ async def _run_sync(func, *args, **kwargs):
 # ==================== A-Share Data (via akshare) ====================
 
 async def _fetch_a_share_price(symbol: str) -> dict:
-    """Fetch A-share real-time price via akshare, HTTP fallback chain as backup."""
+    """Fetch A-share real-time price via akshare."""
+
     # Fall back to akshare
     code = _normalize_a_share_code(symbol)
     bare_code = code.split('.')[0]

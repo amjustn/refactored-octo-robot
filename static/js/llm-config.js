@@ -7,8 +7,17 @@
 // Per-provider model catalog.  Values pulled from /api/llm/default on page
 // load so the server-owner can update the list without touching frontend code.
 var LLM_PROVIDER_PRESETS = {
+  // 服务端网关（批A 2026-09-11）：直接用服务器已配置的 Key 与网关模型
+  // （deepseek / kimi / glm，由 /api/llm/default 在页面加载时填充），
+  // 访客无需自备 Key——这是「服务端默认模型」在设置页里的显式入口。
+  server: {
+    label: '服务端网关（免配置）',
+    base_url: '',
+    models: [],
+    keyless: true
+  },
   deepseek: {
-    label: 'DeepSeek',
+    label: 'DeepSeek（自带 Key）',
     base_url: 'https://api.deepseek.com',
     models: []
   },
@@ -71,6 +80,10 @@ var LLM_PROVIDER_PRESETS = {
   }
 };
 var _serverDefaultModel = '';
+var _serverHasKey = false;   // 服务端是否持有默认 Key —— 决定「免配置直接开跑」是否成立
+var _serverBaseUrl = '';
+var _LLM_STORE_KEY = 'ai_berkshire_llm';
+var _loadedKey = '';         // 已保存的 Key（仅内存持有，不回填输入框，避免明文常驻 DOM）
 
 // Agent name → human-readable label for per-agent model UI
 var AGENT_LABELS = {
@@ -97,27 +110,50 @@ function _getAgentLabel(name) {
 
 // Called once on page load to pull the server's supported model list.
 function _initLlmDefaults(serverInfo) {
-  // DeepSeek models come from the server (owner may add/remove DeepSeek variants).
-  // Other providers' models are maintained in LLM_PROVIDER_PRESETS above.
-  if (serverInfo && serverInfo.supported_models && serverInfo.supported_models.length) {
-    var dsModels = serverInfo.supported_models.filter(function(m) {
-      return m.indexOf('deepseek') === 0;
-    });
+  // 服务端网关模型全量暴露（deepseek / kimi / glm）。旧版只保留 deepseek*，
+  // 等于把网关本来可用的另外 13 个模型从设置页藏掉了。
+  var all = (serverInfo && serverInfo.supported_models) || [];
+  if (all.length) {
+    var dsModels = all.filter(function(m) { return m.indexOf('deepseek') === 0; });
     if (dsModels.length) LLM_PROVIDER_PRESETS.deepseek.models = dsModels;
   }
   _serverDefaultModel = (serverInfo && serverInfo.model) || '';
+  _serverHasKey = !!(serverInfo && serverInfo.has_key);
+  _serverBaseUrl = (serverInfo && serverInfo.base_url) || '';
+  LLM_PROVIDER_PRESETS.server.models = all.slice();
+  LLM_PROVIDER_PRESETS.server.base_url = _serverBaseUrl;
+  if (!LLM_PROVIDER_PRESETS.server.models.length && _serverDefaultModel) {
+    LLM_PROVIDER_PRESETS.server.models = [_serverDefaultModel];
+  }
   updatePoweredBy();
 }
 
+// 无自有配置也能开跑吗？（服务端持有默认 Key 即可）
+function _canRunWithoutOwnConfig() {
+  return !!_serverHasKey;
+}
+
+// 是否存在可用的模型来源：自有全局配置 / 仅 per-agent / 服务端默认
+function _hasUsableModel() {
+  var cfg = _loadLlmConfig();
+  var hasGlobal = !!(cfg && (cfg.model || cfg.base_url || cfg.api_key));
+  var hasPerAgent = !!(cfg && cfg.agent_models && Object.keys(cfg.agent_models).length);
+  return hasGlobal || hasPerAgent || _serverHasKey;
+}
+
+// 状态行三态（批A 2026-09-11）：自定义配置 / 仅按 Agent / 服务端默认 / 未配置。
+// 与服务端 has_key 对齐——不再出现「左边显示模型名、中间说你还没配置」的自相矛盾。
 function updatePoweredBy() {
   var el = document.getElementById('powered-by');
+  if (!el) return;
   var cfg = _loadLlmConfig();
   if (cfg && (cfg.model || cfg.base_url || cfg.api_key)) {
     var presetLabel = '';
     if (cfg._preset && LLM_PROVIDER_PRESETS[cfg._preset]) {
       presetLabel = LLM_PROVIDER_PRESETS[cfg._preset].label + ' · ';
     }
-    el.textContent = '模型：' + presetLabel + (cfg.model || '自定义') + '（自定义）';
+    var suffix = (cfg._preset === 'server') ? '（服务端默认）' : '（自定义）';
+    el.textContent = '模型：' + presetLabel + (cfg.model || _serverDefaultModel || '未指定') + suffix;
   } else if (cfg && cfg.agent_models && Object.keys(cfg.agent_models).length) {
     // Only per-agent configured — show first agent's model
     var agents = Object.keys(cfg.agent_models);
@@ -125,34 +161,72 @@ function updatePoweredBy() {
     var label = typeof first === 'string' ? first : (first.model || '自定义');
     var p = (typeof first === 'object' && first._provider) ? first._provider : '';
     el.textContent = '模型：' + (p ? p + ' · ' : '') + label + '（Agent）';
+  } else if (_serverHasKey) {
+    el.textContent = '模型：' + (_serverDefaultModel || '服务端默认') + '（服务端默认）';
   } else {
-    el.textContent = '模型：' + (_serverDefaultModel || 'DeepSeek');
+    el.textContent = '模型：未配置';
   }
   updateLlmNotice();
 }
 
-// Red reminder for visitors who haven't configured their own provider/key.
-// Shown until any provider config is saved; click opens the settings modal.
+// 提示条两态：服务端默认模型＝信息（可跑，不必配置）；两者都无＝红色阻断。
 function updateLlmNotice() {
   var notice = document.getElementById('llm-notice');
   if (!notice) return;
+  var textEl = document.getElementById('llm-notice-text');
   var cfg = _loadLlmConfig();
   var hasGlobal = !!(cfg && (cfg.api_key || cfg.base_url || cfg.model));
   var hasPerAgent = !!(cfg && cfg.agent_models && Object.keys(cfg.agent_models).length > 0);
-  var configured = hasGlobal || hasPerAgent;
-  notice.style.display = configured ? 'none' : 'block';
+  if (hasGlobal || hasPerAgent) { notice.style.display = 'none'; return; }
+
+  notice.style.display = 'block';
+  if (_serverHasKey) {
+    notice.className = 'llm-notice info';
+    if (textEl) {
+      textEl.textContent = 'ℹ 当前使用服务端默认模型 ' + (_serverDefaultModel || '') +
+        '（无需配置即可开始研究）。如需用自己的 Key 或换用网关上的 K 系列 / GLM 模型，点此设置 →';
+    }
+  } else {
+    notice.className = 'llm-notice warn';
+    if (textEl) {
+      textEl.textContent = '⚠ 服务端未提供默认模型，你还没有配置模型。点击此处填写供应商、模型和 API Key →';
+    }
+  }
 }
 
-// ── localStorage helpers ──────────────────────────────────
+// ── 凭据存储 helpers（批A 2026-09-11 收紧） ────────────────
+// 默认会话级 sessionStorage（关闭标签页即失效）；勾选「在本机记住」才落 localStorage。
+// 读取顺序：localStorage（已记住）→ sessionStorage（仅本会话）。
 function _loadLlmConfig() {
   try {
-    return JSON.parse(localStorage.getItem('ai_berkshire_llm') || 'null');
+    var raw = localStorage.getItem(_LLM_STORE_KEY) || sessionStorage.getItem(_LLM_STORE_KEY);
+    return JSON.parse(raw || 'null');
   } catch(e) { return null; }
 }
 
-function _saveLlmConfig(cfg) {
-  if (cfg) localStorage.setItem('ai_berkshire_llm', JSON.stringify(cfg));
-  else localStorage.removeItem('ai_berkshire_llm');
+function _isRemembered() {
+  try { return !!localStorage.getItem(_LLM_STORE_KEY); } catch(e) { return false; }
+}
+
+// remember=true → 持久存储；false → 仅本会话；省略 → 沿用当前模式。
+// 两个存储互斥写入，避免旧副本长期残留。
+function _saveLlmConfig(cfg, remember) {
+  try {
+    var persist = (remember === undefined) ? _isRemembered() : !!remember;
+    if (!cfg) {
+      localStorage.removeItem(_LLM_STORE_KEY);
+      sessionStorage.removeItem(_LLM_STORE_KEY);
+      return;
+    }
+    var payload = JSON.stringify(cfg);
+    if (persist) {
+      localStorage.setItem(_LLM_STORE_KEY, payload);
+      sessionStorage.removeItem(_LLM_STORE_KEY);
+    } else {
+      sessionStorage.setItem(_LLM_STORE_KEY, payload);
+      localStorage.removeItem(_LLM_STORE_KEY);
+    }
+  } catch(e) {}
 }
 
 // Build the per-request config object sent to the server.
@@ -186,15 +260,15 @@ function getLlmConfig() {
   return Object.keys(out).length ? out : null;
 }
 
-// ── Auth headers ──────────────────────────────────────────
+// ── Auth headers（JWT 走 core.js 的会话级 helpers） ────────
 function getAuthHeaders() {
-  var jwt = localStorage.getItem('ai_berkshire_jwt') || '';
+  var jwt = _getJwt();
   if (!jwt) return {};
   return { 'Authorization': 'Bearer ' + jwt };
 }
 
 function getWsToken() {
-  return localStorage.getItem('ai_berkshire_jwt') || '';
+  return _getJwt();
 }
 
 async function loginWithToken(secret) {
@@ -209,23 +283,38 @@ async function loginWithToken(secret) {
   }
   var data = await res.json();
   if (data.access_token) {
-    localStorage.setItem('ai_berkshire_jwt', data.access_token);
+    _setJwt(data.access_token);
   }
   return data;
+}
+
+// 脱敏显示：只露尾部 4 位，避免明文常驻界面
+function _maskKey(k) {
+  if (!k) return '';
+  var tail = k.length > 4 ? k.slice(-4) : k;
+  var head = k.length > 10 && k.indexOf('-') > 0 ? k.slice(0, k.indexOf('-') + 1) : '';
+  return head + '****' + tail;
 }
 
 // ── Modal ─────────────────────────────────────────────────
 function openLlmModal() {
   var cfg = _loadLlmConfig();
-  var preset = (cfg && cfg._preset) || 'deepseek';
+  // 默认选中「服务端网关」——避免打开设置就看到「请选择模型」的空状态
+  var preset = (cfg && cfg._preset) || (_serverHasKey ? 'server' : 'deepseek');
 
   // Restore form
   document.getElementById('llm-preset').value = preset;
-  document.getElementById('llm-model').value = (cfg && cfg.model) || '';
-  document.getElementById('llm-base-url').value = (cfg && cfg.base_url) || '';
-  // Keep the stored key — wiping it here silently drops the key on re-save
-  document.getElementById('llm-api-key').value = (cfg && cfg.api_key) || '';
-  
+  document.getElementById('llm-model').value = (cfg && cfg.model) || (preset === 'server' ? _serverDefaultModel : '');
+  document.getElementById('llm-base-url').value = (cfg && cfg.base_url) || (preset === 'server' ? _serverBaseUrl : '');
+  // 已保存的 Key 只进内存，不回填输入框（脱敏：仅提示尾部 4 位）
+  _loadedKey = (cfg && cfg.api_key) || '';
+  var keyInput = document.getElementById('llm-api-key');
+  keyInput.value = '';
+  keyInput.placeholder = _loadedKey
+    ? ('已保存 ' + _maskKey(_loadedKey) + '——留空即沿用，输入新值则覆盖')
+    : 'sk-...';
+  var rememberEl = document.getElementById('llm-remember');
+  if (rememberEl) rememberEl.checked = _isRemembered();
 
   // Trigger UI refresh
   onProviderChange();
@@ -265,13 +354,15 @@ function onProviderChange() {
   var modelSelect = document.getElementById('llm-model-select');
   var modelInput = document.getElementById('llm-model');
   var customFields = document.getElementById('llm-custom-fields');
+  var hint = document.getElementById('llm-preset-hint');
 
   if (!preset) {
     // Server default — hide all fields
     modelSelect.style.display = 'none';
     modelInput.style.display = 'none';
     customFields.style.display = 'none';
-        return;
+    if (hint) hint.textContent = '';
+    return;
   }
 
   var info = LLM_PROVIDER_PRESETS[preset];
@@ -281,22 +372,46 @@ function onProviderChange() {
     info.models.forEach(function(m) {
       var isMulti = _MULTIMODAL_MODELS.some(function(k) { return m.toLowerCase().indexOf(k) >= 0; });
       var tag = isMulti ? ' 📎' : '';
-      modelSelect.innerHTML += '<option value="' + m + '">' + m + tag + '</option>';
+      // escHtml：模型名来自服务端 /api/llm/default，仍按不可信文本转义后再拼 HTML
+      modelSelect.innerHTML += '<option value="' + escHtml(m) + '">' + escHtml(m) + tag + '</option>';
     });
     modelSelect.style.display = 'block';
     modelInput.style.display = 'none';
+    // 已填/已存的模型回填选中，避免「请选择模型」与状态行不一致
+    var cur = (modelInput.value || '').trim();
+    if (cur) {
+      for (var i = 0; i < modelSelect.options.length; i++) {
+        if (modelSelect.options[i].value === cur) { modelSelect.value = cur; break; }
+      }
+    }
   } else {
     // Custom or provider without a known list — show free-form input
     modelSelect.style.display = 'none';
     modelInput.style.display = 'block';
   }
 
+  var keyless = !!(info && info.keyless);
   if (preset === 'custom') {
     customFields.style.display = 'block';
+    if (hint) hint.textContent = '自定义中转站：自行填写 Base URL、模型名与 API Key。';
+  } else if (keyless) {
+    // 服务端网关：不需要访客 Key，隐藏 Base URL / API Key 输入
+    customFields.style.display = 'none';
+    document.getElementById('llm-base-url').value = (info && info.base_url) || _serverBaseUrl;
+    document.getElementById('llm-api-key').value = '';
+    if (hint) {
+      hint.textContent = _serverHasKey
+        ? '服务端网关：使用服务器已配置的 Key（免填），上面列出的 ' + ((info && info.models.length) || 0) +
+          ' 个模型均可直接使用。模型名可点「测试连接」验证。'
+        : '服务端当前未配置默认 Key，此选项不可用——请选择其他服务商并填写你自己的 Key。';
+    }
   } else {
     // Pre-fill base_url from preset
     document.getElementById('llm-base-url').value = (info && info.base_url) || '';
     customFields.style.display = 'block';  // always show so user can override key
+    if (hint) {
+      hint.textContent = '自带 Key 服务商：需填写你自己的 API Key（用服务器的 DeepSeek Key 请求会 401）。';
+    }
   }
     // Per-agent block: only show for multi-agent skills (dynamically when modal opens)
   _rebuildPerAgentTable();
@@ -525,23 +640,33 @@ function onPerAgentToggle() {
 
 // ── Save / Reset / Test ───────────────────────────────────
 function saveLlmConfig() {
-  var preset = document.getElementById('llm-preset').value;
+  var preset = document.getElementById('llm-preset').value || 'server';
   var model = document.getElementById('llm-model').value.trim();
   var baseUrl = document.getElementById('llm-base-url').value.trim();
-  var apiKey = document.getElementById('llm-api-key').value.trim();
+  // 留空＝沿用已保存的 Key（输入框不回填明文），输入新值则覆盖
+  var apiKey = document.getElementById('llm-api-key').value.trim() || _loadedKey || '';
+  var info = LLM_PROVIDER_PRESETS[preset] || {};
+  var keyless = !!info.keyless;
 
+  if (preset === 'server' && !model) model = _serverDefaultModel;  // 网关模式默认用服务端模型
   if (!model && preset !== 'custom') {
     showToast('请选择模型', 'error');
+    return;
+  }
+  if (keyless && !_serverHasKey) {
+    showToast('服务端未配置默认 Key，「服务端网关」当前不可用——请选择其他服务商并填写你自己的 Key', 'error');
     return;
   }
 
   // Non-DeepSeek cloud providers reject the server's DeepSeek key — the
   // visitor MUST supply their own key, otherwise every request will 401.
-  if (!apiKey && preset !== 'custom' && preset !== 'deepseek') {
-    showToast('使用「' + (LLM_PROVIDER_PRESETS[preset] ? LLM_PROVIDER_PRESETS[preset].label : preset) +
+  if (!keyless && !apiKey && preset !== 'custom' && preset !== 'deepseek') {
+    showToast('使用「' + (info.label || preset) +
       '」需要填写你自己的 API Key（不填会拿服务器 DeepSeek Key 去请求，必然 401）', 'error');
     return;
   }
+
+  var remember = !!(document.getElementById('llm-remember') || {}).checked;
 
   // Per-agent model config: read provider + model + url + key from each row
   var perAgentEnabled = document.getElementById('llm-per-agent-enabled').checked;
@@ -569,8 +694,11 @@ function saveLlmConfig() {
 
   var cfg = { _preset: preset };
   if (model) cfg.model = model;
-  if (baseUrl) cfg.base_url = baseUrl;
-  if (apiKey) cfg.api_key = apiKey;
+  // keyless（服务端网关）不写 base_url/api_key —— 请求里不带 Key，服务端自然回落默认 Key
+  if (!keyless) {
+    if (baseUrl) cfg.base_url = baseUrl;
+    if (apiKey) cfg.api_key = apiKey;
+  }
   
   // Per-agent model: switch + mapping
   if (perAgentEnabled) {
@@ -578,26 +706,53 @@ function saveLlmConfig() {
     if (Object.keys(agentModels).length) cfg.agent_models = agentModels;
   }
 
-  _saveLlmConfig(cfg);
+  _saveLlmConfig(cfg, remember);
+  _loadedKey = cfg.api_key || '';
   updateUploadVisibility();
   updatePoweredBy();
   closeLlmModal();
-  showToast('模型配置已保存', 'info');
+  showToast(remember ? '模型配置已保存（在本机持久保存）' : '模型配置已保存（仅本次会话有效）', 'info');
+}
+
+// 「在本机记住」勾选状态切换：立即按新模式迁移已保存配置，避免出现两份副本
+function onRememberToggle() {
+  var remember = !!(document.getElementById('llm-remember') || {}).checked;
+  var cfg = _loadLlmConfig();
+  if (cfg) {
+    _saveLlmConfig(cfg, remember);
+    showToast(remember ? '已改为在本机持久保存' : '已改为仅本次会话保存（关闭标签页后清除）', 'info');
+  }
+}
+
+// 清除本机保存的凭据（两个存储都清），保留界面可继续免配置使用服务端默认模型
+function clearLlmCredentials() {
+  if (!confirm('确定清除本机保存的模型配置与 API Key？清除后若服务端有默认模型仍可直接研究。')) return;
+  _saveLlmConfig(null);
+  _loadedKey = '';
+  document.getElementById('llm-api-key').value = '';
+  document.getElementById('llm-api-key').placeholder = 'sk-...';
+  updatePoweredBy();
+  showToast('已清除本机保存的凭据', 'info');
 }
 
 function resetLlmConfig() {
-  document.getElementById('llm-preset').value = '';
-  document.getElementById('llm-model').value = '';
+  // 回到「无自有配置」状态：有服务端默认模型时直接选中服务端网关，不留空下拉
+  document.getElementById('llm-preset').value = _serverHasKey ? 'server' : '';
+  document.getElementById('llm-model').value = _serverHasKey ? _serverDefaultModel : '';
   document.getElementById('llm-model-select').innerHTML = '<option value="">请选择模型</option>';
-  document.getElementById('llm-base-url').value = '';
+  document.getElementById('llm-base-url').value = _serverHasKey ? _serverBaseUrl : '';
   document.getElementById('llm-api-key').value = '';
+  _loadedKey = '';
+  var rememberEl = document.getElementById('llm-remember');
+  if (rememberEl) rememberEl.checked = false;
   document.getElementById('llm-per-agent-enabled').checked = false;
   document.getElementById('llm-per-agent-table').innerHTML = '';
   document.getElementById('llm-per-agent-fields').style.display = 'none';
   document.getElementById('llm-test-result').textContent = '';
   onProviderChange();
   _saveLlmConfig(null);
-  showToast('已清除所有自定义配置', 'info');
+  updatePoweredBy();
+  showToast('已清除所有自定义配置' + (_serverHasKey ? '（继续使用服务端默认模型）' : ''), 'info');
 }
 
 async function testLlmConfig() {
@@ -607,7 +762,7 @@ async function testLlmConfig() {
   var cfg = {};
   var model = document.getElementById('llm-model').value.trim();
   var baseUrl = document.getElementById('llm-base-url').value.trim();
-  var apiKey = document.getElementById('llm-api-key').value.trim();
+  var apiKey = document.getElementById('llm-api-key').value.trim() || _loadedKey || '';
   if (model) cfg.model = model;
   if (baseUrl) cfg.base_url = baseUrl;
   if (apiKey) cfg.api_key = apiKey;
@@ -632,7 +787,7 @@ async function testLlmConfig() {
     });
     if (res.status === 401 || res.status === 403) {
       // JWT expired (24h TTL) — say so instead of a misleading "连接失败"
-      localStorage.removeItem('ai_berkshire_jwt');
+      _clearJwt();
       resultEl.textContent = '✗ 登录已过期（令牌24小时有效），即将跳转重新登录...';
       resultEl.className = 'llm-test-result err';
       setTimeout(function() { location.reload(); }, 1500);

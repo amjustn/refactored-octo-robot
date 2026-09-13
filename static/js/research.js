@@ -256,13 +256,14 @@ async function startResearch() {
   }
   if (!currentSkill) { showToast('请先选择技能', 'warning'); return; }
 
-  // Block if no model configured (per-agent-only config also counts)
+  // 放行策略（批A 2026-09-11）：自有配置 或 服务端默认模型 任一可用即可开跑。
+  // 只有「既无自有配置、服务端也没有可用 Key」时才阻断——此时红色提示才是真的。
   var cfg = _loadLlmConfig();
   var hasGlobal = !!(cfg && (cfg.model || cfg.base_url || cfg.api_key));
   var hasPerAgent = !!(cfg && cfg.agent_models && Object.keys(cfg.agent_models).length);
-  if (!hasGlobal && !hasPerAgent) {
-    showToast('⚠ 请先在模型设置中配置供应商、模型和 API Key', 'error');
-    document.getElementById('llm-notice').style.display = 'block';
+  if (!hasGlobal && !hasPerAgent && !_canRunWithoutOwnConfig()) {
+    showToast('⚠ 服务端未提供默认模型，请先在模型设置中配置供应商、模型和 API Key', 'error');
+    updateLlmNotice();
     return;
   }
 
@@ -288,6 +289,7 @@ async function startResearch() {
   _userCancelled = false;
   currentTaskId = null;
   _wsShouldReconnect = false;
+  removeDebateConfirmCard();
   _uploadedFiles = [];
   if (_researchAbort) { _researchAbort.abort(); _researchAbort = null; }
   if (ws) { ws.close(); ws = null; }
@@ -425,6 +427,8 @@ function _streamResearchImpl(args, attachments, watchTaskId) {
       msg.token = getWsToken();
       var llmConfig = getLlmConfig();
       if (llmConfig) msg.llm_config = llmConfig;
+      // HITL：勾选「辩论后人工确认」时启用确认门（默认 false，行为不变）
+      msg.debate_confirm = isDebateConfirmEnabled();
       ws.send(JSON.stringify(msg));
     };
 
@@ -460,6 +464,11 @@ function _streamResearchImpl(args, attachments, watchTaskId) {
       } else if (data.type === 'guard_warning') {
         // Event protocol v2: output gate warning (light notice)
         console.warn('guard_warning', data);
+      } else if (data.type === 'awaiting_confirmation') {
+        // HITL：辩论后人工确认门 —— 内联确认卡片（非弹窗）；
+        // 断线重连/页面恢复时后端会重放该帧，卡片随之重建
+        currentTaskId = data.task_id || currentTaskId;
+        showDebateConfirmCard(data);
       } else if (data.type === 'cancelled') {
         // Event protocol v2: explicit cancel frame (legacy error cancelled still handled below)
         _wsShouldReconnect = false;
@@ -610,6 +619,7 @@ async function batchResearch(args, attachments) {
       llm_config: getLlmConfig() || undefined
     };
     if (attachments) body.attachments = attachments;
+    body.debate_confirm = isDebateConfirmEnabled();
     var res = await fetch('/api/research', {
       method: 'POST',
       headers: headers,
@@ -712,8 +722,135 @@ function updateAllAgents(status) {
   });
 }
 
+// ==================== HITL 辩论后人工确认 ====================
+// 勾选「辩论后人工确认」后，multi 策略在 Agent 交叉辩论完成时暂停，
+// 后端发 awaiting_confirmation 事件，此处渲染内联确认卡片（非弹窗）。
+// 决议走 POST /api/task/{task_id}/confirm（JWT 头与其它请求一致）。
+
+function isDebateConfirmEnabled() {
+  var cb = document.getElementById('debate-confirm');
+  return !!(cb && cb.checked);
+}
+
+function removeDebateConfirmCard() {
+  var old = document.getElementById('debate-confirm-card');
+  if (old) old.parentNode.removeChild(old);
+}
+
+function showDebateConfirmCard(data) {
+  removeDebateConfirmCard();
+  var area = document.getElementById('progress-area');
+  if (!area) return;
+  // 断线重连恢复时进度区可能尚未显示，先拉起来再插卡片
+  area.style.display = 'block';
+
+  var votes = data.votes || {};
+  var reviews = data.reviews || [];
+  var timeoutS = data.timeout_s || 300;
+
+  var card = document.createElement('div');
+  card.id = 'debate-confirm-card';
+  card.style.cssText = 'border:1px solid var(--accent,#5b8def);border-radius:10px;' +
+    'padding:12px 14px;margin-bottom:10px;background:var(--bg-secondary,#16181d);';
+
+  var html = '<div style="font-weight:600;font-size:0.95rem;margin-bottom:6px">⏸ 辩论完成，等待确认</div>';
+  html += '<div style="font-size:0.78rem;color:var(--text-secondary,#9aa3b2);margin-bottom:8px">投票统计：' +
+    'BUY ' + (votes.BUY || 0) + ' 票 · HOLD ' + (votes.HOLD || 0) + ' 票 · SELL ' + (votes.SELL || 0) + ' 票' +
+    '（' + timeoutS + ' 秒内未确认将自动继续综合）</div>';
+
+  if (reviews.length) {
+    html += '<div style="font-size:0.78rem;margin-bottom:10px;max-height:160px;overflow-y:auto">';
+    reviews.forEach(function(r) {
+      var badge = '';
+      if (r.vote) {
+        var color = r.vote === 'BUY' ? 'var(--accent-green,#3fb27f)' :
+          (r.vote === 'SELL' ? 'var(--accent-red,#e06c75)' : 'var(--text-secondary,#9aa3b2)');
+        badge = ' <span style="font-weight:600;color:' + color + '">' + escHtml(r.vote) + '</span>';
+      }
+      html += '<div style="margin:3px 0"><span style="color:var(--text-secondary,#9aa3b2)">' +
+        escHtml(r.pair || '') + '</span>' + badge + (r.opinion ? '：' + escHtml(r.opinion) : '') + '</div>';
+    });
+    html += '</div>';
+  }
+
+  html += '<div id="debate-confirm-actions">' +
+    '<button class="btn-primary" style="padding:6px 12px;font-size:0.8rem" onclick="submitDebateConfirm(\'approve\')">✓ 继续综合</button> ' +
+    '<button class="btn-back" style="padding:6px 12px;font-size:0.8rem" onclick="toggleDebateConfirmNote()">✎ 批注后继续</button> ' +
+    '<button class="btn-cancel" style="padding:6px 12px;font-size:0.8rem;display:inline-block" onclick="submitDebateConfirm(\'reject\')">✕ 终止任务</button>' +
+    '</div>' +
+    '<div id="debate-confirm-note" style="display:none;margin-top:8px">' +
+    '<textarea id="debate-confirm-note-text" rows="3" placeholder="输入批注：将作为「用户批注，须纳入考量」注入 Team Lead 综合环节" ' +
+    'style="width:100%;box-sizing:border-box;font-size:0.8rem;padding:6px 8px;border-radius:6px;' +
+    'border:1px solid var(--border,#333);background:var(--bg-primary,#0f1115);color:inherit"></textarea>' +
+    '<button class="btn-primary" style="margin-top:6px;padding:6px 12px;font-size:0.8rem" onclick="submitDebateConfirm(\'modify\')">提交批注并继续</button>' +
+    '</div>';
+
+  card.innerHTML = html;
+  area.insertBefore(card, area.firstChild);
+  card.scrollIntoView({ block: 'nearest' });
+}
+
+function toggleDebateConfirmNote() {
+  var note = document.getElementById('debate-confirm-note');
+  if (!note) return;
+  note.style.display = note.style.display === 'none' ? 'block' : 'none';
+  if (note.style.display === 'block') {
+    var ta = document.getElementById('debate-confirm-note-text');
+    if (ta) ta.focus();
+  }
+}
+
+function _setDebateCardBusy(busy) {
+  var card = document.getElementById('debate-confirm-card');
+  if (!card) return;
+  card.querySelectorAll('button').forEach(function(b) { b.disabled = busy; });
+}
+
+function _markDebateCardDone(action) {
+  var card = document.getElementById('debate-confirm-card');
+  if (!card) return;
+  var text = action === 'reject' ? '✕ 已终止任务'
+    : (action === 'modify' ? '✓ 已提交批注，继续综合…' : '✓ 已确认，继续综合…');
+  card.innerHTML = '<div style="font-weight:600;font-size:0.9rem">' + text + '</div>';
+}
+
+function submitDebateConfirm(action) {
+  if (!currentTaskId) {
+    showToast('缺少 task_id，无法提交确认', 'error');
+    return;
+  }
+  var note = '';
+  if (action === 'modify') {
+    var ta = document.getElementById('debate-confirm-note-text');
+    note = ta ? ta.value.trim() : '';
+    if (!note) {
+      showToast('请先填写批注内容', 'warning');
+      return;
+    }
+  }
+  _setDebateCardBusy(true);
+  var headers = { 'Content-Type': 'application/json' };
+  Object.assign(headers, getAuthHeaders());
+  fetch('/api/task/' + encodeURIComponent(currentTaskId) + '/confirm', {
+    method: 'POST',
+    headers: headers,
+    body: JSON.stringify({ action: action, note: note })
+  }).then(function(res) {
+    if (!res.ok) {
+      return res.json().catch(function() { return {}; }).then(function(d) {
+        throw new Error(d.detail || d.error || ('HTTP ' + res.status));
+      });
+    }
+    _markDebateCardDone(action);
+  }).catch(function(e) {
+    _setDebateCardBusy(false);
+    showToast('确认提交失败：' + e.message, 'error');
+  });
+}
+
 function finishResearch(success, errorMsg, meta) {
   stopProgressTimer();
+  removeDebateConfirmCard();
   var btn = document.getElementById('btn-research');
   var cancelBtn = document.getElementById('btn-cancel');
   btn.disabled = false;

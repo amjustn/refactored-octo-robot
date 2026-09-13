@@ -366,8 +366,9 @@ class TestContext:
         assert _grade([]) == "C"
 
     def test_trim_empty(self):
+        import asyncio
         from app.harness.context import ContextBuilder
-        bundle = ContextBuilder()._trim_and_grade("")
+        bundle = asyncio.run(ContextBuilder()._trim_and_grade(""))
         assert bundle.grade == "C"
 
 

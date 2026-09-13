@@ -105,7 +105,7 @@ def test_prepare_resume_rejects(tmp_repo):
     _, err = asyncio.run(harness.prepare_resume("t-allfail"))
     assert "没有可复用" in err
 
-    # 单Agent技能不支持
+    # 单Agent技能现在也支持续跑，但无 checkpoint 时拒绝
     conn = sqlite3.connect(str(tmp_repo.store.db_path), timeout=10)
     conn.execute(
         """INSERT INTO tasks (task_id, skill_name, status, arguments, created_at, updated_at)
@@ -115,7 +115,7 @@ def test_prepare_resume_rejects(tmp_repo):
     conn.commit()
     conn.close()
     _, err = asyncio.run(harness.prepare_resume("t-single"))
-    assert "不支持断点续跑" in err
+    assert "没有可复用" in err or "检查点" in err
 
 
 # ==================== billing accumulate ====================

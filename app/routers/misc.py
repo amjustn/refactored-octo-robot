@@ -367,19 +367,45 @@ async def api_upload_file(request: "Request"):
                         item["summary"] = summary
 
             elif filename.lower().endswith((".xlsx", ".xls")):
-                import openpyxl
-                wb = openpyxl.load_workbook(io.BytesIO(data), data_only=True)
-                parts = []
-                for sn in wb.sheetnames:
-                    ws = wb[sn]
-                    parts.append(f"## Sheet: {sn}")
-                    rows = []
-                    for row in ws.iter_rows(values_only=True):
-                        rows.append("\t".join(str(c) if c is not None else "" for c in row))
-                    parts.append("\n".join(rows[:500]))
-                wb.close()
-                item["text"] = "\n".join(parts)[:50000]
-                item["method"] = "excel-extract"
+                # 两条分支：.xlsx 是 OOXML(zip)，.xls 是旧版 OLE2 复合文档。
+                # openpyxl 只认前者，喂 .xls 只会抛 "File is not a zip file"；
+                # xlrd 2.x 恰好相反（只支持 .xls）。两个库都随 akshare 装进来，
+                # requirements.txt 已显式声明，不再依赖传递依赖。
+                if filename.lower().endswith(".xls"):
+                    import xlrd
+                    try:
+                        book = xlrd.open_workbook(file_contents=data)
+                    except Exception as xls_err:
+                        # 交给外层统一落成 item["error"]，但换成能读懂的话术
+                        # （xlrd 原生报错是 "Expected little-endian marker..." 这类英文技术信息）
+                        raise ValueError(
+                            f"该 .xls 文件无法解析（可能已损坏或非标准旧版 Excel 格式）：{str(xls_err)[:120]}"
+                        ) from xls_err
+                    parts = []
+                    for sn in book.sheet_names():
+                        sheet = book.sheet_by_name(sn)
+                        parts.append(f"## Sheet: {sn}")
+                        rows = []
+                        for r in range(min(sheet.nrows, 500)):
+                            rows.append("\t".join(
+                                str(c) if c not in (None, "") else "" for c in sheet.row_values(r)))
+                        parts.append("\n".join(rows))
+                    item["text"] = "\n".join(parts)[:50000]
+                    item["method"] = "excel-extract"
+                else:
+                    import openpyxl
+                    wb = openpyxl.load_workbook(io.BytesIO(data), data_only=True)
+                    parts = []
+                    for sn in wb.sheetnames:
+                        ws = wb[sn]
+                        parts.append(f"## Sheet: {sn}")
+                        rows = []
+                        for row in ws.iter_rows(values_only=True):
+                            rows.append("\t".join(str(c) if c is not None else "" for c in row))
+                        parts.append("\n".join(rows[:500]))
+                    wb.close()
+                    item["text"] = "\n".join(parts)[:50000]
+                    item["method"] = "excel-extract"
 
             elif filename.lower().endswith(".docx"):
                 from docx import Document
@@ -583,8 +609,19 @@ async def api_list_reports():
                         item["partial"] = True
                     if meta.get("task_id"):
                         item["task_id"] = meta["task_id"]
+                    if meta.get("model"):
+                        item["model"] = meta["model"]
+                    if meta.get("guard_warnings"):
+                        item["guard_warnings"] = len(meta["guard_warnings"])
+                        item["degraded"] = True
+                    if meta.get("data_status"):
+                        item["data_status"] = meta["data_status"]
                 except Exception:
                     pass
+            else:
+                # 批C(2026-09-11): 显式标记"无元数据" —— 旧报告只有文件名，
+                # 前端据此显示「未记录」，不猜测补值。
+                item["meta_missing"] = True
             if not item["skill_name"]:
                 # Legacy reports: derive skill from filename prefix
                 item["skill_name"] = f.name.rsplit("_", 2)[0] if "_" in f.name else ""
@@ -609,7 +646,9 @@ async def api_list_reports():
             continue
         if any(not c.startswith("[错误]") for _, c in artifacts):
             item["resumable"] = True
-    return {"reports": reports[:50]}
+    # 批C(2026-09-11): 取消 50 条硬截断 —— 139 条约 55KB，前端一次性渲染即可。
+    # 旧行为让最新 50 条之外的报告（当时 89 份）在 UI 里彻底不可见。
+    return {"reports": reports, "total": len(reports)}
 
 
 @router.get("/api/reports/{filename}")

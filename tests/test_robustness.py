@@ -178,13 +178,21 @@ class TestDecisionLogHardening:
         assert not (tmp_path / "d.md").exists() or "## x —" not in (tmp_path / "d.md").read_text(encoding="utf-8")
 
     def test_save_decision_folds_injected_newlines(self, monkeypatch, tmp_path):
+        """批B(2026-09-11) 收紧后的契约：标题只保留清洗后的标的（"茅台"）。
+
+        变更原因：标题是历史匹配/去重的 key，必须可匹配；把用户原文（含
+        "## 恶意标题"）回显进标题会让同股匹配永远失败——正是批B 要修的
+        "脏标的进池" 问题。原始 arguments 仍完整保存在报告 meta.json 里，
+        审计线索不丢。安全要求不变：绝不产生伪造章节标题。
+        """
         from app.harness import decision_log
         monkeypatch.setattr(decision_log, "DECISION_LOG_PATH", tmp_path / "d.md")
         report = "分析正文" * 40 + "\n**结论**：买入"
         assert decision_log.save_decision("茅台\n## 恶意标题", report, company_hint="茅台\n## 恶意标题")
         content = (tmp_path / "d.md").read_text(encoding="utf-8")
-        assert "恶意标题" in content            # 内容保留但被折叠
-        assert "\n## 恶意标题" not in content    # 不产生伪造章节标题
+        assert "## 茅台 —" in content             # 标题＝清洗后的标的
+        assert "\n## 恶意标题" not in content      # 不产生伪造章节标题
+        assert content.count("\n## ") == 1         # 只写入了一个真条目
 
 
 # ============================================================

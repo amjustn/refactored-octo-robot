@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Optional
 
 from ..core.config import AGENT_TIMEOUT, MAX_PARALLEL_AGENTS
-from ..core.llm import chat_complete, chat_complete_with_tools, chat_stream, pop_tool_fallback
+from ..core.llm import chat_complete, chat_complete_with_tools, chat_stream, get_usage, pop_tool_fallback
 from ..models.schemas import AgentProgress
 from ..skills import build_user_prompt, get_skill
 from ..tools.valuation_guard import annotate_report, check_report
@@ -105,6 +105,42 @@ def _with_attachments(prompt: str, attachments: str) -> str:
     )
 
 
+# ── HITL：交叉辩论结论 → 确认卡片摘要 ─────────────────────────
+_DEBATE_VOTE_RE = _re.compile(r"\b(BUY|HOLD|SELL)\b", _re.IGNORECASE)
+_DEBATE_REVIEW_MAX = 8      # 评审条目上限（控制事件载荷体积）
+_DEBATE_OPINION_MAX = 120   # 单条意见字数上限
+
+
+def _summarize_debate(debate_output: str) -> tuple[dict, list]:
+    """从交叉辩论结论提取投票计数（BUY/HOLD/SELL）与每个评审的一句话意见。
+
+    仅供 awaiting_confirmation 事件载荷与前端确认卡片展示；解析不到时
+    返回零计数与空列表，绝不影响主流程。整体载荷控制在 2000 字以内。
+    """
+    votes = {"BUY": 0, "HOLD": 0, "SELL": 0}
+    reviews: list[dict] = []
+    for block in (debate_output or "").split("### 交叉评审：")[1:]:
+        pair, _, body = block.partition("\n")
+        pair = pair.strip()[:80]
+        if not pair:
+            continue
+        m = _DEBATE_VOTE_RE.search(body)
+        vote = m.group(1).upper() if m else ""
+        if vote in votes:
+            votes[vote] += 1
+        # 一句话意见：取评审正文第一个非空行（剥离序号/列表标记）
+        opinion = ""
+        for line in body.splitlines():
+            s = line.strip().lstrip("0123456789.、*#- ").strip()
+            if s:
+                opinion = s[:_DEBATE_OPINION_MAX]
+                break
+        reviews.append({"pair": pair, "vote": vote, "opinion": opinion})
+        if len(reviews) >= _DEBATE_REVIEW_MAX:
+            break
+    return votes, reviews
+
+
 class AllAgentsFailedError(RuntimeError):
     """Raised when every research agent in a multi-agent run failed."""
 
@@ -168,14 +204,85 @@ class AgentRunner:
         except Exception as e:
             logger.warning(f"artifact save failed ({self.task_id}/{agent}): {e}")
 
+    async def _save_checkpoint(self, phase: str, content: str, agent: str = ""):
+        """持久化阶段检查点（非致命，与 _save_artifact 同风格）。
+
+        usage 快照当前任务的累计 token 用量（计费审计用）；content 为
+        阶段中间产出（单Agent上下文 / 辩论结论 / 系列单篇正文等）。
+        绝不包含 api_key。进程重启后 prepare_resume 借此恢复现场。
+        """
+        try:
+            await get_repository().asave_checkpoint(
+                self.task_id, phase, agent=agent, content=content,
+                usage=get_usage(self.task_id),
+            )
+        except Exception as e:
+            logger.warning(f"checkpoint save failed ({self.task_id}/{phase}/{agent}): {e}")
+
+    # ---------- HITL 人工确认门 ----------
+
+    async def _debate_confirm_gate(self, spec: "TaskSpec", debate_output: str) -> str:
+        """辩论后人工确认门：暂停流水线，等待人工 approve / modify / reject。
+
+        返回须注入 Team Lead 综合 prompt 的人工批注（无批注返回 ""）。
+        - approve：直接放行；
+        - modify：放行，note 由调用方注入综合 prompt（标注须纳入考量）；
+        - reject：resolve_confirmation 已走标准取消路径（job.cancel()），
+          CancelledError 从等待点向上传播；无 job 的独立 runner 场景在此
+          本地抛出，语义一致；
+        - 超时：发 guard_warning「确认超时自动继续」并放行。
+        仅 spec.require_debate_confirm=True 时由 run_multi 调用。
+        """
+        import app.harness as _harness  # 延迟导入：避免包初始化期循环依赖
+
+        votes, reviews = _summarize_debate(debate_output)
+        timeout_s = int(_harness.CONFIRM_TIMEOUT_S)
+        payload = {
+            "gate": "debate",
+            "votes": votes,
+            "reviews": reviews,
+            "timeout_s": timeout_s,
+        }
+        _harness.register_confirmation(self.task_id, payload)
+        self._emit(EventType.AWAITING_CONFIRMATION, **payload)
+        self._progress("system", "running",
+                       f"辩论完成，等待人工确认（{timeout_s}s 未确认自动继续）...")
+
+        # CancelledError（手动取消 / reject）不在此捕获，向上走 run() 取消分支
+        result = await _harness.await_confirmation(self.task_id)
+
+        if result is None:
+            detail = f"辩论确认超时（{timeout_s}s），自动继续综合"
+            self._emit(EventType.GUARD_WARNING, gate="debate_confirm_timeout",
+                       detail=detail)
+            self._progress("system", "running", detail)
+            return ""
+        action = result.get("action")
+        note = (result.get("note") or "").strip()
+        if action == "reject":
+            # 无 job 的独立 runner 场景：本地抛出，与标准取消语义一致
+            raise asyncio.CancelledError()
+        if action == "modify" and note:
+            self._progress("system", "running", "已收到人工批注，纳入综合考量")
+            return note[:2000]
+        self._progress("system", "running", "人工确认通过，继续综合")
+        return ""
+
     # ---------- dispatch ----------
 
-    async def run(self, spec: TaskSpec, prefill_results: Optional[dict] = None) -> str:
+    async def run(self, spec: TaskSpec, prefill_results: Optional[dict] = None,
+                  prefill_context: Optional[str] = None,
+                  prefill_goal_hints: Optional[dict] = None,
+                  prefill_articles: Optional[list] = None,
+                  prefill_debate: Optional[str] = None) -> str:
         """Execute a TaskSpec; returns the final report text.
 
         prefill_results (resume flow): agent_name -> prior good artifact
         content; those research agents are skipped and their previous
         output is reused verbatim in the synthesis input.
+        其余 prefill_* 为 checkpoint 级续跑参数，只在对应策略下生效：
+        prefill_context/prefill_goal_hints → single；prefill_articles →
+        series；prefill_debate → multi。
         """
         # P1: reset tool call counters at the start of each run
         self._tool_call_counts.clear()
@@ -187,6 +294,7 @@ class AgentRunner:
             report = await self.run_series(
                 spec.skill_name, spec.arguments,
                 llm_config=llm_config, attachments=spec.attachments,
+                prefill_articles=prefill_articles,
             )
         elif spec.strategy == "multi":
             report = await self.run_multi(
@@ -196,12 +304,15 @@ class AgentRunner:
                 spec=spec,
                 attachments=spec.attachments,
                 prefill_results=prefill_results,
+                prefill_debate=prefill_debate,
             )
         else:
             report = await self.run_single(
                 spec.skill_name, spec.arguments,
                 llm_config=llm_config, stream=spec.stream,
                 attachments=spec.attachments,
+                context=prefill_context or "",
+                prefill_goal_hints=prefill_goal_hints,
             )
 
         # ── 估值一致性校验(硬防线) ─────────────────────────────
@@ -338,6 +449,7 @@ class AgentRunner:
         llm_config: dict = None,
         stream: bool = False,
         attachments: str = "",
+        prefill_goal_hints: Optional[dict] = None,
     ) -> str:
         """Run a single agent analysis.
 
@@ -358,6 +470,17 @@ class AgentRunner:
             )
             context = bundle.context
             self._last_goal_hints = getattr(bundle, "goal_hints", None)
+            # 断点续跑检查点：上下文构建结果（含 goal parser 结果摘要）落库。
+            # 进程重启后 resume 直接复用，跳过 goal parser 重跑。multi 的
+            # 子 Agent 调本方法时 context 已由 run_multi 构建传入，走不到
+            # 这个分支，不会重复打点。
+            await self._save_checkpoint("single", json.dumps({
+                "context": context,
+                "goal_hints": self._last_goal_hints or {},
+            }, ensure_ascii=False, default=str))
+        elif prefill_goal_hints is not None:
+            # 断点续跑：恢复上次 goal parser 结果（P3 决策日志公司名提示）
+            self._last_goal_hints = prefill_goal_hints
 
         if context:
             system_prompt = f"{system_prompt}\n\n{context}"
@@ -407,6 +530,7 @@ class AgentRunner:
         spec: "TaskSpec" = None,
         attachments: str = "",
         prefill_results: Optional[dict] = None,
+        prefill_debate: Optional[str] = None,
     ) -> str:
         """Run multi-agent parallel analysis and synthesize.
 
@@ -427,6 +551,10 @@ class AgentRunner:
         artifact；名单内在列的 Agent 直接复用旧成果（不重跑、不重存
         artifact），其余 Agent 照常执行。Team Lead 综合与
         post_synthesis Agent 始终重跑。
+
+        prefill_debate：断点续跑。非 None 时跳过交叉辩论的 LLM 调用，
+        直接沿用上次落库的辩论结论 checkpoint（空串表示上次辩论阶段
+        已执行但未产出有效结论，同样不重跑）。
         """
         skill = get_skill(skill_name)
         agent_names = skill.get("agents", [])
@@ -545,7 +673,11 @@ class AgentRunner:
         # agree/disagree + specific challenge points + confidence vote.
         # Only triggered when ≥2 agents succeed.
         debate_output = ""
-        if success_count >= 2:
+        if prefill_debate is not None:
+            # 断点续跑：复用上次落库的交叉辩论结论，不再重新辩论
+            debate_output = prefill_debate
+            self._progress("system", "completed", "复用上次交叉辩论结论（断点续跑）", 1.0)
+        elif success_count >= 2:
             self._progress("system", "running", "Agent 交叉辩论中...")
             success_results = [(n, r) for n, r in results if not r.startswith("[错误]")]
 
@@ -606,6 +738,20 @@ class AgentRunner:
                 debate_output += f"\n\n### 交叉评审：{pair}\n{text}\n"
 
             self._progress("system", "completed", f"{len(success_results)} 位 Agent 交叉辩论完成", 1.0)
+            # 断点续跑检查点：辩论结论落库（重启后 Team Lead 前的辩论不重跑）
+            await self._save_checkpoint("debate", debate_output)
+
+        # ── HITL：辩论后人工确认门（可选，默认关闭）─────────────
+        # spec.require_debate_confirm=True 时在 Team Lead 综合前暂停等待
+        # 人工决议；未开启或本次无辩论（成功 Agent < 2 且无续跑辩论结论）
+        # 时行为与旧版完全一致。断点续跑（prefill_debate）同样过门。
+        human_note = ""
+        if (
+            spec is not None
+            and getattr(spec, "require_debate_confirm", False)
+            and (prefill_debate is not None or success_count >= 2)
+        ):
+            human_note = await self._debate_confirm_gate(spec, debate_output)
 
         # Phase 2: Team Lead synthesis (streamed as agent="team-lead")
         # When per_agent_enabled, the Team Lead model comes from agent_models["team-lead"];
@@ -637,6 +783,12 @@ class AgentRunner:
         # P5: inject debate results
         if debate_output:
             synthesis_prompt += f"\n\n## Agent 交叉辩论记录\n以下是各分析师交叉评审对方报告的结果，请在综合时重点考虑质疑和反对意见：{debate_output}"
+        # HITL：modify 决议的人工批注注入综合 prompt（明确标注须纳入考量）
+        if human_note:
+            synthesis_prompt += (
+                f"\n\n## 用户批注（须纳入考量）\n{human_note}\n\n"
+                "以上为用户批注，须纳入考量：综合时请优先回应并体现该批注的观点。"
+            )
 
         async def _synthesize(cfg="__default__") -> str:
             text = ""
@@ -681,6 +833,11 @@ class AgentRunner:
                     "detail": f"综合环节失败，报告降级为各 Agent 原始报告附录：{str(e)[:200]}"[:300],
                 })
                 self._progress("team-lead", "failed", "综合失败，已降级")
+
+        # 断点续跑检查点：Team Lead 综合结果落库。综合完成即任务主体
+        # 完成；崩溃后留作审计，后续 post_synthesis 仍各自存 artifact。
+        if synthesis and not synthesis.startswith("[错误]"):
+            await self._save_checkpoint("synthesis", synthesis)
 
         # Phase 3: post-synthesis agents (sequential, streamed)
         post_synthesis_output = ""
@@ -765,8 +922,14 @@ class AgentRunner:
         arguments: str,
         llm_config: dict = None,
         attachments: str = "",
+        prefill_articles: Optional[list] = None,
     ) -> str:
-        """Run a series generation: multiple long-form articles sequentially."""
+        """Run a series generation: multiple long-form articles sequentially.
+
+        prefill_articles：断点续跑。[(topic, article)] 为上次已完成的
+        连续前缀单篇（prepare_resume 保证前文连续）；命中的篇目原样
+        复用（不重跑、不重存 checkpoint），其余篇目照常生成。
+        """
         skill = get_skill(skill_name)
         topics = skill.get("series_topics", [])
 
@@ -781,8 +944,19 @@ class AgentRunner:
 
         total = len(topics)
         articles = []
+        prefill_articles = prefill_articles or []
 
         for i, topic in enumerate(topics):
+            if i < len(prefill_articles):
+                # 断点续跑：第 i+1 篇上次已完成，正文原样复用（前文摘要
+                # 由下方既有 articles 循环重建，天然衔接）
+                articles.append((topic, prefill_articles[i][1]))
+                self._chunk(prefill_articles[i][1], agent=f"article-{i + 1}")
+                self._progress(
+                    f"article-{i + 1}", "completed",
+                    "复用上次成果（断点续跑）", (i + 1) / total,
+                )
+                continue
             self._progress(f"article-{i + 1}", "running", f"撰写：{topic}")
 
             context_str = ""
@@ -842,6 +1016,22 @@ class AgentRunner:
                 articles.append((topic, article))
                 self._progress(f"article-{i + 1}", "failed", str(e))
             await self._save_artifact(topic, article)
+            # 断点续跑检查点：每篇完成即落库（phase=series_episode_N，
+            # content 含该篇正文+前文摘要）；失败篇不落点，续跑时重写。
+            if not article.startswith("[错误]"):
+                prev_summaries = "\n".join(
+                    f"第{j + 1}篇《{t}》：{(a[:200]).replace(chr(10), ' ')}..."
+                    for j, (t, a) in enumerate(articles[:-1])
+                )
+                await self._save_checkpoint(
+                    f"series_episode_{i + 1}",
+                    json.dumps({
+                        "topic": topic,
+                        "article": article,
+                        "prev_summaries": prev_summaries,
+                    }, ensure_ascii=False),
+                    agent=topic,
+                )
 
         success_count = sum(1 for _, a in articles if not a.startswith("[错误]"))
         failed_count = total - success_count

@@ -10,26 +10,15 @@ document.addEventListener('DOMContentLoaded', function() {
   renderFailedTasks();
   updateUploadVisibility();
 
-  // Restore last report from sessionStorage (only if model is configured)
-  try {
-    var savedReport = sessionStorage.getItem('ai_berkshire_report');
-    var savedMeta = JSON.parse(sessionStorage.getItem('ai_berkshire_report_meta') || '{}');
-    var _cfgCheck = _loadLlmConfig();
-    var _hasCfg = !!(_cfgCheck && (_cfgCheck.model || _cfgCheck.api_key || _cfgCheck.base_url));
-    if (savedReport && _hasCfg) {
-      currentReport = savedReport;
-      document.getElementById('empty-state').style.display = 'none';
-      document.getElementById('result-area').style.display = 'block';
-      renderReport(savedReport);
-      // Banner: make clear this is a restored report, not a fresh one
-      var banner = document.getElementById('restore-banner');
-      var when = savedMeta.ts ? new Date(savedMeta.ts).toLocaleString() : '未知时间';
-      var skillText = savedMeta.skill ? skillDisplayName(savedMeta.skill) : '未知技能';
-      document.getElementById('restore-banner-text').textContent =
-        '这是上次会话恢复的报告（' + skillText + ' · ' + when + '），并非刚刚生成';
-      banner.style.display = 'flex';
-    }
-  } catch(e) {}
+  // 报告渲染依赖 DOMPurify 做 XSS 清洗；本地化成 /static/js/purify.min.js 后
+  // 仍需在启动时断言一次——缺失时明确报错，而不是在渲染时静默白屏。
+  if (typeof DOMPurify === 'undefined') {
+    showToast('⚠ 渲染安全库 DOMPurify 未加载（/static/js/purify.min.js），报告无法安全显示，请强制刷新（Ctrl+F5）', 'error');
+    console.error('[init] DOMPurify missing — report rendering is blocked');
+  }
+
+  // Restore last report (需要可用模型：自有配置 或 服务端默认模型)
+  restoreLastReportIfPossible();
 
   // Enter key to submit (Shift+Enter inserts a newline)
   document.getElementById('arg-field').addEventListener('keydown', function(e) {
@@ -59,9 +48,36 @@ document.addEventListener('DOMContentLoaded', function() {
   // Fetch server model info (supported model list, default model)
   fetch('/api/llm/default').then(function(r) { return r.json(); })
     .then(function(d) { _initLlmDefaults(d); })
-    .catch(function() { _initLlmDefaults(null); });
+    .catch(function() { _initLlmDefaults(null); })
+    .then(function() { restoreLastReportIfPossible(); });  // 服务端默认模型可用时同样允许恢复
   loadSkills();
 });
+
+// 恢复上次会话的报告：自有配置 或 服务端默认模型 任一可用即可。
+// 幂等——DOMContentLoaded 与 /api/llm/default 返回后各调一次，只有第一次生效。
+var _reportRestored = false;
+
+function restoreLastReportIfPossible() {
+  if (_reportRestored || currentReport) return;
+  try {
+    var savedReport = sessionStorage.getItem('ai_berkshire_report');
+    if (!savedReport) return;
+    if (!_hasUsableModel()) return;
+    _reportRestored = true;
+    var savedMeta = JSON.parse(sessionStorage.getItem('ai_berkshire_report_meta') || '{}');
+    currentReport = savedReport;
+    document.getElementById('empty-state').style.display = 'none';
+    document.getElementById('result-area').style.display = 'block';
+    renderReport(savedReport);
+    // Banner: make clear this is a restored report, not a fresh one
+    var banner = document.getElementById('restore-banner');
+    var when = savedMeta.ts ? new Date(savedMeta.ts).toLocaleString() : '未知时间';
+    var skillText = savedMeta.skill ? skillDisplayName(savedMeta.skill) : '未知技能';
+    document.getElementById('restore-banner-text').textContent =
+      '这是上次会话恢复的报告（' + skillText + ' · ' + when + '），并非刚刚生成';
+    banner.style.display = 'flex';
+  } catch(e) {}
+}
 
 function dismissRestoreBanner() {
   document.getElementById('restore-banner').style.display = 'none';

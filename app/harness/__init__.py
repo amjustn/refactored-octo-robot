@@ -4,6 +4,10 @@
     cancel(task_id)  -> server-side cancellation of a running task
     get_status(...)  -> active-task lookup with DB fallback
 
+    HITL 人工确认门（multi 辩论后，默认关闭）：
+    register_confirmation / await_confirmation（runner 用）
+    resolve_confirmation / pending_confirmation（REST / WS 层用）
+
 The harness knows nothing about HTTP or WebSockets; endpoints are thin
 translation layers that build a TaskSpec and forward events.
 """
@@ -32,6 +36,14 @@ _active: dict[str, ResearchStatus] = {}
 _jobs: dict[str, asyncio.Task] = {}
 # task_id -> arguments（ResearchStatus 不带 arguments，服务端去重需要它）
 _active_args: dict[str, str] = {}
+
+# ── HITL 人工确认门注册表 ─────────────────────────────────────
+# 仅在 spec.require_debate_confirm=True 的 multi 任务辩论完成后使用：
+# runner 注册并等待；REST 端点决议；WS 重连时重放 awaiting_confirmation 帧。
+CONFIRM_TIMEOUT_S = 300  # 等待上限；超时自动放行（测试可 monkeypatch 调小）
+_confirm_events: dict[str, asyncio.Event] = {}
+_confirm_payloads: dict[str, dict] = {}   # task_id -> 完整 WS 帧（重放用）
+_confirm_results: dict[str, dict] = {}    # task_id -> {"action", "note"}
 
 # Global concurrency gate: one semaphore per event loop, created lazily
 # (asyncio.Semaphore binds to the running loop; the app uses one loop,
@@ -82,6 +94,10 @@ async def _forget_later(task_id: str, delay: int = _FORGET_DELAY_S):
     await asyncio.sleep(delay)
     _active.pop(task_id, None)
     _active_args.pop(task_id, None)
+    # 兜底清理确认门残留（正常路径下 await_confirmation 已自行清理）
+    _confirm_events.pop(task_id, None)
+    _confirm_payloads.pop(task_id, None)
+    _confirm_results.pop(task_id, None)
 
 
 def find_running_task(skill_name: str, arguments: str) -> Optional[str]:
@@ -111,6 +127,75 @@ def is_active(task_id: str) -> bool:
     """
     status = _active.get(task_id)
     return bool(status) and status.status == "running"
+
+
+# ==================== HITL 人工确认门 ====================
+
+def register_confirmation(task_id: str, payload: dict) -> None:
+    """注册一个人工确认门（runner 在发 awaiting_confirmation 前调用）。
+
+    payload 为事件业务字段（gate/votes/reviews/timeout_s）；注册表另存
+    完整 WS 帧，供断线重连订阅时原样重放。
+    """
+    _confirm_events[task_id] = asyncio.Event()
+    _confirm_payloads[task_id] = {
+        "type": str(EventType.AWAITING_CONFIRMATION),
+        "task_id": task_id,
+        **payload,
+    }
+    _confirm_results.pop(task_id, None)
+
+
+def pending_confirmation(task_id: str) -> Optional[dict]:
+    """该任务当前等待中的确认门 WS 帧（无则 None）。WS 重连重放用。"""
+    return _confirm_payloads.get(task_id)
+
+
+def resolve_confirmation(task_id: str, action: str, note: str = "") -> bool:
+    """人工确认门决议入口（REST 调用）。返回 False 表示无等待中的门。
+
+    approve/modify：置位 Event 放行（modify 的 note 由 runner 注入综合
+    prompt）；reject：先记决议，再走标准取消路径（job.cancel()）——
+    run() 的 CancelledError 分支统一完成计费、partial 报告与 cancelled
+    事件，与手动取消完全一致；无 job（runner 独立使用）时仅置位 Event，
+    由确认门等待方自行抛出 CancelledError。
+    """
+    ev = _confirm_events.get(task_id)
+    if ev is None or ev.is_set():
+        return False
+    _confirm_results[task_id] = {"action": action, "note": (note or "")[:2000]}
+    if action == "reject":
+        job = _jobs.get(task_id)
+        if job is not None:
+            # CancelledError 在等待点抛出 → run() 取消分支（计费/partial/事件）
+            job.cancel()
+    ev.set()
+    return True
+
+
+async def await_confirmation(task_id: str, timeout: Optional[float] = None) -> Optional[dict]:
+    """等待确认门决议。返回 {"action", "note"}；超时返回 None（调用方放行）。
+
+    任务被取消（含 reject 触发的 job.cancel()）时 CancelledError 正常向上
+    传播，不吞不改。无论结果如何，等待结束即清理注册表——决议后/超时后
+    WS 重连不再重放该门。
+    """
+    ev = _confirm_events.get(task_id)
+    if ev is None:
+        return None
+    result: Optional[dict] = None
+    try:
+        await asyncio.wait_for(
+            ev.wait(), timeout if timeout is not None else CONFIRM_TIMEOUT_S
+        )
+        result = _confirm_results.get(task_id) or {"action": "approve", "note": ""}
+    except asyncio.TimeoutError:
+        result = None
+    finally:
+        _confirm_events.pop(task_id, None)
+        _confirm_payloads.pop(task_id, None)
+        _confirm_results.pop(task_id, None)
+    return result
 
 
 def get_status(task_id: str):
@@ -190,18 +275,27 @@ async def _summarize_report(report: str, spec: TaskSpec) -> str:
 
 # ==================== execution ====================
 
-async def _execute(spec: TaskSpec, bus: EventBus, prefill_results: Optional[dict] = None) -> tuple[str, list]:
+async def _execute(spec: TaskSpec, bus: EventBus, prefill_results: Optional[dict] = None,
+                   prefill_context: Optional[str] = None,
+                   prefill_goal_hints: Optional[dict] = None,
+                   prefill_articles: Optional[list] = None,
+                   prefill_debate: Optional[str] = None) -> tuple[str, list]:
     """Dispatch to AgentRunner (single / multi / series unified).
 
     Returns (report, extra_warnings) — extra_warnings carries llm_fallback
     events raised when a custom model couldn't function-call and an agent
     was retried with the server default model.
     prefill_results（断点续跑）：成功 artifact 直接复用，不重跑对应 Agent。
+    其余 prefill_* 为 checkpoint 级续跑参数，原样透传给 AgentRunner。
     """
     from .runner import AgentRunner, AllAgentsFailedError
 
     runner = AgentRunner(bus=bus, task_id=spec.task_id)
-    report = await runner.run(spec, prefill_results=prefill_results)
+    report = await runner.run(
+        spec, prefill_results=prefill_results,
+        prefill_context=prefill_context, prefill_goal_hints=prefill_goal_hints,
+        prefill_articles=prefill_articles, prefill_debate=prefill_debate,
+    )
     if runner.fatal_error:
         # E2: every research agent failed — surface as a hard failure so the
         # task is marked failed.  The generic exception path still persists
@@ -252,6 +346,10 @@ async def run(
     prefill_results: Optional[dict] = None,
     report_overwrite: Optional[str] = None,
     billing_accumulate: bool = False,
+    prefill_context: Optional[str] = None,
+    prefill_goal_hints: Optional[dict] = None,
+    prefill_articles: Optional[list] = None,
+    prefill_debate: Optional[str] = None,
 ) -> RunResult:
     """Execute a TaskSpec; all progress flows through the EventBus.
 
@@ -268,6 +366,10 @@ async def run(
     prefill_results（断点续跑）：agent_name → 上次成功 artifact，跳过重跑。
     report_overwrite：成功后将报告写回该文件名（替换 partial 报告）。
     billing_accumulate：本次 token/费用/耗时累加到既有任务记录而非覆盖。
+    prefill_context / prefill_goal_hints（single 续跑）：复用上次构建的
+    上下文与 goal parser 结果；prefill_articles（series 续跑）：已完成
+    单篇 [(topic, article)]；prefill_debate（multi 续跑）：上次交叉辩论
+    结论。均只在对应策略下生效，默认 None 时行为与旧版一致。
     """
     bus = bus or get_bus()
     repo = get_repository()
@@ -311,7 +413,11 @@ async def run(
                 a.status = "running"
             await _persist_active(spec.task_id, spec.arguments, repo)
 
-            report, extra_warnings = await _execute(spec, bus, prefill_results=prefill_results)
+            report, extra_warnings = await _execute(
+                spec, bus, prefill_results=prefill_results,
+                prefill_context=prefill_context, prefill_goal_hints=prefill_goal_hints,
+                prefill_articles=prefill_articles, prefill_debate=prefill_debate,
+            )
 
             # OutputGuard: four quality gates before persistence
             from .guards import OutputGuard
@@ -363,6 +469,15 @@ async def run(
                 spec.skill_name, spec.arguments, report, duration, tokens,
                 summary=summary,
                 task_id=spec.task_id, overwrite_name=report_overwrite,
+                # 批D(2026-09-11): 把运行时的模型版本与降级告警一起写进报告 meta，
+                # 让「历史报告」自己说明它是怎么跑出来的（此前只存在 tasks 表里）。
+                model=(spec.llm.model or LLM_MODEL),
+                guard_warnings=guard_warnings,
+                data_status={
+                    "state": "degraded" if guard_warnings else "ok",
+                    "gates": sorted({str(w.get("gate") or "") for w in guard_warnings
+                                     if isinstance(w, dict) and w.get("gate")}),
+                },
             )
             report_saved = True
 
@@ -372,6 +487,11 @@ async def run(
                 a.status = "completed"
                 a.progress = 1.0
             await _persist_active(spec.task_id, spec.arguments, repo)
+            # 断点续跑：任务成功完成后清空检查点（失败/取消保留供续跑）
+            try:
+                await repo.aclear_checkpoints(spec.task_id)
+            except Exception as ce:
+                logger.warning(f"clear checkpoints failed for {spec.task_id}: {ce}")
 
             bus.emit(
                 spec.task_id, EventType.COMPLETE,
@@ -430,18 +550,32 @@ async def run(
 
 # ==================== resume (断点续跑) ====================
 
-async def prepare_resume(task_id: str, llm_override: Optional[dict] = None) -> tuple:
+async def prepare_resume(task_id: str, llm_override: Optional[dict] = None,
+                         debate_confirm: bool = False) -> tuple:
     """Validate a task for resume and assemble the execution plan.
 
     Returns (plan, error). plan keys:
       spec             — rebuilt TaskSpec with the SAME task_id
-      prefill_results  — agent_name → prior good artifact (skipped agents)
+      prefill_results  — agent_name → prior good artifact（multi 跳过的 Agent）
+      prefill_debate   — 上次交叉辩论结论 checkpoint（multi，可空）
+      prefill_articles — [(topic, article)] 已完成系列单篇（series，可空）
+      prefill_context  — 上次构建的上下文（single，可空）
+      prefill_goal_hints — 上次 goal parser 结果（single，可空）
       skipped_agents   — roster order, for UI display
       rerun_agents     — agents that will actually execute
       report_overwrite — prior partial report filename to replace, or None
     error is a user-facing message when resume is not possible (caller then
     falls back to a full re-run).
+
+    debate_confirm：续跑任务同样启用辩论后人工确认门（HITL）；默认关闭，
+    与整局重跑的同名开关语义一致。
+
+    检查点优先：multi 的辩论结论、series 的单篇正文、single 的上下文
+    先读 task_checkpoints；multi 研究 Agent 成果仍复用 task_artifacts
+    （runner 对该层本就打 artifact，不重复存 checkpoint）。
     """
+    import json as _json
+
     repo = get_repository()
     brief = await asyncio.to_thread(repo.get_task_brief, task_id)
     if not brief:
@@ -452,7 +586,6 @@ async def prepare_resume(task_id: str, llm_override: Optional[dict] = None) -> t
     # 原任务的 per-agent LLM 配置（落库时已脱敏，无 api_key）：请求未带
     # override 时默认沿用；请求 override 优先（调用方已做校验清洗）。
     if llm_override is None:
-        import json as _json
         try:
             stored = _json.loads(brief.get("llm_config_json") or "{}")
         except Exception:
@@ -463,46 +596,149 @@ async def prepare_resume(task_id: str, llm_override: Optional[dict] = None) -> t
     skill = get_skill(brief["skill_name"])
     if not skill:
         return None, f"技能 {brief['skill_name']} 已不存在"
-    if not skill.get("is_multi_agent"):
-        return None, "该技能为单Agent/系列模式，不支持断点续跑，请整局重跑"
 
-    artifacts = await repo.aget_artifacts(task_id)
-    latest: dict[str, str] = {}
-    for name, content in artifacts:
-        latest[name] = content  # append-only log — last write wins
+    # 读取阶段检查点（进程重启前的中间产出）；读失败不阻断续跑判定
+    try:
+        checkpoints = await repo.aload_checkpoints(task_id)
+    except Exception as e:
+        logger.warning(f"load checkpoints failed for {task_id}: {e}")
+        checkpoints = []
+    latest_ckpt: dict[str, dict] = {}
+    for row in checkpoints:
+        latest_ckpt[row.get("phase") or ""] = row  # append-only — 后写覆盖先写
 
-    post = set(skill.get("post_synthesis_agents", []))
-    roster = [a for a in skill.get("agents", []) if a not in post]
-    prefill = {n: c for n, c in latest.items() if n in roster and not c.startswith("[错误]")}
-    if not prefill:
-        return None, "没有可复用的 Agent 成果，请整局重跑"
-
-    spec = TaskSpec.build(
-        skill, brief["arguments"], llm_override=llm_override,
-        caller="http", stream=True, task_id=task_id,
-    )
     overwrite = await asyncio.to_thread(
         repo.find_report_name_for_task, task_id, brief["skill_name"], brief["arguments"]
     )
-    plan = {
-        "spec": spec,
-        "prefill_results": prefill,
-        "skipped_agents": [n for n in roster if n in prefill],
-        "rerun_agents": [n for n in roster if n not in prefill],
-        "report_overwrite": overwrite,
-    }
-    return plan, None
+
+    def _plan(spec, prefill_results=None, skipped=None, rerun=None, **extra):
+        plan = {
+            "spec": spec,
+            "prefill_results": prefill_results or {},
+            "prefill_debate": None,
+            "prefill_articles": None,
+            "prefill_context": None,
+            "prefill_goal_hints": None,
+            "skipped_agents": skipped or [],
+            "rerun_agents": rerun or [],
+            "report_overwrite": overwrite,
+        }
+        plan.update(extra)
+        return plan
+
+    def _build_spec():
+        return TaskSpec.build(
+            skill, brief["arguments"], llm_override=llm_override,
+            caller="http", stream=True, task_id=task_id,
+            debate_confirm=debate_confirm,
+        )
+
+    # ── series：从最后一个完成的 episode 之后继续，前文从 checkpoint 恢复 ──
+    if skill.get("series_mode"):
+        topics = skill.get("series_topics", [])
+        done: dict[int, tuple] = {}
+        # 优先读 checkpoints（phase=series_episode_N，content 为
+        # {"topic","article","prev_summaries"} JSON；前文摘要由 runner
+        # 续跑时按既有 articles 重建，这里只取正文）
+        for row in checkpoints:
+            phase = row.get("phase") or ""
+            if not phase.startswith("series_episode_"):
+                continue
+            try:
+                idx = int(phase.rsplit("_", 1)[1])
+            except (ValueError, IndexError):
+                continue
+            content = row.get("content") or ""
+            topic = row.get("agent") or ""
+            article = content
+            try:
+                payload = _json.loads(content)
+                if isinstance(payload, dict) and payload.get("article"):
+                    article = payload["article"]
+                    topic = payload.get("topic") or topic
+            except Exception:
+                pass  # 非 JSON（手写/旧格式）：content 即正文
+            if article and not article.startswith("[错误]"):
+                done[idx] = (topic, article)
+        # fallback：无 episode checkpoint 时退到 artifacts（agent_name=topic）
+        if not done:
+            artifacts = await repo.aget_artifacts(task_id)
+            latest_art: dict[str, str] = {}
+            for name, content in artifacts:
+                latest_art[name] = content
+            for i, topic in enumerate(topics, start=1):
+                c = latest_art.get(topic)
+                if c and not c.startswith("[错误]"):
+                    done[i] = (topic, c)
+        # 前文必须连续：断档后的篇目一律重跑，保证「前文回顾」衔接
+        prefill_articles = []
+        skipped = []
+        for i in range(1, len(topics) + 1):
+            if i not in done:
+                break
+            prefill_articles.append(done[i])
+            skipped.append(f"article-{i}")
+        if not prefill_articles:
+            return None, "没有可复用的系列文章成果，请整局重跑"
+        return _plan(
+            _build_spec(), skipped=skipped,
+            rerun=[f"article-{i}" for i in range(len(skipped) + 1, len(topics) + 1)],
+            prefill_articles=prefill_articles,
+        ), None
+
+    # ── multi：研究 Agent 成果复用 artifacts；辩论结论优先读 checkpoints ──
+    if skill.get("is_multi_agent"):
+        artifacts = await repo.aget_artifacts(task_id)
+        latest: dict[str, str] = {}
+        for name, content in artifacts:
+            latest[name] = content  # append-only log — last write wins
+
+        post = set(skill.get("post_synthesis_agents", []))
+        roster = [a for a in skill.get("agents", []) if a not in post]
+        prefill = {n: c for n, c in latest.items() if n in roster and not c.startswith("[错误]")}
+        debate_ckpt = latest_ckpt.get("debate")
+        if not prefill and debate_ckpt is None:
+            return None, "没有可复用的 Agent 成果，请整局重跑"
+
+        return _plan(
+            _build_spec(), prefill_results=prefill,
+            skipped=[n for n in roster if n in prefill],
+            rerun=[n for n in roster if n not in prefill],
+            prefill_debate=(debate_ckpt.get("content") if debate_ckpt else None),
+        ), None
+
+    # ── single：恢复上下文构建结果（含 goal parser 摘要），跳过 goal parser ──
+    single_ckpt = latest_ckpt.get("single")
+    prefill_context, prefill_goal_hints = "", None
+    if single_ckpt and (single_ckpt.get("content") or ""):
+        raw = single_ckpt["content"]
+        try:
+            payload = _json.loads(raw)
+            if isinstance(payload, dict):
+                prefill_context = payload.get("context") or ""
+                prefill_goal_hints = payload.get("goal_hints") or None
+        except Exception:
+            prefill_context = raw  # 非 JSON：整段当作上下文
+    if not prefill_context:
+        return None, "没有可复用的上下文检查点，请整局重跑"
+    spec = _build_spec()
+    return _plan(
+        spec, skipped=[], rerun=list(spec.agent_names),
+        prefill_context=prefill_context, prefill_goal_hints=prefill_goal_hints,
+    ), None
 
 
 async def resume(task_id: str, llm_override: Optional[dict] = None,
-                 bus: Optional[EventBus] = None) -> RunResult:
-    """Resume a terminal multi-agent task: reuse good artifacts, rerun the rest.
+                 bus: Optional[EventBus] = None,
+                 debate_confirm: bool = False) -> RunResult:
+    """Resume a terminal task: reuse checkpoints/artifacts, rerun the rest.
 
-    Team Lead synthesis and post-synthesis agents always rerun; billing is
-    accumulated onto the existing task row; a successful run overwrites the
-    partial report file in place.
+    multi 复用研究 Agent artifact + 辩论 checkpoint；series 从最后一篇
+    完成的 episode 之后继续；single 复用上下文构建结果。Team Lead 综合
+    与 post-synthesis agents 始终重跑；billing 累加到既有任务行；成功
+    后原位覆盖 partial 报告。
     """
-    plan, error = await prepare_resume(task_id, llm_override)
+    plan, error = await prepare_resume(task_id, llm_override, debate_confirm=debate_confirm)
     if error:
         return RunResult(task_id=task_id, status="error", error=error)
     return await run(
@@ -510,4 +746,8 @@ async def resume(task_id: str, llm_override: Optional[dict] = None,
         prefill_results=plan["prefill_results"],
         report_overwrite=plan["report_overwrite"],
         billing_accumulate=True,
+        prefill_context=plan.get("prefill_context"),
+        prefill_goal_hints=plan.get("prefill_goal_hints"),
+        prefill_articles=plan.get("prefill_articles"),
+        prefill_debate=plan.get("prefill_debate"),
     )

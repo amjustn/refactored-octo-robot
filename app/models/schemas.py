@@ -31,6 +31,7 @@ class ResearchRequest(BaseModel):
     attachments: Optional[str] = Field(default=None, max_length=30000, description="Extracted text from user-uploaded reference files (travels separately from arguments)")
     stream: bool = Field(default=False, description="Stream the response")
     llm_config: Optional[dict] = Field(default=None, description="Per-request LLM override: {api_key, base_url, model, synthesis_model}（synthesis_model 为 Team Lead 综合环节可选的独立模型）")
+    debate_confirm: bool = Field(default=False, description="HITL：multi 策略辩论完成后暂停等待人工确认（默认关闭）")
 
 
 class AgentProgress(BaseModel):

@@ -32,7 +32,7 @@ async def get_skin():
 @router.post("/api/skin")
 async def save_skin(body: dict):
     payload = {k: v for k, v in body.items() if k in _ALLOWED}
-    # 合并写入而非整体覆盖：多个服务实例可共享同一文件且字段集不同，
+    # 合并写入而非整体覆盖：双站(8000/8001)共享同一文件且字段集不同，
     # 整体覆盖会让任一站一次常规保存就抹掉对方的 wallpaper/gradient/sidebarAlpha。
     merged = {}
     if os.path.exists(_SKIN_FILE):

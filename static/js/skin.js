@@ -173,7 +173,7 @@
   }
 
   function authHeaders() {
-    var jwt = localStorage.getItem('ai_berkshire_jwt') || '';
+    var jwt = _getJwt() || '';
     return jwt ? { 'Authorization': 'Bearer ' + jwt } : {};
   }
 

@@ -70,19 +70,22 @@ FINANCIAL_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "three_scenario",
-            "description": "三情景估值：乐观/中性/悲观，返回目标价和上涨空间。支持三种估值锚，按公司类型动态选择：anchor=PE(默认,传统重资产/制造/消费,用eps+multiples)、anchor=PB(银行/保险/周期股,用bvps+multiples)、anchor=PS(轻资产/互联网/软件,用revenue_per_share+multiples)。目标价=未来基准值(1+增长率)×倍数",
+            "description": "三情景/敏感性估值。支持四种估值锚，按公司类型动态选择：anchor=PE(默认,传统重资产/制造/消费,用eps+multiples)、anchor=PB(银行/保险/周期股,用bvps+multiples)、anchor=PS(轻资产/互联网/软件,用revenue_per_share+multiples)，三者目标价=未来基准值(1+增长率)×倍数；anchor=DDM(反向戈登1959,适用银行/水电/高速/运营商等高股息且分红稳定的标的,用dps+discount_rates)，返回市场隐含的股息增长率与 r×g 敏感性矩阵(不给单点目标价)，不分红或象征性分红的标的会被直接拒绝，此时应改用 PE/PB/股息率锚",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "price": {"type": "number", "description": "当前股价"},
                     "shares_100m": {"type": "number", "description": "总股本（亿股）"},
-                    "growth_rates": {"type": "array", "items": {"type": "number"}, "description": "三个情景的增长率"},
-                    "anchor": {"type": "string", "enum": ["PE", "PB", "PS"], "description": "估值锚：PE(重资产/消费)、PB(银行/保险/周期)、PS(轻资产/互联网),默认PE"},
+                    "growth_rates": {"type": "array", "items": {"type": "number"}, "description": "三个情景的增长率；anchor=DDM 时作为增长率网格(可省，默认=中档贴现率下的隐含增长率±1个百分点)"},
+                    "anchor": {"type": "string", "enum": ["PE", "PB", "PS", "DDM"], "description": "估值锚：PE(重资产/消费)、PB(银行/保险/周期)、PS(轻资产/互联网)、DDM(高股息稳定分红,反向戈登),默认PE"},
                     "eps": {"type": "number", "description": "当前每股收益(anchor=PE时必填)"},
                     "bvps": {"type": "number", "description": "当前每股净资产(anchor=PB时必填)"},
                     "revenue_per_share": {"type": "number", "description": "当前每股营收(anchor=PS时必填,=营收/股本)"},
                     "multiples": {"type": "array", "items": {"type": "number"}, "description": "三个情景的估值倍数(PE倍数/PB倍数/PS倍数,与anchor对应)"},
                     "pe_multiples": {"type": "array", "items": {"type": "number"}, "description": "兼容旧参数:三个情景的PE倍数,等价于anchor=PE时传multiples"},
+                    "dps": {"type": "number", "description": "每股分红 D1(anchor=DDM时必填,口径=预期未来12个月,不是已派发历史)"},
+                    "discount_rates": {"type": "array", "items": {"type": "number"}, "description": "贴现率档(anchor=DDM时必填,建议三档,如[0.08,0.09,0.10])"},
+                    "risk_free_rate": {"type": "number", "description": "无风险利率(anchor=DDM可选,如10年国债1.8%=0.018,用于给出风险补偿与股息率利差)"},
                     "currency": {"type": "string", "default": "CNY"},
                 },
                 "required": ["price", "shares_100m", "growth_rates"],
@@ -189,6 +192,7 @@ DATA_TOOL_SCHEMAS = [
     },
 ]
 
+
 # ==================== Web Search Tool Schemas ====================
 
 WEB_TOOL_SCHEMAS = [
@@ -223,6 +227,7 @@ WEB_TOOL_SCHEMAS = [
         },
     },
 ]
+
 
 # ==================== Industry Chain Tool Schemas ====================
 
@@ -293,8 +298,10 @@ BROKER_TOOL_SCHEMAS = [
     },
 ]
 
+
 # All tools available to agents
 ALL_TOOL_SCHEMAS = FINANCIAL_TOOL_SCHEMAS + DATA_TOOL_SCHEMAS + WEB_TOOL_SCHEMAS + INDUSTRY_TOOL_SCHEMAS + BROKER_TOOL_SCHEMAS
+
 
 # ==================== Tool Executor ====================
 
@@ -329,9 +336,10 @@ async def _execute_tool(tool_name: str, arguments: dict) -> str:
             return json.dumps({"error": str(e)}, ensure_ascii=False)
 
     # --- Market data tools (async) ---
-    # --- Industry chain tools (async) ---
     # --- Broker research report tools (async) ---
     from ..tools.broker_reports import get_rating_summary, get_report_detail
+
+    # --- Industry chain tools (async) ---
     from ..tools.industry_sources import list_industry_sources, search_industry_chain
     from ..tools.market_data import (
         fetch_company_news,
@@ -367,6 +375,7 @@ async def _execute_tool(tool_name: str, arguments: dict) -> str:
 
     return json.dumps({"error": f"Unknown tool: {tool_name}"}, ensure_ascii=False)
 
+
 # Agents that have tool access (financial + market data)
 # All research/analysis agents get tools; editorial agents don't need them
 TOOL_ENABLED_AGENTS = {
@@ -377,6 +386,7 @@ TOOL_ENABLED_AGENTS = {
     "macro-institutional-economist", "macro-forecaster", "macro-strategist",
     "cn-policy-framework", "cn-data-cycle", "cn-fx-external", "cn-structure-trend",
 }
+
 
 # ==================== ToolGateway (PR-3) ====================
 
@@ -402,6 +412,7 @@ class ToolDef:
     cache_ttl: Optional[int] = None      # seconds; None = no gateway-level cache
     fallback: list = field(default_factory=list)  # alternative tool names
 
+
 @dataclass
 class ToolResult:
     tool: str
@@ -414,13 +425,16 @@ class ToolResult:
     circuit: str = "closed"
     error: str = ""
 
+
 _BUSINESS_ERROR_HINTS = ("不存在", "未找到", "not found", "no data", "无法识别")
+
 
 def _is_business_error(msg: str) -> bool:
     """A legitimate 'no such data' answer is not a provider failure and must
     not trip the circuit breaker (e.g. querying a delisted/unknown symbol)."""
     m = (msg or "").lower()
     return any(h.lower() in m for h in _BUSINESS_ERROR_HINTS)
+
 
 class CircuitBreaker:
     """Per-tool circuit breaker.
@@ -484,6 +498,7 @@ class CircuitBreaker:
             "open_since_s": round(time.monotonic() - self.opened_at, 1) if self.opened_at else None,
         }
 
+
 # Tool registry with per-tool execution policy. cache_ttl mirrors the
 # DATA_CACHE_TTL_* tiers in core.config (market_data also caches
 # internally; the gateway cache short-circuits repeat calls within a run).
@@ -510,6 +525,7 @@ TOOL_DEFS: dict[str, ToolDef] = {
     "fetch_broker_reports": ToolDef("fetch_broker_reports", timeout=25, retries=1),
     "fetch_broker_report_detail": ToolDef("fetch_broker_report_detail", timeout=20, retries=1),
 }
+
 
 class ToolGateway:
     """Unified tool entry: circuit check → cache → timeout/retry →
@@ -933,7 +949,9 @@ class ToolGateway:
         result = await self.call(tool_name, arguments, task_id=task_id, agent=agent, bus=bus)
         return result.content
 
+
 _gateway: Optional[ToolGateway] = None
+
 
 def get_gateway() -> ToolGateway:
     global _gateway

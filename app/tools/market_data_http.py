@@ -25,6 +25,7 @@ logger = logging.getLogger("ai_berkshire.market_data_http")
 # Shared async HTTP client (lazy-initialized)
 _http_client: Optional[httpx.AsyncClient] = None
 
+
 async def get_client() -> httpx.AsyncClient:
     """Get or create the shared httpx async client."""
     global _http_client
@@ -42,6 +43,7 @@ async def get_client() -> httpx.AsyncClient:
         )
     return _http_client
 
+
 async def close_client():
     """Close the shared HTTP client (call on shutdown)."""
     global _http_client
@@ -51,6 +53,7 @@ async def close_client():
         except Exception:
             pass
     _http_client = None
+
 
 # ═══════════════════════════════════════════════════════
 #  A-Share Real-time Price — Tencent Finance (direct HTTP)
@@ -98,6 +101,7 @@ async def fetch_a_share_price_tencent(symbol: str) -> Optional[dict]:
     except Exception as e:
         logger.debug(f"Tencent HTTP price failed for {symbol}: {e}")
         return None
+
 
 # ═══════════════════════════════════════════════════════
 #  A-Share Real-time Price — Sina Finance (second fallback)
@@ -153,6 +157,7 @@ async def fetch_a_share_price_sina(symbol: str) -> Optional[dict]:
         logger.debug(f"Sina HTTP price failed for {symbol}: {e}")
         return None
 
+
 # ═══════════════════════════════════════════════════════
 #  A-Share K-line — Eastmoney (direct HTTP)
 # ═══════════════════════════════════════════════════════
@@ -202,6 +207,7 @@ async def fetch_a_share_kline_eastmoney(symbol: str, count: int = 250) -> Option
         logger.debug(f"Eastmoney HTTP kline failed for {symbol}: {e}")
         return None
 
+
 # ═══════════════════════════════════════════════════════
 #  Company News — Eastmoney (direct HTTP)
 # ═══════════════════════════════════════════════════════
@@ -244,6 +250,7 @@ async def fetch_news_eastmoney(symbol: str, page_size: int = 20) -> Optional[lis
 
     return None
 
+
 # ═══════════════════════════════════════════════════════
 #  Company News — Sina Finance (second fallback)
 # ═══════════════════════════════════════════════════════
@@ -278,6 +285,7 @@ async def fetch_news_sina(symbol: str, page_size: int = 20) -> Optional[list]:
     except Exception as e:
         logger.debug(f"Sina HTTP news failed for {symbol}: {e}")
         return None
+
 
 # ═══════════════════════════════════════════════════════
 #  Market Indices — Tencent HTTP (A-share indices)
@@ -338,6 +346,7 @@ async def fetch_indices_tencent() -> Optional[dict]:
         logger.debug(f"Tencent HTTP indices failed: {e}")
         return None
 
+
 # ═══════════════════════════════════════════════════════
 #  US/HK Stock Price — Tencent Finance (primary HTTP fallback)
 # ═══════════════════════════════════════════════════════
@@ -396,6 +405,7 @@ async def fetch_us_hk_price_tencent(symbol: str) -> Optional[dict]:
     except Exception as e:
         logger.debug(f"Tencent HTTP US/HK price failed for {symbol}: {e}")
         return None
+
 
 # ═══════════════════════════════════════════════════════
 #  US/HK Stock Price — Yahoo Finance (secondary HTTP fallback)
@@ -475,6 +485,7 @@ async def fetch_us_hk_price_yahoo(symbol: str) -> Optional[dict]:
         logger.debug(f"Yahoo HTTP price failed for {symbol}: {e}")
         return None
 
+
 # ═══════════════════════════════════════════════════════
 #  Market Indices — Tencent HTTP (US/HK indices)
 # ═══════════════════════════════════════════════════════
@@ -530,6 +541,7 @@ async def fetch_indices_tencent_global() -> Optional[dict]:
     except Exception as e:
         logger.debug(f"Tencent HTTP global indices failed: {e}")
         return None
+
 
 # ═══════════════════════════════════════════════════════
 #  Market Indices — Yahoo Finance (US/HK indices, secondary)

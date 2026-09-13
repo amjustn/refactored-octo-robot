@@ -1,8 +1,5 @@
 // core.js — 共享全局状态 / 基础 helpers / toast（拆分自 app.js，加载顺序第 1）
 
-// 无论本页是手动打开还是新开标签页，统一窗口名，实现「已开则复用、不重复新开」。
-// window.name 在后续导航中自动保留，这里只需在首次加载时设一次。
-// AI Berkshire Web - Application Logic
 let currentSkill = null;
 let allSkills = [];
 let currentReport = '';
@@ -33,6 +30,40 @@ const CAT_ICONS = {
   '日报': 'D'
 };
 
+// ==================== JWT helpers（会话级存储） ====================
+// 批A(2026-09-11) 凭据收紧：JWT 改为 sessionStorage 优先，并清理历史遗留的
+// localStorage 副本。/app 每次加载都会重新注入令牌，所以会话级存储不增加操作成本。
+// 读取顺序：sessionStorage → localStorage（兼容旧标签页）→ ''。
+var _JWT_KEY = 'ai_berkshire_jwt';
+
+function _getJwt() {
+  try {
+    var t = sessionStorage.getItem(_JWT_KEY);
+    if (t) return t;
+    var legacy = localStorage.getItem(_JWT_KEY);
+    if (legacy) {  // 迁移：搬到会话级并删掉持久化副本
+      sessionStorage.setItem(_JWT_KEY, legacy);
+      localStorage.removeItem(_JWT_KEY);
+      return legacy;
+    }
+    return '';
+  } catch (e) { return ''; }
+}
+
+function _setJwt(token) {
+  try {
+    sessionStorage.setItem(_JWT_KEY, token || '');
+    localStorage.removeItem(_JWT_KEY);
+  } catch (e) {}
+}
+
+function _clearJwt() {
+  try {
+    sessionStorage.removeItem(_JWT_KEY);
+    localStorage.removeItem(_JWT_KEY);
+  } catch (e) {}
+}
+
 // ==================== Helpers ====================
 function escHtml(s) {
   return String(s == null ? '' : s)
@@ -52,6 +83,16 @@ function fmtTokens(t) {
   var n = t.total_tokens;
   var s = n >= 10000 ? (n / 10000).toFixed(1) + '万' : String(n);
   return '约 ' + s + ' tokens';
+}
+
+// 批D(2026-09-11): 从 tokens.by_model 推断主模型（单模型直出；多模型 mixed(...)）。
+// 与后端 persist._dominant_model 同一语义，用于报告页显示"模型版本"。
+function dominantModel(tokens) {
+  var bm = (tokens && tokens.by_model) || null;
+  if (!bm || typeof bm !== 'object') return '';
+  var names = Object.keys(bm).sort();
+  if (!names.length) return '';
+  return names.length === 1 ? names[0] : ('mixed(' + names.join(',') + ')');
 }
 
 function skillDisplayName(name) {
@@ -80,7 +121,7 @@ function _promptForToken(callback) {
   if (!secret) { document.body.innerHTML = '<div style="padding:40px;text-align:center;color:#c4a77d">需要令牌才能访问</div>'; return; }
   loginWithToken(secret).then(function(data) {
     if (data && data.note === 'Auth disabled') {
-      localStorage.setItem('ai_berkshire_jwt', 'disabled');
+      _setJwt('disabled');
     }
     callback();
   }).catch(function(e) {

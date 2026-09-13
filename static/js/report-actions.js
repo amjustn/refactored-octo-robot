@@ -80,7 +80,7 @@ function pushWechat() {
   var btn = event ? event.target : null;
   if (btn) { btn.disabled = true; btn.textContent = '推送中...'; }
   var headers = { 'Content-Type': 'application/json' };
-  var jwt = localStorage.getItem('ai_berkshire_jwt');
+  var jwt = _getJwt();
   if (jwt) { headers['Authorization'] = 'Bearer ' + jwt; }
   fetch('/api/export/wechat', {
     method: 'POST',
@@ -136,7 +136,7 @@ async function exportPdf() {
   try {
     var llmCfg = getLlmConfig();
     var headers = { 'Content-Type': 'application/json' };
-    var jwt = localStorage.getItem('ai_berkshire_jwt');
+    var jwt = _getJwt();
     if (jwt) { headers['Authorization'] = 'Bearer ' + jwt; }
     var resp = await fetch('/api/export/pdf', {
       method: 'POST',
@@ -231,7 +231,9 @@ async function showHistory() {
     var res = await fetch('/api/reports', { headers: headers });
     var data = await res.json();
     _historyData = data.reports || [];
-    renderHistory(_historyData);
+    _historyTotal = data.total || _historyData.length;
+    _renderHistorySkillFilter(_historyData);
+    filterHistory();
   } catch (e) {
     list.innerHTML = '<p style="color:var(--accent-red)">加载失败</p>';
   }
@@ -239,14 +241,74 @@ async function showHistory() {
   historyArea.style.display = 'block';
 }
 
+// ── 批C(2026-09-11): 全量可见 + 筛选/排序 + 元数据分层 ──────────────
+var _historyTotal = 0;
+
+// 技能筛选下拉：按当前数据聚合重建（保留用户已选值）
+function _renderHistorySkillFilter(reports) {
+  var sel = document.getElementById('historySkillFilter');
+  if (!sel) return;
+  var keep = sel.value;
+  var seen = {};
+  var skills = [];
+  (reports || []).forEach(function(r) {
+    var s = r.skill_name || '';
+    if (s && !seen[s]) { seen[s] = 1; skills.push(s); }
+  });
+  skills.sort(function(a, b) {
+    return skillDisplayName(a).localeCompare(skillDisplayName(b), 'zh');
+  });
+  var html = '<option value="">全部技能</option>';
+  skills.forEach(function(s) {
+    html += '<option value="' + escHtml(s) + '">' + escHtml(skillDisplayName(s)) + '</option>';
+  });
+  sel.innerHTML = html;
+  sel.value = keep;
+}
+
+function sortHistory(reports, mode) {
+  var arr = (reports || []).slice();
+  function t(r) { return new Date(r.modified || 0).getTime(); }
+  if (mode === 'time_asc') arr.sort(function(a, b) { return t(a) - t(b); });
+  else if (mode === 'size_desc') arr.sort(function(a, b) { return (b.size || 0) - (a.size || 0); });
+  else if (mode === 'target') arr.sort(function(a, b) {
+    return (a.arguments || a.name || '').localeCompare(b.arguments || b.name || '', 'zh');
+  });
+  else if (mode === 'skill') arr.sort(function(a, b) {
+    var x = skillDisplayName(a.skill_name || ''), y = skillDisplayName(b.skill_name || '');
+    return x === y ? t(b) - t(a) : x.localeCompare(y, 'zh');
+  });
+  else arr.sort(function(a, b) { return t(b) - t(a); });   // 默认最新优先
+  return arr;
+}
+
 function filterHistory() {
-  var q = document.getElementById('historySearch').value.toLowerCase();
-  var filtered = _historyData.filter(function(r) {
+  var q = (document.getElementById('historySearch').value || '').toLowerCase();
+  var skillEl = document.getElementById('historySkillFilter');
+  var sortEl = document.getElementById('historySort');
+  var skill = (skillEl && skillEl.value) || '';
+  var mode = (sortEl && sortEl.value) || 'time_desc';
+  var filtered = (_historyData || []).filter(function(r) {
+    if (skill && (r.skill_name || '') !== skill) return false;
     var hay = ((r.name || '') + ' ' + (r.arguments || '') + ' ' +
       (r.skill_name || '') + ' ' + skillDisplayName(r.skill_name || '')).toLowerCase();
     return hay.indexOf(q) >= 0;
   });
+  filtered = sortHistory(filtered, mode);
   renderHistory(filtered);
+  renderHistoryCount(filtered);
+}
+
+// 计数条：把「可见/总数/其中多少条无元数据」写在脸上，
+// 避免"静默截断"再次发生（上一版 UI 只显示 50 条且不告知）。
+function renderHistoryCount(shown) {
+  var el = document.getElementById('historyCount');
+  if (!el) return;
+  var total = _historyTotal || (_historyData || []).length;
+  var missing = (shown || []).filter(function(r) { return r.meta_missing; }).length;
+  var txt = '显示 ' + (shown || []).length + ' / 共 ' + total + ' 条';
+  if (missing) txt += '（其中 ' + missing + ' 条旧报告·无元数据）';
+  el.textContent = txt;
 }
 
 function renderHistory(reports) {
@@ -260,18 +322,33 @@ function renderHistory(reports) {
     var args = (r.arguments || '').trim();
     var title = args || r.name;
     var metaParts = [];
-    if (r.skill_name) metaParts.push(skillDisplayName(r.skill_name));
+    // 批C: 元数据分层 —— 有 meta 的显示技能/时间/大小/耗时/模型；
+    // 无 meta 的旧报告明确标「未记录（文件名推断）」，绝不用猜测值填坑。
+    var missing = !!r.meta_missing;
+    if (r.skill_name) metaParts.push(skillDisplayName(r.skill_name) + (missing ? '（文件名推断）' : ''));
     metaParts.push(new Date(r.modified).toLocaleString());
     metaParts.push((r.size/1024).toFixed(1) + 'KB');
-    if (r.duration_seconds) metaParts.push('耗时 ' + fmtDuration(r.duration_seconds));
+    if (!missing && r.duration_seconds) metaParts.push('耗时 ' + fmtDuration(r.duration_seconds));
+    if (!missing && r.model) metaParts.push('模型 ' + r.model);
+    var badges = '';
+    if (r.partial) badges += '<span class="partial-badge">未完成</span>';
+    if (r.degraded) {
+      var gates = (r.data_status && r.data_status.gates) ? r.data_status.gates.join('、') : '未分类';
+      badges += '<span class="warn-badge" title="本次运行存在降级/告警：' + escHtml(gates) + '">降级' +
+        (r.guard_warnings ? '·' + r.guard_warnings : '') + '</span>';
+    }
+    if (missing) badges += '<span class="nodata-badge" title="该报告早于元数据落盘（2026-09-11 之前），目标/技能/耗时未记录">未记录</span>';
     var checked = _compareSelection.has(r.name) ? ' checked' : '';
     var summary = (r.summary || '').trim();
-    return '<div class="history-item' + (r.partial ? ' partial' : '') + '" onclick="loadReport(\'' + safeName.replace(/'/g, "\\'") + '\')">' +
+    var summaryHtml = summary
+      ? '<div class="report-summary" title="' + escHtml(summary) + '">' + escHtml(summary) + '</div>'
+      : (missing ? '<div class="report-summary muted">旧报告：无摘要记录（可打开正文查看）</div>' : '');
+    return '<div class="history-item' + (r.partial ? ' partial' : '') + (missing ? ' plain' : '') + '" onclick="loadReport(\'' + safeName.replace(/'/g, "\\'") + '\')">' +
       '<input type="checkbox" class="compare-check" data-name="' + safeName + '"' + checked +
       ' onclick="event.stopPropagation();toggleCompareSelect(this)" title="选择两份报告进行对比">' +
       '<div class="history-item-body">' +
-      '<div class="report-name">' + (r.partial ? '<span class="partial-badge">未完成</span>' : '') + escHtml(title) + '</div>' +
-      (summary ? '<div class="report-summary" title="' + escHtml(summary) + '">' + escHtml(summary) + '</div>' : '') +
+      '<div class="report-name">' + badges + escHtml(title) + '</div>' +
+      summaryHtml +
       '<div class="report-meta">' + escHtml(metaParts.join(' | ')) + '</div>' +
       (args ? '<div class="report-filename">' + safeName + '</div>' : '') +
       '</div>' +
@@ -302,7 +379,8 @@ async function resumeAndWatch(taskId, args) {
     Object.assign(headers, getAuthHeaders());
     var res = await fetch('/api/tasks/' + encodeURIComponent(taskId) + '/resume', {
       method: 'POST', headers: headers,
-      body: JSON.stringify({ llm_config: getLlmConfig() || undefined })
+      body: JSON.stringify({ llm_config: getLlmConfig() || undefined,
+        debate_confirm: (typeof isDebateConfirmEnabled === 'function') ? isDebateConfirmEnabled() : false })
     });
     var data = await res.json().catch(function() { return {}; });
     if (!res.ok || data.error) {
@@ -422,19 +500,27 @@ async function loadReport(filename) {
       document.getElementById('restore-banner').style.display = 'none';
       renderReport(data.content);
       buildToc();
-      // Show stored run metadata if available
+      // Show stored run metadata if available（批D: 补齐 模型/数据状态/未完成，
+      // 无元数据的旧报告明确显示「未记录」，不让空条伪装成"没有状态"）
       var metaEl = document.getElementById('report-meta');
-      if (data.meta && (data.meta.duration_seconds || (data.meta.tokens && data.meta.tokens.total_tokens))) {
-        var parts = [];
-        if (data.meta.arguments) parts.push('目标：' + data.meta.arguments);
-        if (data.meta.duration_seconds) parts.push('耗时 ' + fmtDuration(data.meta.duration_seconds));
-        var tk = fmtTokens(data.meta.tokens);
-        if (tk) parts.push('消耗 ' + tk);
-        metaEl.textContent = parts.join(' · ');
-        metaEl.style.display = 'block';
-      } else {
-        metaEl.style.display = 'none';
+      var m = data.meta || {};
+      var parts = [];
+      if (m.arguments) parts.push('目标：' + m.arguments);
+      if (m.created_at) parts.push('生成于 ' + new Date(m.created_at).toLocaleString());
+      if (m.skill_name) parts.push('技能 ' + skillDisplayName(m.skill_name));
+      if (m.duration_seconds) parts.push('耗时 ' + fmtDuration(m.duration_seconds));
+      var tk = fmtTokens(m.tokens);
+      if (tk) parts.push('消耗 ' + tk);
+      var modelName = dominantModel(m.tokens) || m.model || '';
+      if (modelName) parts.push('模型 ' + modelName);
+      if (m.data_status && m.data_status.state === 'degraded') {
+        var gates = (m.data_status.gates || []).join('、') || '未分类';
+        parts.push('⚠ 数据状态：部分降级（' + gates + '）');
       }
+      if (m.partial) parts.push('⚠ 未完成产物（可断点续跑）');
+      if (!parts.length) parts.push('未记录（旧报告：无元数据）');
+      metaEl.textContent = parts.join(' · ');
+      metaEl.style.display = 'block';
       try { sessionStorage.setItem('ai_berkshire_report', data.content); } catch(e) {}
     }
   } catch (e) {

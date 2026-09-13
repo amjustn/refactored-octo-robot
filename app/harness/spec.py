@@ -178,6 +178,9 @@ class TaskSpec:
     agent_names: tuple = ("default",)
     stream: bool = True
     caller: str = "ws"  # ws / http / eval
+    # HITL：multi 策略辩论完成后暂停等待人工确认（默认关闭；
+    # 前端 WS 启动消息 debate_confirm=true 时开启）。
+    require_debate_confirm: bool = False
 
     @classmethod
     def build(
@@ -189,6 +192,7 @@ class TaskSpec:
         stream: bool = True,
         task_id: Optional[str] = None,
         attachments: str = "",
+        debate_confirm: bool = False,
     ) -> "TaskSpec":
         """Derive strategy + agent roster from skill metadata."""
         is_multi = skill.get("is_multi_agent", False)
@@ -216,4 +220,5 @@ class TaskSpec:
             agent_names=agent_names,
             stream=stream,
             caller=caller,
+            require_debate_confirm=bool(debate_confirm),
         )
