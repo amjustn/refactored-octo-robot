@@ -500,9 +500,49 @@ async def build_full_context(arguments: str = "", skill_name: str = "", goal_hin
             logger.debug(f"Broker context failed: {e}")
             return ""
 
+    async def _fetch_announcement_ctx():
+        # 2026-09-13 批2/P1：公告与定期报告注入（巨潮+东财+同花顺）。
+        # 正面解决"2026 半年报应已披露却写需要核实"：实测同一时刻同一标的，
+        # 无工具链路（3826 tokens）写"需要核实"，有工具链路给出精确数字。
+        if not symbol:
+            return ""
+        def _sync():
+            from ..tools.announcements import format_announcement_context
+            from ..tools.market_data import company_display_name
+            nm = company_display_name(symbol, arguments or "")
+            return format_announcement_context(symbol, nm or "")
+        try:
+            return await asyncio.wait_for(asyncio.to_thread(_sync), timeout=45.0) or ""
+        except Exception as e:
+            logger.debug(f"Announcement context failed: {e}")
+            return ""
+
+    async def _fetch_hibor_ctx():
+        # 2026-09-13 批2/P1：慧博机构研报注入。覆盖东财研报中心没有的
+        # 港股/美股研报（慧博"港美研究"频道实测 98 条/页可匿名抓取）。
+        if not symbol and not arguments:
+            return ""
+        try:
+            from ..tools.hibor_reports import aformat_hibor_context
+            from ..tools.market_data import company_display_name
+            from ..tools.text_relevance import clean_search_keyword
+            nm = company_display_name(symbol, arguments or "") if symbol else ""
+            # 关键词兜底：公司查询用简称，行业/主题查询用清洗后的用户词。
+            # 实测：慧博列表页按行业词命中良好（"半导体设备"→3 条、"商业航天"→1 条），
+            # 但中盘个股名字可能不在当天快照内 → 返回空块（诚实留白，不编造）。
+            kw = clean_search_keyword(arguments or "")[:40] or nm
+            return await asyncio.wait_for(
+                aformat_hibor_context(keyword=kw, symbol=symbol or "", company_name=nm or "", limit=12),
+                timeout=30.0,
+            ) or ""
+        except Exception as e:
+            logger.debug(f"HIBOR context failed: {e}")
+            return ""
+
     import asyncio
-    idx_ctx, comp_ctx, web_ctx, broker_ctx = await asyncio.gather(
+    idx_ctx, comp_ctx, web_ctx, broker_ctx, ann_ctx, hibor_ctx = await asyncio.gather(
         _fetch_indices_ctx(), _fetch_company_ctx(), _fetch_web_ctx(), _fetch_broker_ctx(),
+        _fetch_announcement_ctx(), _fetch_hibor_ctx(),
     )
     # Assemble sections in the same order as the sequential implementation
     if idx_ctx is not None:
@@ -511,6 +551,10 @@ async def build_full_context(arguments: str = "", skill_name: str = "", goal_hin
         parts.append(comp_ctx)
     if broker_ctx:
         parts.append(broker_ctx)
+    if ann_ctx:
+        parts.append(ann_ctx)
+    if hibor_ctx:
+        parts.append(hibor_ctx)
     if web_ctx:
         parts.append(web_ctx)
 

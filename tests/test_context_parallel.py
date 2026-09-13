@@ -29,6 +29,9 @@ FIXED_WEB = (
     "## 网络最新信息（自动搜索）\n*搜索关键词: 腾讯*\n\n"
     "### 搜索结果 (1 条)\n- [1] 示例新闻\n  来源: http://example.com\n---"
 )
+# 2026-09-13 批2 新增分支的固定输出（供并行/顺序一致性断言使用）
+FIXED_HIBOR = "## 机构研报（慧博投研）\n华泰证券 | 腾讯控股 深度报告 | 2026-09-01 | https://www.hibor.com.cn/data/x.html"
+FIXED_ANNOUNCEMENTS = "## 公司公告与定期报告（自动获取）\n### 一、定期报告\n- [2026-08-29] 半年报：示例公司2026年半年度报告（公告链接：http://www.cninfo.com.cn/x）"
 FIXED_TIME = (
     "## 当前时间上下文\n\n**当前日期**：2026年08月04日 周二\n"
     "**当前时间**：12:00:00\n**市场状态**：A股: 交易中\n"
@@ -72,6 +75,21 @@ def _patch_fetchers(monkeypatch, sleeps=None, lock=None, fail=()):
         await _run("web")
         return FIXED_WEB
 
+    # 2026-09-13 批2 新增的两个注入分支（公告/定期报告 + 慧博机构研报）。
+    # 它们是真实网络调用，必须在测试里也打桩，否则并行墙钟时间会被未打桩的
+    # 分支拉长（实测过一次：2.4s vs 阈值 0.6s）。
+    async def fake_hibor(**kwargs):
+        await _run("hibor")
+        return FIXED_HIBOR
+
+    def fake_announcements(symbol, company_name=""):
+        # 真实实现是同步 akshare 调用，分支里用 asyncio.to_thread 包了一层
+        import time as _t
+        _t.sleep(sleeps.get("ann", 0.0))
+        if "ann" in fail:
+            raise RuntimeError("ann boom")
+        return FIXED_ANNOUNCEMENTS
+
     monkeypatch.setattr(md_mod, "fetch_market_indices", fake_indices)
     monkeypatch.setattr(md_mod, "get_stock_price", fake_price)
     monkeypatch.setattr(md_mod, "fetch_company_news", fake_news)
@@ -79,11 +97,22 @@ def _patch_fetchers(monkeypatch, sleeps=None, lock=None, fail=()):
     monkeypatch.setattr(ctx_mod, "build_web_search_context", fake_web)
     # Deterministic time section so two runs can be compared byte-for-byte
     monkeypatch.setattr(ctx_mod, "build_time_context", lambda: FIXED_TIME)
+    # 新分支：按调用点打桩（分支内部是 import 时取属性，故打在源模块上）
+    import app.tools.hibor_reports as hibor_mod
+    import app.tools.announcements as ann_mod
+    monkeypatch.setattr(hibor_mod, "aformat_hibor_context", fake_hibor)
+    monkeypatch.setattr(ann_mod, "format_announcement_context", fake_announcements)
 
 
 def test_parallel_wall_time_is_max_not_sum(monkeypatch):
-    """3 independent branches x 0.3s must finish in ~0.3s, not ~0.9s."""
-    _patch_fetchers(monkeypatch, sleeps={"indices": 0.3, "price": 0.3, "web": 0.3})
+    """5 independent branches x 0.3s must finish in ~0.3s, not ~1.5s.
+
+    2026-09-13 批2 起，公告/定期报告与慧博机构研报也走并行 gather，
+    故打桩范围与断言同步扩到 5 条分支。
+    """
+    _patch_fetchers(monkeypatch, sleeps={
+        "indices": 0.3, "price": 0.3, "web": 0.3, "hibor": 0.3, "ann": 0.3,
+    })
 
     async def _run():
         start = time.perf_counter()
@@ -94,12 +123,14 @@ def test_parallel_wall_time_is_max_not_sum(monkeypatch):
 
     assert elapsed < 0.6, (
         f"branches appear sequential: {elapsed:.2f}s >= 0.6s "
-        f"(3 x 0.3s parallel should be ~0.3s)"
+        f"(5 x 0.3s parallel should be ~0.3s)"
     )
-    # Sanity: all three sections actually produced
+    # Sanity: all five sections actually produced
     assert "最新市场指数" in ctx
     assert "实时行情" in ctx
     assert "网络最新信息" in ctx
+    assert "机构研报（慧博投研）" in ctx
+    assert "公司公告与定期报告" in ctx
 
 
 def test_output_identical_to_sequential_reference(monkeypatch):

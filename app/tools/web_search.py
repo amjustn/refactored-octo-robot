@@ -417,11 +417,73 @@ async def _fetch_html(client: httpx.AsyncClient, url: str) -> tuple:
     raise ValueError("重定向次数过多")
 
 
+# ── 页面正文提取 + 跳转壳页跟进（2026-09-13）───────────────────
+# 现场（端到端留痕 data/scratchpad/c1529979e891.jsonl）：模型对搜索引擎结果里
+# 的 so.com/link?m=... 调用 read_webpage，返回 200 但只有 JS 跳转壳页，
+# trafilatura 与 bs4 都取不到正文 → 3 次调用里 2 次报
+# "Could not extract text content from page"，第 3 次直接撞上熔断器（circuit
+# open），连巨潮/eastmoney 公告正文都读不了，报告里因此出现
+# "网页直读与进一步网络检索受工具限制未能完全展开"。
+# 处理：正文过短时解析跳转目标，再抓一跳（仍走 _fetch_html 的 SSRF 逐跳校验）。
+_MIN_USEFUL_TEXT = 80
+_META_REFRESH_RE = re.compile(
+    r"""<meta[^>]+http-equiv\s*=\s*["']?refresh["']?[^>]*content\s*=\s*["'][^"']*?url\s*=\s*([^"'\s>]+)""",
+    re.I,
+)
+_JS_REDIRECT_RE = re.compile(
+    r"""(?:window\.)?location(?:\.(?:replace|assign|href))?\s*(?:=|\()\s*["']([^"']{8,})["']""",
+    re.I,
+)
+_REDIRECT_HOSTS = ("so.com", "sogou.com", "baidu.com", "bing.com", "toutiao.com")
+
+
+def _extract_page_text(html: str) -> tuple:
+    """返回 (title, text)：trafilatura 优先，bs4 兜底。"""
+    soup = BeautifulSoup(html, "html.parser")
+    title = ""
+    if soup.title and soup.title.string:
+        title = soup.title.string.strip()
+    text = ""
+    try:
+        import trafilatura
+        text = trafilatura.extract(
+            html, include_comments=False, include_tables=True, favor_precision=True,
+        ) or ""
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"Trafilatura extraction failed: {e}")
+    if not text:
+        s = BeautifulSoup(html, "html.parser")
+        for tag in s.find_all(["script", "style", "nav", "footer", "header", "aside"]):
+            tag.decompose()
+        text = s.get_text(separator="\n", strip=True)
+    text = re.sub(r"\n{3,}", "\n\n", text or "")
+    text = re.sub(r" {2,}", " ", text)
+    return title, text
+
+
+def _extract_redirect_target(html: str, base_url: str) -> str:
+    """从 JS/meta 跳转壳页里取出跳转目标 URL；取不到返回 ''。"""
+    if not html:
+        return ""
+    for rx in (_META_REFRESH_RE, _JS_REDIRECT_RE):
+        m = rx.search(html[:20000])
+        if m:
+            target = (m.group(1) or "").strip().strip("'\"")
+            if target.startswith("//"):
+                target = "https:" + target
+            if not target.startswith(("http://", "https://")):
+                target = urljoin(base_url, target)
+            if target.startswith(("http://", "https://")) and target != base_url:
+                return target
+    return ""
+
+
 async def read_webpage(url: str, max_chars: int = 8000) -> dict:
     """Fetch a web page and extract clean, readable text content.
 
     Uses trafilatura for high-quality article extraction.
     Falls back to BeautifulSoup if trafilatura fails.
+    搜索引擎跳转壳页（so.com/link 等）会解析跳转目标再抓一跳。
 
     Returns:
     {
@@ -495,6 +557,28 @@ async def read_webpage(url: str, max_chars: int = 8000) -> dict:
             # Clean up excessive whitespace
             text = re.sub(r"\n{3,}", "\n\n", text)
             text = re.sub(r" {2,}", " ", text)
+
+        _host = urlparse(url).netloc.lower()
+        _is_search_redirect = any(h in _host for h in _REDIRECT_HOSTS)
+        if not text or len(text.strip()) < _MIN_USEFUL_TEXT or _is_search_redirect:
+            # 搜索引擎跳转页（so.com/link、sogou /link、baidu /link）实测返回
+            # 200 + JS/meta 跳转壳页，trafilatura 与 bs4 都取不到正文，模型
+            # 只能放弃（2026-09-13 端到端留痕：3 次 read_webpage 里 2 次这种）。
+            # 这里解析跳转目标再抓一跳（走 _fetch_html，仍是 SSRF 逐跳校验）。
+            target = _extract_redirect_target(html, url)
+            if target and target != url:
+                logger.info(f"read_webpage: 检测到跳转壳页，跟进 {target[:80]}")
+                try:
+                    status2, headers2, raw2 = await _fetch_html(client, target)
+                    if status2 == 200:
+                        html2 = raw2.decode("utf-8", errors="replace")
+                        title2, text2 = _extract_page_text(html2)
+                        if len(text2.strip()) > len((text or "").strip()):
+                            url = target
+                            html, title, text = html2, title2, text2
+                            content_type = headers2.get("content-type", "")
+                except Exception as e:  # noqa: BLE001 - 跟进失败按原结果返回
+                    logger.debug(f"read_webpage: 跳转跟进失败: {e}")
 
         if not text:
             return {

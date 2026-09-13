@@ -279,10 +279,17 @@ class TestRegistryToolsEnabled:
         assert skill.get("is_multi_agent") is False
 
     def test_no_other_skill_flagged(self):
-        """tools_enabled 白名单：broker-reports(2026-08-18 function-calling) + daily-briefing。"""
+        """tools_enabled 白名单：broker-reports(2026-08-18) + daily-briefing +
+        2026-09-13 批2 第一批试点（management-deep-dive / investment-research，
+        单Agent链路开 function-calling，让模型能自己核实"需要核实"的数据）。"""
         from app.skills import list_skills
         flagged = [s["name"] for s in list_skills() if s.get("tools_enabled")]
-        assert sorted(flagged) == ["broker-reports", "daily-briefing"]
+        assert sorted(flagged) == [
+            "broker-reports",
+            "daily-briefing",
+            "investment-research",
+            "management-deep-dive",
+        ]
 
 
 # ============================================================

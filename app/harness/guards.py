@@ -102,9 +102,26 @@ class OutputGuard:
         self._gate_tool_markers(report)
         report = self._gate_structure(report, skill_name, strategy)
         self._gate_citation(report)
+        self._gate_freshness(report)
         report = self._gate_disclaimer(report)
         report = self._gate_length(report, strategy)
         return report, list(self.warnings)
+
+    def _gate_freshness(self, report: str):
+        """第4层闸门（P2，2026-09-13）：报告写"需要核实"，但上下文其实已有数据。
+
+        判据来自 harness.context 的上下文留痕（按 task_id）；没有留痕时不告警，
+        避免误报。只产 warning，不改报告正文。
+        """
+        try:
+            from .context import get_last_context
+            from .freshness_gate import check_freshness
+
+            ctx = get_last_context(self.task_id)
+            for w in check_freshness(report, ctx):
+                self._warn(w.get("gate", "freshness"), w.get("detail", ""))
+        except Exception as e:  # noqa: BLE001 - 门闸自身异常绝不阻断出报告
+            logger.debug(f"freshness gate skipped: {e}")
 
     def _gate_tool_markers(self, report: str):
         """第3层闸门：最终报告残留工具调用标记 → fatal。

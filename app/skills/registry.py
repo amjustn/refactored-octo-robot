@@ -9,6 +9,10 @@ SKILLS = [
         "category": "深度研究",
         "is_multi_agent": False,
         "agent_count": 1,
+        # 2026-09-13 批2/P1：单Agent技能开工具（第1批试点 2 个技能）。
+        # 该技能 17 份历史报告里 9 份含"需要核实"，prompt 中位数仅 4237 tokens
+        # （等于没有数据注入）→ 开闸让模型自己能核实。
+        "tools_enabled": True,
         "input_hint": "描述你的分析目标，可包含公司名/代码，如：分析腾讯的护城河与长期投资价值",
     },
     {
@@ -46,6 +50,12 @@ SKILLS = [
         "category": "深度研究",
         "is_multi_agent": False,
         "agent_count": 1,
+        # 2026-09-13 批2/P1：单Agent技能开工具（第1批试点 2 个技能）。
+        # 实测依据：该技能原本 prompt 仅 3826 tokens（零数据注入），报告开篇写
+        # "2025年报、2026半年报应已披露，但具体数字与最新高管名单需核实"；
+        # 同一时刻同一标的的多Agent链路（557k tokens，带工具）给出精确数字。
+        # 机制早已存在（harness/runner.py skill_tools_enabled 分支），此处只是开闸。
+        "tools_enabled": True,
         "input_hint": "管理层名+公司名，如：深研王兴及美团管理层的资本配置能力",
     },
     {

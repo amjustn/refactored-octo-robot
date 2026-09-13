@@ -348,8 +348,65 @@ QUANT_TOOL_SCHEMAS = [
     },
 ]
 
+# ==================== 公告/定期报告 + 慧博机构研报 Tool Schemas ====================
+# 2026-09-13 新增（批2/P1）：正面解决"应已披露却写需要核实"。
+# 实测依据：144 份报告里 68 份（47%）含"需要核实/待核实"措辞；同一天的
+# 澜起科技两份报告，不带工具的链路写"半年报应已披露但数字需要核实"，
+# 带工具的链路给出 33.36 亿/+26.66%/归母+72.33%。数据本来是通的。
+
+DISCLOSURE_TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "fetch_company_announcements",
+            "description": "获取A股公司的公告与定期报告数据：定期报告（年报/半年报/一季报/三季报，含披露日期与巨潮公告链接）、最新个股公告（东财，含 H 股公告/回购/减持/股权激励等）、高管持股变动明细（同花顺，含变动人/关系/数量/均价/剩余股数）。仅覆盖A股（6位代码）；港股/美股返回 covered=false，请改用 web_search。凡在报告里引用公告信息，必须标注来源（来源：巨潮资讯/东方财富/同花顺 + 日期）。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "A股6位代码，如 688008 或 688008.SH"},
+                    "company_name": {"type": "string", "description": "公司简称（可选，用于渲染标注）", "default": ""},
+                    "limit": {"type": "integer", "description": "每类返回条数上限，默认8", "default": 8},
+                },
+                "required": ["symbol"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "fetch_hibor_reports",
+            "description": "获取慧博投研资讯（hibor.com.cn）的机构研报列表：公司调研/行业分析/宏观研究/港美研究/投资策略/新股研究/晨会早刊/精选研报。**港美研究频道覆盖港股与美股的机构研报，这是东方财富研报中心没有的能力（东财仅A股）**。返回机构名/标题/日期/链接。注意：匿名只能拿到列表与摘要预览，研报全文需要慧博登录（用 fetch_hibor_report_detail 会如实返回 available=false）。报告中引用时必须标注来源（来源：慧博投研资讯 <机构名> <日期>）。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "股票代码（可选），如 688008.SH / 0700.HK / AAPL", "default": ""},
+                    "company_name": {"type": "string", "description": "公司简称（可选），如 澜起科技 / 腾讯", "default": ""},
+                    "keyword": {"type": "string", "description": "关键词（可选）：行业/主题词，如 半导体、商业航天", "default": ""},
+                    "channel": {"type": "string", "description": "指定频道（可选）：公司调研/行业分析/宏观研究/港美研究/投资策略/新股研究/晨会早刊/精选研报", "default": ""},
+                    "limit": {"type": "integer", "description": "返回条数上限，默认15", "default": 15},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "fetch_hibor_report_detail",
+            "description": "读取一篇慧博机构研报的详情页：标题/机构/日期/页数与摘要预览。若返回 available=false，说明全文需慧博登录（本机匿名抓取被登录墙拦截），此时 note 字段写明实测原因，切勿把摘要预览当成全文引用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "慧博报告链接（来自 fetch_hibor_reports 返回的 url 字段）"},
+                },
+                "required": ["url"],
+            },
+        },
+    },
+]
+
 # All tools available to agents
-ALL_TOOL_SCHEMAS = FINANCIAL_TOOL_SCHEMAS + DATA_TOOL_SCHEMAS + WEB_TOOL_SCHEMAS + INDUSTRY_TOOL_SCHEMAS + BROKER_TOOL_SCHEMAS + QUANT_TOOL_SCHEMAS
+ALL_TOOL_SCHEMAS = FINANCIAL_TOOL_SCHEMAS + DATA_TOOL_SCHEMAS + WEB_TOOL_SCHEMAS + INDUSTRY_TOOL_SCHEMAS + BROKER_TOOL_SCHEMAS + QUANT_TOOL_SCHEMAS + DISCLOSURE_TOOL_SCHEMAS
 
 
 # ==================== Tool Executor ====================
@@ -391,6 +448,57 @@ async def _execute_tool(tool_name: str, arguments: dict) -> str:
     # --- Broker research report tools (async) ---
     from ..tools.broker_reports import get_rating_summary, get_report_detail
 
+    # --- 公告/定期报告 + 慧博机构研报（2026-09-13 批2）---
+    # announcements.* 是同步 akshare 调用，用 to_thread 包一层避免阻塞事件循环；
+    # hibor_reports 自带 async 包装。
+    from ..tools import hibor_reports as _hibor
+    from ..tools import announcements as _ann
+
+    async def _fetch_company_announcements(symbol: str, company_name: str = "", limit: int = 8):
+        def _sync():
+            code = _ann.normalize_symbol(symbol)
+            if not code:
+                return {
+                    "covered": False,
+                    "message": "公告数据仅覆盖A股（巨潮资讯/东方财富/同花顺），港股与美股请改用 web_search",
+                }
+            return {
+                "covered": True,
+                "symbol": code,
+                "disclosure_reports": _ann.get_disclosure_reports(code, limit=limit),
+                "notices": _ann.get_company_notices(code, limit=limit),
+                "management_changes": _ann.get_management_changes(code, limit=min(limit * 2, 20)),
+                "rendered_context": _ann.format_announcement_context(code, company_name or ""),
+                "_source": "cninfo/eastmoney/ths",
+            }
+        return await asyncio.to_thread(_sync)
+
+    async def _fetch_hibor_reports(symbol: str = "", company_name: str = "",
+                                   keyword: str = "", channel: str = "", limit: int = 15):
+        reports = []
+        if symbol or company_name:
+            reports = await _hibor.afetch_hibor_for_symbol(
+                symbol=symbol or "", company_name=company_name or "", limit=limit
+            )
+        if not reports and channel:
+            reports = await _hibor.afetch_hibor_reports(channel=channel, keyword=keyword or "", limit=limit)
+        if not reports and keyword:
+            # 未指定频道时按"公司调研→行业分析→港美研究→精选研报"顺序扫，
+            # 命中即停（实测"半导体设备"→3 条、"商业航天"→1 条；
+            # 只查单一频道会漏，例如商业航天只出现在公司调研页）。
+            for _ch in ("公司调研", "行业分析", "港美研究", "精选研报"):
+                reports = await _hibor.afetch_hibor_reports(
+                    channel=_ch, keyword=keyword, limit=limit
+                )
+                if reports:
+                    break
+        return {
+            "count": len(reports),
+            "reports": reports,
+            "note": "" if reports else "慧博当前无匹配研报（列表页快照内未命中）",
+            "_source": "hibor",
+        }
+
     # --- Industry chain tools (async) ---
     from ..tools.industry_sources import list_industry_sources, search_industry_chain
     from ..tools.market_data import (
@@ -416,6 +524,9 @@ async def _execute_tool(tool_name: str, arguments: dict) -> str:
         "list_industry_sources": lambda category="": list_industry_sources(category),
         "fetch_broker_reports": get_rating_summary,
         "fetch_broker_report_detail": get_report_detail,
+        "fetch_company_announcements": _fetch_company_announcements,
+        "fetch_hibor_reports": _fetch_hibor_reports,
+        "fetch_hibor_report_detail": _hibor.aget_report_detail,
         "quant_factor_signal": quant_link.get_factor_signal,
         "quant_market_scores": quant_link.get_market_scores,
         "quant_bottom_thermometer": quant_link.get_bottom_thermometer,
@@ -482,7 +593,13 @@ class ToolResult:
     error: str = ""
 
 
-_BUSINESS_ERROR_HINTS = ("不存在", "未找到", "not found", "no data", "无法识别")
+_BUSINESS_ERROR_HINTS = (
+    "不存在", "未找到", "not found", "no data", "无法识别",
+    # 页面解析失败不是"提供方故障"：搜索引擎跳转壳页/反爬页会稳定解析不出正文，
+    # 若计入失败会连开熔断器，把后续正常网页读取一起堵死（2026-09-13 实测：
+    # 2 次解析失败 → 第 3 次 read_webpage 直接 circuit open）。
+    "could not extract text content", "响应体超过", "url 被拒绝",
+)
 
 
 def _is_business_error(msg: str) -> bool:
@@ -580,6 +697,10 @@ TOOL_DEFS: dict[str, ToolDef] = {
     # broker research reports (东财研报中心) — 内部已有 SQLite 缓存
     "fetch_broker_reports": ToolDef("fetch_broker_reports", timeout=25, retries=1),
     "fetch_broker_report_detail": ToolDef("fetch_broker_report_detail", timeout=20, retries=1),
+    # 公告/定期报告（巨潮+东财+同花顺，akshare 同步接口，走 to_thread）+ 慧博机构研报
+    "fetch_company_announcements": ToolDef("fetch_company_announcements", timeout=45, retries=1),
+    "fetch_hibor_reports": ToolDef("fetch_hibor_reports", timeout=30, retries=1),
+    "fetch_hibor_report_detail": ToolDef("fetch_hibor_report_detail", timeout=25, retries=0),
     # QuantTrader quant signals — 本机 HTTP，QT 侧信号扫描较慢故放宽超时
     "quant_factor_signal": ToolDef("quant_factor_signal", timeout=70, retries=0, cache_ttl=300),
     "quant_market_scores": ToolDef("quant_market_scores", timeout=25, cache_ttl=1800),
