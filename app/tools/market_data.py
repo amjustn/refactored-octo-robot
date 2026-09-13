@@ -284,6 +284,9 @@ def _resolve_company_name(query: str) -> Optional[str]:
 
     Returns the stock code if found, None otherwise.
     Supports: exact match, case-insensitive match, and substring match.
+
+    2026-09-13 扩展：硬编码表（143 条）查不到时，回退到按日缓存的
+    全A名称索引（5562 条，见 app/tools/name_index.py）。
     """
     query = query.strip()
     # Direct match
@@ -301,7 +304,135 @@ def _resolve_company_name(query: str) -> Optional[str]:
         # Case-insensitive substring match for English names
         if name.lower() in query_lower_for_sub:
             return COMPANY_NAME_MAP[name]
+    # 表外公司名兜底：全A名称索引（只认 >=4 字全名，不做简称模糊匹配）
+    from .name_index import resolve_by_name
+    hit = resolve_by_name(query)
+    if hit:
+        return hit["symbol"]
     return None
+
+
+# ── 统一标的解析入口（2026-09-13）─────────────────────────────
+# 历史故障（实测，见 scripts/verify_batch1.py）：
+#   1) 原正则用 \b 做边界，而 Python 里中文也是 \w，于是"代码紧贴中文"永远
+#      匹配不到：'688981分析一下是否可以买入' / '能不能买300308' 全部漏掉，
+#      137 个历史任务里有 9 个属于这一类。
+#   2) 硬编码表只有 143 条，'澜起科技''长鑫科技' 这类表外公司名解析为 None。
+# 这里把解析顺序固定下来并返回来源标记，便于日志/决策留痕追溯。
+#   显式代码(最强证据) > 硬编码名表(人工维护) > 全A名称索引(>=4 字全名)
+_SYMBOL_FALSE_POSITIVES = {
+    "Q1", "Q2", "Q3", "Q4", "AI", "PE", "PB", "ROE", "ROI",
+    "EPS", "CEO", "CFO", "CTO", "IPO", "SPAC", "ETF", "API",
+    "GDP", "CPI", "PPI", "EBIT", "FCF", "DCA", "NAV", "AUM",
+    "YTD", "MTD", "QTD", "H1", "H2", "YOY", "MOM",
+    "IT", "HR", "PR", "US", "UK", "EU", "JP", "KR",
+    "URL", "PDF", "CSV", "HTML", "JSON", "XML",
+    "A", "B", "H", "T", "F", "C", "S", "P", "V", "D", "E",
+    "I", "K", "M", "N", "R", "U", "W", "X", "Y", "Z", "G", "L", "O", "J", "Q",
+    "EBITDA", "CAPEX", "OPEX", "MARGIN", "CASH", "DEBT", "BOOK",
+    "SALE", "ASSET", "REVENUE", "PROFIT", "LOSS", "COST",
+    "DEEP", "GOOD", "REAL", "TICK", "BOND", "FUND",
+}
+
+# 中文/数字相邻也算"没有边界"，所以显式代码必须用环视断言而不是 \b
+_A_CODE_RE = re.compile(r"(?<!\d)(\d{6})(?!\d)")
+_HK_CODE_RE = re.compile(r"(?<!\d)(\d{4,5})\.HK", re.IGNORECASE)
+_US_TICKER_RE = re.compile(r"(?<![A-Za-z0-9])([A-Za-z]{2,6})(?![A-Za-z0-9])")
+
+
+def resolve_symbol(text: str) -> tuple:
+    """把用户输入解析成标的代码。
+
+    返回 (symbol, source)；source ∈ {'explicit_code', 'name_map',
+    'name_index', 'none'}，解析不出来时 symbol 为 None。
+    """
+    if not text:
+        return None, "none"
+    raw = str(text).strip()
+    if not raw:
+        return None, "none"
+
+    # 1) 显式港股代码：0700.HK
+    m = _HK_CODE_RE.search(raw)
+    if m:
+        return f"{m.group(1).zfill(4)}.HK", "explicit_code"
+
+    # 2) 显式 A 股 6 位代码（CJK 相邻也能命中）
+    m = _A_CODE_RE.search(raw)
+    if m:
+        return _normalize_a_share_code(m.group(1)), "explicit_code"
+
+    # 3) 硬编码公司名表（含简称，如 茅台/腾讯）
+    hit = _resolve_company_name_hardcoded(raw)
+    if hit:
+        return hit, "name_map"
+
+    # 4) 全A名称索引（>=4 字全名）
+    from .name_index import resolve_by_name
+    idx = resolve_by_name(raw)
+    if idx:
+        return idx["symbol"], "name_index"
+
+    # 5) 显式美股 ticker —— 放在中文名称之后，避免英文单词抢走中文标的。
+    #    收紧条件（实测反例："分析 Rambus MRDIMM 市占率" 里的 MRDIMM 会被
+    #    [A-Za-z]{2,6} 当成 ticker）：只有 (a) 原文大写且 <=5 字母
+    #    或 (b) 命中硬编码表已知 ticker 或 (c) 整串就是一个 1-6 字母词。
+    known_tickers = {c.upper() for c in COMPANY_NAME_MAP.values() if re.match(r"^[A-Za-z]{1,6}$", c)}
+    bare = raw.strip()
+    for m in _US_TICKER_RE.finditer(raw):
+        token = m.group(1)
+        cand = token.upper()
+        if cand in _SYMBOL_FALSE_POSITIVES:
+            continue
+        is_upper_written = token.isupper() and len(token) <= 5
+        is_bare = bool(re.match(r"^[A-Za-z]{1,6}$", bare))
+        if is_upper_written or cand in known_tickers or is_bare:
+            return cand, "explicit_code"
+
+    return None, "none"
+
+
+def _resolve_company_name_hardcoded(query: str) -> Optional[str]:
+    """只查硬编码 COMPANY_NAME_MAP（不触发名称索引），供 resolve_symbol 分层使用。"""
+    query = query.strip()
+    if not query:
+        return None
+    if query in COMPANY_NAME_MAP:
+        return COMPANY_NAME_MAP[query]
+    query_lower = query.lower()
+    for name, code in COMPANY_NAME_MAP.items():
+        if name.lower() == query_lower:
+            return code
+    for name in sorted(COMPANY_NAME_MAP.keys(), key=len, reverse=True):
+        if name.lower() in query_lower:
+            return COMPANY_NAME_MAP[name]
+    return None
+
+
+def company_display_name(symbol: str, fallback_text: str = "") -> str:
+    """标的代码 → 中文简称（用于搜索关键词/上下文标题）。查不到返回 ''。"""
+    if not symbol:
+        return ""
+    sym = str(symbol).strip().upper()
+    if sym in COMPANY_NAME_MAP.values():
+        for name, code in COMPANY_NAME_MAP.items():
+            if code.upper() == sym:
+                return name
+    try:
+        from .name_index import reverse_lookup
+        nm = reverse_lookup(sym)
+        if nm:
+            return nm
+    except Exception:
+        pass
+    if fallback_text:
+        h = _resolve_company_name_hardcoded(fallback_text)
+        if h and h.upper() == sym:
+            for name, code in COMPANY_NAME_MAP.items():
+                if code.upper() == sym:
+                    return name
+    return ""
+
 
 
 def _detect_market(symbol: str) -> str:

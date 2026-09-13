@@ -264,17 +264,24 @@ async def crawl_industry_news(query: str, max_per_site: int = 5) -> dict:
         all_articles.extend(articles)
 
     # Filter articles by query keywords
-    if all_articles:
-        query_words = set(query.replace("产业链", "").replace("行业", "").split())
-        query_words = {w for w in query_words if len(w) >= 2}
-        if query_words:
-            filtered = []
-            for a in all_articles:
-                title = a.get("title", "")
-                if any(w in title for w in query_words):
-                    filtered.append(a)
-            if len(filtered) >= 3:
-                all_articles = filtered
+    # 2026-09-13 收紧：原先"命中不足 3 条就不过滤"等于公司查询注入整页
+    # 消费电子新闻（实测 918 字符 10 条全是爱范儿/IT之家，与目标公司 0 相关）。
+    # 现在改用共享的 text_relevance.relevance_tokens 做核心词过滤，且
+    # 一条都不命中时直接返回空列表 —— 宁可不注入，也不灌噪声。
+    from . import text_relevance as _tr
+    core_tokens = _tr.relevance_tokens(query, max_tokens=6)
+    if all_articles and core_tokens:
+        filtered = []
+        for a in all_articles:
+            blob = f"{a.get('title', '')} {a.get('summary', '') or ''}"
+            if any(t in blob for t in core_tokens):
+                filtered.append(a)
+        if not filtered:
+            logger.info(
+                f"crawl_industry_news: 抓到的 {len(all_articles)} 条与核心词 "
+                f"{core_tokens} 全部不相关，不注入上下文"
+            )
+        all_articles = filtered
 
     return {
         "query": query,

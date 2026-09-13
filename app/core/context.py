@@ -160,20 +160,42 @@ async def build_web_search_context(symbol: str = "", arguments: str = "", skill_
     """
     parts = []
 
-    # Build search keywords — ALWAYS prioritize user's own words
-    # The user's arguments (what they typed) are the ground truth.
-    # Symbol-based keywords are fallbacks for when arguments are absent.
-    if arguments:
-        # Primary keyword = user's exact input (truncated to 60 chars)
-        primary_keyword = arguments.strip()[:60]
-    elif symbol:
-        primary_keyword = symbol
-    else:
-        return ""
+    # ── 关键词构造（2026-09-13 重写）────────────────────────────
+    # 优先级：goal-parser 的 search_query 提示 > 目标公司+代码 > 清洗后的用户原话。
+    # 历史故障：原先把用户原话整句直接当搜索词发出去（"澜起科技你给我一个
+    # 深度报告 2026 最新"），门闸把整句中文当一个 token → 全源判"无结果"，
+    # 白等 14.6 秒后注入的还是无关的爬取噪声（实测 918 字符全是消费电子新闻）。
+    from ..tools.market_data import company_display_name
+    from ..tools.text_relevance import clean_search_keyword
 
-    # Goal-parser hint: a concise search query beats the raw (possibly long) goal
+    _cleaned_user = clean_search_keyword(arguments) if arguments else ""
+    _company = ""
+    if symbol:
+        try:
+            _company = company_display_name(symbol, arguments or "") or ""
+        except Exception:
+            _company = ""
+
+    primary_keyword = ""
     if search_query and search_query.strip():
-        primary_keyword = search_query.strip()[:60]
+        primary_keyword = clean_search_keyword(search_query) or search_query.strip()[:60]
+    elif symbol and _company:
+        if _cleaned_user and len(_cleaned_user) >= 6 and _cleaned_user != _company:
+            # 用户给了具体分析角度（如"渠道库存去化+批价走势"），保留其核心词
+            primary_keyword = _cleaned_user[:60]
+        else:
+            primary_keyword = f"{_company} {symbol.split('.')[0]}"
+    elif symbol:
+        primary_keyword = symbol if not _cleaned_user else f"{_cleaned_user} {symbol}"
+    elif _cleaned_user:
+        primary_keyword = _cleaned_user[:60]
+
+    if not primary_keyword:
+        # 清洗后没有任何可用检索词 → 直接跳过搜索，不要拿噪声词去搜
+        logger.info(
+            f"Auto web search skipped: 无可检索关键词 (arguments={str(arguments)[:40]!r})"
+        )
+        return ""
 
     parts.append("## 网络最新信息（自动搜索）")
     parts.append(f"*搜索关键词: {primary_keyword}*")
@@ -370,61 +392,36 @@ async def build_full_context(arguments: str = "", skill_name: str = "", goal_hin
             fetch_company_news,
             fetch_market_indices,
             get_stock_price,
+            resolve_symbol,
         )
 
-        # Try to extract stock symbol from arguments
-        # Strategy: 1) Check Chinese company name map 2) Regex for code patterns
-
-        # Goal-parser hints take priority when available:
-        # validated hint symbol → company-name resolution → legacy path below
+        # 标的解析统一走 market_data.resolve_symbol（2026-09-13）：
+        #   显式代码（环视断言，中文相邻也能命中）> 硬编码名表 > 全A名称索引。
+        # 历史故障：原正则用 \b 做边界，而中文也算 \w，于是
+        # "688981分析一下是否可以买入"/"能不能买300308" 永远匹配不到（137 个
+        # 历史任务里 9 个属此类）；硬编码表只有 143 条，沪深300 里按全名仅能
+        # 命中 14%，"澜起科技""长鑫科技"这类表外公司名解析为 None → 行情/新闻/
+        # 券商研报块全不注入，报告只能靠模型内部知识写。
+        _sym_source = "none"
         if goal_hints:
             _hint_symbol = (goal_hints.get("symbol") or "").strip()
             if _hint_symbol and re.match(
                 r'^\d{6}(\.(SH|SZ))?$|^\d{1,5}\.HK$|^[A-Za-z]{1,6}(\.HK)?$', _hint_symbol
             ):
                 symbol = _hint_symbol
+                _sym_source = "goal_hints"
             else:
                 _hint_company = (goal_hints.get("company") or "").strip()
                 if _hint_company:
                     symbol = _resolve_company_name(_hint_company)
+                    if symbol:
+                        _sym_source = "goal_hints_company"
 
         if symbol is None:
-            # 优先级: 显式股票代码(最强证据) > 公司名模糊匹配(最弱证据)
-            # 2026-08-27 修复: 原顺序名称匹配在前, "分析平安银行(000001)"因映射表
-            # 无"平安银行"全称而子串命中"平安"→601318(中国平安), 行情/新闻/研报
-            # 全部抓错标的。数字代码是用户显式给出的最强信号, 必须最先消费。
-            _FALSE_POSITIVES = {
-                "Q1", "Q2", "Q3", "Q4", "AI", "PE", "PB", "ROE", "ROI",
-                "EPS", "CEO", "CFO", "CTO", "IPO", "SPAC", "ETF", "API",
-                "GDP", "CPI", "PPI", "EBIT", "FCF", "DCA", "NAV", "AUM",
-                "YTD", "MTD", "QTD", "H1", "H2", "YOY", "MOM",
-                "IT", "HR", "PR", "US", "UK", "EU", "JP", "KR",
-                "URL", "PDF", "CSV", "HTML", "JSON", "XML",
-                # Single-letter false positives (A股, B股, H股, etc.)
-                "A", "B", "H", "T", "F", "C", "S", "P", "V", "D", "E",
-                "I", "K", "M", "N", "R", "U", "W", "X", "Y", "Z", "G", "L", "O", "J", "Q",
-                # Common financial abbreviations that could be tickers
-                "EBITDA", "CAPEX", "OPEX", "MARGIN", "CASH", "DEBT", "BOOK",
-                "SALE", "ASSET", "EBIT", "REVENUE", "PROFIT", "LOSS", "COST",
-                "BOOK", "DEEP", "GOOD", "REAL", "TICK", "BOND", "FUND",
-            }
-            symbol_match = re.search(
-                r'\b(\d{6}(?:\.SH|\.SZ|\.HK)?|[A-Za-z]{2,6}(?:\.HK)?)\b',
-                arguments
-            )
-            if symbol_match:
-                candidate = symbol_match.group(1).upper()
-                # Skip common false positives (only for short purely-alpha codes)
-                if candidate in _FALSE_POSITIVES and not re.match(r'^\d{6}', candidate):
-                    pass  # Don't use this as a symbol
-                else:
-                    symbol = candidate
-
-            if symbol is None:
-                # Fallback: resolve Chinese company names (腾讯, 茅台, 平安银行, etc.)
-                resolved = _resolve_company_name(arguments.strip())
-                if resolved:
-                    symbol = resolved
+            symbol, _sym_source = resolve_symbol(arguments or "")
+        logger.info(
+            f"标的解析: {str(arguments)[:30]!r} -> {symbol or '无标的'} (source={_sym_source})"
+        )
 
         _md = (fetch_market_indices, get_stock_price, fetch_company_news)
 

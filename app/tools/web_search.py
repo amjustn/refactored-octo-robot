@@ -21,6 +21,8 @@ from urllib.parse import urljoin, urlparse
 import httpx
 from bs4 import BeautifulSoup
 
+from . import text_relevance as _text_relevance
+
 logger = logging.getLogger("ai_berkshire.web_search")
 
 # 批次相关性阈值：批次中"含足够查询 token"的结果占比低于该值判为投毒批次
@@ -93,20 +95,12 @@ async def web_search(query: str, max_results: int = 10) -> list:
     q_norm = re.sub(r"\s+", "", query)
 
     def _relevance_ratio(rs):
-        tokens = [t for t in re.findall(r"[一-鿿]{2,}|[A-Za-z0-9]{3,}", query)
-                  if t not in ("最新", "分析", "预测", "怎么样", "如何")]
-        if not tokens or not rs:
-            return 1.0 if not tokens else 0.0
-        need = min(2, len(tokens))  # 单 token 查询放宽到 1
-        hits = 0
-        for r in rs:
-            title = r.get("title", "") or ""
-            snippet = r.get("snippet", "") or ""
-            # 标题整串回声查询 → 只信摘要（头条/视频源常见投毒手法）
-            blob = snippet if (q_norm and q_norm in re.sub(r"\s+", "", title)) else title + snippet
-            if sum(1 for t in tokens if t in blob) >= need:
-                hits += 1
-        return hits / len(rs)
+        # token 化与占比判定统一走 app/tools/text_relevance.py（2026-09-13）。
+        # 原实现把连续中文整句当成【一个】token（中文没空格），门闸要求每条
+        # 结果命中 2 个 token，于是"澜起科技你给我一个深度报告 2026 最新"
+        # 这类查询在搜狗/360/百度/Bing/头条上全被判 0%，白白等 14.6 秒后
+        # 返回"无结果"。现在长中文串会拆 2-gram 并剔除泛化词。
+        return _text_relevance.relevance_ratio(rs, query)
 
     # 多源回退链（按 2026-08-16 本环境实测质量重排，3 个财务查询探针）：
     #   搜狗  — 财务查询质量最高（hits 8/8、3/3、8/8），摘要含真实数字，~1-2s
