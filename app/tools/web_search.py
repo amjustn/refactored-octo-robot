@@ -92,8 +92,6 @@ async def web_search(query: str, max_results: int = 10) -> list:
     # 或标题原样回声查询串。旧守卫"任意一条命中即放行"会被一条正常结果
     # 蒙混过关；升级为批次评分：命中结果占比 < _MIN_BATCH_RELEVANCE 判为
     # 投毒批次，继续回退；全部源都被投毒才返回 placeholder。
-    q_norm = re.sub(r"\s+", "", query)
-
     def _relevance_ratio(rs):
         # token 化与占比判定统一走 app/tools/text_relevance.py（2026-09-13）。
         # 原实现把连续中文整句当成【一个】token（中文没空格），门闸要求每条

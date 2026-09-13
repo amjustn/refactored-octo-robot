@@ -459,16 +459,16 @@ async def _execute_tool(tool_name: str, arguments: dict) -> str:
 
     # --- Market data tools (async) ---
     # --- QuantTrader quant signal tools (async) ---
-    from ..tools import quant_link
-
-    # --- Broker research report tools (async) ---
-    from ..tools.broker_reports import get_rating_summary, get_report_detail
+    from ..tools import announcements as _ann
 
     # --- 公告/定期报告 + 慧博机构研报（2026-09-13 批2）---
     # announcements.* 是同步 akshare 调用，用 to_thread 包一层避免阻塞事件循环；
     # hibor_reports 自带 async 包装。
     from ..tools import hibor_reports as _hibor
-    from ..tools import announcements as _ann
+    from ..tools import quant_link
+
+    # --- Broker research report tools (async) ---
+    from ..tools.broker_reports import get_rating_summary, get_report_detail
 
     async def _fetch_company_announcements(symbol: str, company_name: str = "", limit: int = 8):
         def _sync():
