@@ -595,13 +595,35 @@ async def read_webpage(url: str, max_chars: int = 8000) -> dict:
 
         word_count = len(text)
 
+        # 内容质量标记（2026-09-13，静态审计第 1 条）：
+        # 只判「有没有返回内容」会把 JS 空壳页也算成功 —— 实测东财公告详情页返回
+        # 51 字符通用免责声明、巨潮公告详情页返回 264 字符 {{stockName}} 模板占位符，
+        # 两者都不是正文。这里显式标注，避免调用方把落地页当正文引用。
+        _t = text.strip()
+        if "{{" in _t and "}}" in _t:
+            quality = "shell"          # 模板占位符：JS 渲染页
+        elif len(_t) < 200:
+            quality = "shell"          # 过短：多半是跳转页/免责声明壳
+        elif len(_t) < 400:
+            quality = "thin"           # 可疑：可能是节选或落地页
+        else:
+            quality = "ok"
+
         result = {
             "url": url,
             "title": title,
             "content": text,
             "word_count": word_count,
             "content_type": content_type,
+            "quality": quality,
         }
+        if quality != "ok":
+            result["note"] = (
+                "正文质量标记为 "
+                + quality
+                + "：该页可能是 JS 渲染/跳转壳页，正文未取到。"
+                "公告正文请改用 fetch_announcement_fulltext（巨潮原文 PDF 摘录）。"
+            )
 
         logger.info(f"Read webpage: {title[:50]}... ({word_count} chars)")
         return result

@@ -87,22 +87,31 @@ async def part_b_live() -> None:
 
     try:
         r = await read_webpage(EM_NOTICE, max_chars=1200)
-        check("B3 东财公告页可读（熔断不再被解析失败堵死）", bool(r.get("content")),
-              f"error={r.get('error')}")
+        # 收紧（静态审计第 1 条）：东财公告详情页是 JS 渲染页，read_webpage 只能拿到
+        # 51 字符通用免责声明 —— 断言必须要求"如实标注非正文"，而不是只看非空。
+        q = r.get("quality")
+        check("B3 东财公告页被如实标注为非正文（quality != ok 且带说明）",
+              q in ("shell", "thin") and bool(r.get("note")),
+              f"quality={q} note={(r.get('note') or '')[:40]!r} len={len(r.get('content') or '')}")
         if r.get("content"):
-            print(f"        -> 标题: {r.get('title','')[:70]} | {r.get('word_count')} 字符")
+            print(f"        -> 标题: {r.get('title','')[:70]} | {r.get('word_count')} 字符 | quality={q}")
             print(f"        -> 片段: {r.get('content','')[:120]}")
     except Exception as e:
-        check("B3 东财公告页可读（熔断不再被解析失败堵死）", False, f"{type(e).__name__}: {e}")
+        check("B3 东财公告页被如实标注为非正文（quality != ok 且带说明）", False, f"{type(e).__name__}: {e}")
 
     try:
         r = await read_webpage(TENCENT, max_chars=800)
-        check("B4 巨潮公告链接可读（当初读不到的正是它）", bool(r.get("content")) or bool(r.get("title")),
-              f"error={r.get('error')}")
+        # 巨潮公告详情页同样是 Vue 空壳（实测 264 字符全是 {{stockName}} 占位符）
+        q = r.get("quality")
+        check("B4 巨潮公告详情页同样被标注为壳页（quality != ok）", q in ("shell", "thin"),
+              f"quality={q} len={len(r.get('content') or '')}")
         if r.get("title"):
-            print(f"        -> 标题: {r.get('title','')[:80]}")
+            print(f"        -> 标题: {r.get('title','')[:80]} | quality={q}")
+        check("B5 壳页结果带有指向 PDF 摘录工具的 note",
+              "fetch_announcement_fulltext" in (r.get("note") or ""),
+              (r.get("note") or "")[:60])
     except Exception as e:
-        check("B4 巨潮公告链接可读（当初读不到的正是它）", False, f"{type(e).__name__}: {e}")
+        check("B4 巨潮公告详情页同样被标注为壳页（quality != ok）", False, f"{type(e).__name__}: {e}")
 
 
 def part_c_breaker() -> None:

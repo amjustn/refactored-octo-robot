@@ -403,6 +403,22 @@ DISCLOSURE_TOOL_SCHEMAS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "fetch_announcement_fulltext",
+            "description": "读取A股公司最近一期定期报告（年报优先，其次半年报）的原文摘录：默认取「董事和高级管理人员的情况」章节，含现任/离任董监高与核心技术人员的持股变动、年度薪酬、任期、报告期人员变动。**公告详情页是 JS 渲染的（网页读取只能拿到免责声明或模板占位符），这类治理细节必须走本工具读巨潮原文 PDF**。用于核实高管名单、持股、薪酬、离任/逝世等事项；返回 ok=false 时 note 写明原因（网络失败/未命中章节/非A股），不得据此编造内容。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "A股6位代码，如 688008 或 688008.SH"},
+                    "company_name": {"type": "string", "description": "公司简称（可选，用于标注）", "default": ""},
+                    "max_chars": {"type": "integer", "description": "摘录字符上限，默认3000", "default": 3000},
+                },
+                "required": ["symbol"],
+            },
+        },
+    },
 ]
 
 # All tools available to agents
@@ -499,6 +515,29 @@ async def _execute_tool(tool_name: str, arguments: dict) -> str:
             "_source": "hibor",
         }
 
+    async def _fetch_announcement_fulltext(symbol: str, company_name: str = "", max_chars: int = 3000):
+        """定期报告原文摘录（董监高/持股/薪酬）—— 走巨潮 PDF，非网页。
+        首次需下载 3~4MB PDF（实测 4.4s~35s），命中 30 天缓存后 <0.01s。
+        """
+        from ..tools.announcement_docs import aget_management_excerpt
+        try:
+            mc = max(500, min(int(max_chars or 3000), 8000))
+        except (TypeError, ValueError):
+            mc = 3000
+        r = await aget_management_excerpt(symbol, company_name=company_name or "", max_chars=mc)
+        return {
+            "ok": bool(r.get("ok")),
+            "symbol": r.get("symbol"),
+            "title": r.get("title"),
+            "date": r.get("date"),
+            "section": r.get("anchor"),
+            "pdf_url": r.get("pdf_url"),
+            "excerpt": r.get("excerpt"),
+            "cached": r.get("cached"),
+            "note": r.get("note"),
+            "_source": "cninfo-pdf",
+        }
+
     # --- Industry chain tools (async) ---
     from ..tools.industry_sources import list_industry_sources, search_industry_chain
     from ..tools.market_data import (
@@ -525,6 +564,7 @@ async def _execute_tool(tool_name: str, arguments: dict) -> str:
         "fetch_broker_reports": get_rating_summary,
         "fetch_broker_report_detail": get_report_detail,
         "fetch_company_announcements": _fetch_company_announcements,
+        "fetch_announcement_fulltext": _fetch_announcement_fulltext,
         "fetch_hibor_reports": _fetch_hibor_reports,
         "fetch_hibor_report_detail": _hibor.aget_report_detail,
         "quant_factor_signal": quant_link.get_factor_signal,
@@ -699,6 +739,8 @@ TOOL_DEFS: dict[str, ToolDef] = {
     "fetch_broker_report_detail": ToolDef("fetch_broker_report_detail", timeout=20, retries=1),
     # 公告/定期报告（巨潮+东财+同花顺，akshare 同步接口，走 to_thread）+ 慧博机构研报
     "fetch_company_announcements": ToolDef("fetch_company_announcements", timeout=45, retries=1),
+    # 定期报告原文摘录：首次要下 3~4MB PDF（实测最慢 35s），故超时给 120s、不重试
+    "fetch_announcement_fulltext": ToolDef("fetch_announcement_fulltext", timeout=120, retries=0),
     "fetch_hibor_reports": ToolDef("fetch_hibor_reports", timeout=30, retries=1),
     "fetch_hibor_report_detail": ToolDef("fetch_hibor_report_detail", timeout=25, retries=0),
     # QuantTrader quant signals — 本机 HTTP，QT 侧信号扫描较慢故放宽超时

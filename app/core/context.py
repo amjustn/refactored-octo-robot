@@ -144,6 +144,23 @@ def build_knowledge_context() -> str:
     return get_knowledge_summary_for_prompt()
 
 
+# ── 定期报告正文摘录（董监高/持股/薪酬）注入范围（2026-09-13）──────
+# 只有年报 PDF 里有完整的「董事和高级管理人员的情况」章节（实测 2025 年报 248 页，
+# 含持股变动/薪酬/离任与逝世等治理细节），半年报没有该章节。
+# 首次注入需下载 3~4MB PDF（实测 4.4s~35s 波动），命中缓存后 <0.01s（TTL 30 天），
+# 所以只对"管理层/财务精读"类技能开启，不给全部技能加首次下载成本。
+DOC_EXCERPT_SKILLS = {
+    "management-deep-dive",
+    "investment-research",
+    "earnings-team",
+    "earnings-review",
+    "thesis-tracker",
+    "investment-checklist",
+    "deep-company-series",
+}
+DOC_EXCERPT_CHARS = 3000
+
+
 async def build_web_search_context(symbol: str = "", arguments: str = "", skill_name: str = "", search_query: str = "") -> str:
     """Automatically search the web for latest information about the target.
 
@@ -504,15 +521,30 @@ async def build_full_context(arguments: str = "", skill_name: str = "", goal_hin
         # 2026-09-13 批2/P1：公告与定期报告注入（巨潮+东财+同花顺）。
         # 正面解决"2026 半年报应已披露却写需要核实"：实测同一时刻同一标的，
         # 无工具链路（3826 tokens）写"需要核实"，有工具链路给出精确数字。
+        # 2026-09-13 补（静态审计第 1 条）：正文经网页读不到（东财/巨潮详情页都是
+        # JS 空壳，实测只有 51/264 字符），改走巨潮原文 PDF 抽取董监高章节。
         if not symbol:
             return ""
+        _nm_hint = ""
+        try:
+            from ..tools.market_data import company_display_name
+            _nm_hint = company_display_name(symbol, arguments or "") or ""
+        except Exception:
+            _nm_hint = ""
+
         def _sync():
             from ..tools.announcements import format_announcement_context
-            from ..tools.market_data import company_display_name
-            nm = company_display_name(symbol, arguments or "")
-            return format_announcement_context(symbol, nm or "")
+            blocks = [format_announcement_context(symbol, _nm_hint)]
+            if (skill_name or "") in DOC_EXCERPT_SKILLS:
+                from ..tools.announcement_docs import build_doc_context
+                doc = build_doc_context(symbol, _nm_hint, max_chars=DOC_EXCERPT_CHARS)
+                if doc:
+                    blocks.append(doc)
+            return "\n\n".join(b for b in blocks if b)
+
         try:
-            return await asyncio.wait_for(asyncio.to_thread(_sync), timeout=45.0) or ""
+            # 首次要下 3~4MB PDF（实测 4.4s~35s），命中缓存 <0.01s，故超时给 90s
+            return await asyncio.wait_for(asyncio.to_thread(_sync), timeout=90.0) or ""
         except Exception as e:
             logger.debug(f"Announcement context failed: {e}")
             return ""
