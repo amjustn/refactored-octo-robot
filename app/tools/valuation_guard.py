@@ -13,6 +13,8 @@ calc 等计算工具, 但都是"软约束"——AI 是否调用、正文数字�
   R4   年化EPS = 中期净利×2/总股本       (需全文出现总股本, 容差5%; 缺股本跳过)
   R5   机构目标价引用无"来源:"标注       (软警告)
   R6   PE路径价与PEV路径价分歧>20%且无解释 → 软警告
+  R7   FCFE(权益现金流)自洽性: 折现率 − FCFE收益率 应 ≈ 隐含增长率
+       (反向 FCFE 的恒等式 g = r_e − FCFE1/P; 三个数在同一窗口内出现才校验)
 
 纯函数、无IO, 可单测。重写/标注由调用方(runner)负责。
 """
@@ -24,7 +26,8 @@ from typing import List, Optional, Tuple
 
 # ── 触发条件: 含估值关键词且存在价格数字 ─────────────────────────
 _TRIGGER_RE = re.compile(
-    r"目标价|合理价值|估值区间|倍\s*PE|倍市盈率|P\s*/\s*EV|PEV|每股\s*EV"
+    r"目标价|合理价值|估值区间|倍\s*PE|倍市盈率|P\s*/?\s*EV|PEV|每股\s*EV"
+    r"|FCFE|股东自由现金流|隐含增长率"          # 2026-09-13 加: 反向 FCFE 锚
 )
 
 # ── token 模式(按出现顺序扫描, 记录位置) ────────────────────────
@@ -162,6 +165,12 @@ def _scan(text: str) -> Tuple[List[Token], Optional[float], Optional[float]]:
     return tokens, last_eps, last_ev
 
 
+# ── R7: 反向 FCFE 自洽性(折现率 − FCFE收益率 ≈ 隐含增长率) ─────────
+_RE_FCFE_IMPLIED = re.compile(r"隐含[^。\n]{0,12}?增长率[^0-9\-]{0,8}(-?\d+(?:\.\d+)?)\s*%")
+_RE_DISCOUNT_RATE = re.compile(r"(?:折现率|贴现率|权益成本|r_?e?\s*[=＝])[^0-9]{0,8}(\d+(?:\.\d+)?)\s*%")
+_RE_FCFE_YIELD = re.compile(r"(?:FCFE|股东自由现金流)[^。\n]{0,8}?收益率[^0-9]{0,8}(\d+(?:\.\d+)?)\s*%")
+
+
 def _pct_diff(actual: float, expect: float) -> float:
     if expect == 0:
         return 0.0
@@ -194,13 +203,19 @@ def check_report(text: str) -> dict:
     tokens, full_eps, full_ev = _scan(text)
     prices = [t for t in tokens if t.kind in ("price", "price_range", "price_eq")]
     factors = [t for t in tokens if t.kind in ("eps", "pe", "pe_range", "pev", "ev")]
-    # 触发条件: 有估值因子, 且 存在价格 / R3b等式材料 / R4年化材料
+    # 触发条件: 有估值因子, 且 存在价格 / R3b等式材料 / R4年化材料 / FCFE 反向解材料
     has_r4_material = (
         any(t.kind == "ni" for t in tokens)
         and any(t.kind == "shares" for t in tokens)
         and _RE_ANNUALIZED.search(text) is not None
     )
-    if not factors or not (prices or has_r4_material):
+    # 反向 FCFE 段通常没有 PE/EV 因子与目标价, 但有"折现率 + 隐含增长率"这对
+    # 恒等式材料(R7 校验的对象) —— 因此 FCFE 材料单独放行(实测踩过: 不放行整段被跳过)。
+    has_fcfe_material = (
+        _RE_FCFE_IMPLIED.search(text) is not None
+        and _RE_DISCOUNT_RATE.search(text) is not None
+    )
+    if not has_fcfe_material and (not factors or not (prices or has_r4_material)):
         return result
     result["triggered"] = True
 
@@ -339,6 +354,25 @@ def check_report(text: str) -> dict:
             if div > _R6_DIVERGE and not _RE_EXPLAIN.search(text):
                 warn("R6", f"PE路径目标价 {pe_last:g}元 与 PEV路径目标价 {pev_last:g}元 分歧 {div*100:.0f}%, 报告未说明原因",
                      f"PE:{pe_last:g} vs PEV:{pev_last:g}")
+
+    # R7: FCFE(权益现金流)自洽性 —— 反向 FCFE 恒等式 g = r_e − FCFE1/P
+    #     报告里若同时给出"折现率 / FCFE收益率 / 隐含增长率"三个数, 校验其自洽;
+    #     容差 0.15 个百分点(覆盖四舍五入到 0.1%/0.01% 的写法)。
+    for m in _RE_FCFE_IMPLIED.finditer(text):
+        g = float(m.group(1))
+        w_start, w_end = max(0, m.start() - 200), min(len(text), m.end() + 200)
+        window = text[w_start:w_end]
+        mr = _RE_DISCOUNT_RATE.search(window)
+        my = _RE_FCFE_YIELD.search(window)
+        if not (mr and my):
+            continue
+        r, y = float(mr.group(1)), float(my.group(1))
+        diff = abs((r - y) - g)
+        if diff > 0.15:
+            warn("R7",
+                 f"FCFE 自洽性存疑: 折现率 {r:g}% − FCFE收益率 {y:g}% = {r - y:.2f}% "
+                 f"≠ 隐含增长率 {g:g}%（偏差 {diff:.2f} 个百分点）",
+                 f"r={r:g}% y={y:g}% g={g:g}%")
 
     return result
 

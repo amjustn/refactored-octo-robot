@@ -4,8 +4,8 @@
 R3b等式注释 / R4年化推导(含缺股本跳过) / R5来源标注 / R6路径分歧 /
 annotate 标注。平安案例(用户实测暴露的数字矛盾)作为回归用例。
 """
-import sys
 import os
+import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -34,6 +34,56 @@ PINGAN_GOOD = PINGAN_BAD.replace("合理价值约60-68元", "合理价值约74-8
 
 def _rule_names(res: dict) -> set:
     return {c["rule"] for c in res["checks"]}
+
+
+def _rule_names_all(res: dict) -> set:
+    """硬失败(checks) + 软警告(warnings) 的规则集合 —— R5/R6/R7 属软警告。"""
+    return {c["rule"] for c in res["checks"]} | {w["rule"] for w in res["warnings"]}
+
+
+# ── R7: 反向 FCFE 自洽性(2026-09-13 新增) ─────────────────
+
+FCFE_CONSISTENT = """估值锚：反向 FCFE（权益口径股东自由现金流）
+
+当前股价 191.96 元，TTM 每股 FCFE 0.34 元，折现率 10.0%。
+FCFE 收益率 0.2%，据此反解隐含增长率 9.8%，即市场已 price-in 接近 10% 的永续增速。
+"""
+
+FCFE_INCONSISTENT = FCFE_CONSISTENT.replace("隐含增长率 9.8%", "隐含增长率 5.0%")
+
+
+def test_r7_no_warning_when_consistent():
+    res = check_report(FCFE_CONSISTENT)
+    assert res["triggered"] is True
+    assert "R7" not in _rule_names_all(res)
+
+
+def test_r7_warns_when_inconsistent():
+    res = check_report(FCFE_INCONSISTENT)
+    assert "R7" in _rule_names_all(res)
+    hit = [w for w in res["warnings"] if w["rule"] == "R7"][0]
+    assert hit["severity"] == "warn"          # 软警告，不阻断出报告
+
+
+def test_r7_skipped_when_any_input_missing():
+    only_r = "本报告用反向 FCFE 锚，折现率 10.0%，隐含增长率 9.8%。"
+    only_y = "本报告用反向 FCFE 锚，FCFE 收益率 0.2%，隐含增长率 9.8%。"
+    assert "R7" not in _rule_names_all(check_report(only_r))
+    assert "R7" not in _rule_names_all(check_report(only_y))
+
+
+def test_r7_tolerance_boundary_rounding_ok_but_real_gap_flags():
+    # 折现率 10.0% − FCFE收益率 3.83% = 6.17% ；四舍五入写 6.1% 应放行
+    base = "反向 FCFE 估值：折现率 10.0%，FCFE收益率 3.83%，隐含增长率 {g}%"
+    assert "R7" not in _rule_names_all(check_report(base.format(g="6.1")))
+    assert "R7" in _rule_names_all(check_report(base.format(g="7.5")))
+
+
+def test_r7_negative_implied_growth_supported():
+    # 隐含增长率为负也要能解析并校验：10.0 − 12.0 = −2.0
+    txt = ("反向 FCFE：折现率 10.0%，FCFE收益率 12.0%，"
+           "反解显示隐含增长率为 -2.0%，说明市场预期股东现金流小幅萎缩。")
+    assert "R7" not in _rule_names_all(check_report(txt))
 
 
 # ── 触发判断 ─────────────────────────────────────────────

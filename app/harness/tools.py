@@ -70,25 +70,43 @@ FINANCIAL_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "three_scenario",
-            "description": "三情景/敏感性估值。支持四种估值锚，按公司类型动态选择：anchor=PE(默认,传统重资产/制造/消费,用eps+multiples)、anchor=PB(银行/保险/周期股,用bvps+multiples)、anchor=PS(轻资产/互联网/软件,用revenue_per_share+multiples)，三者目标价=未来基准值(1+增长率)×倍数；anchor=DDM(反向戈登1959,适用银行/水电/高速/运营商等高股息且分红稳定的标的,用dps+discount_rates)，返回市场隐含的股息增长率与 r×g 敏感性矩阵(不给单点目标价)，不分红或象征性分红的标的会被直接拒绝，此时应改用 PE/PB/股息率锚",
+            "description": "三情景/敏感性估值。支持五种估值锚，按公司类型动态选择：anchor=PE(默认,传统重资产/制造/消费,用eps+multiples)、anchor=PB(银行/保险/周期股,用bvps+multiples)、anchor=PS(轻资产/互联网/软件,用revenue_per_share+multiples)，三者目标价=未来基准值(1+增长率)×倍数；anchor=DDM(反向戈登1959,适用银行/水电/高速/运营商等**高股息且分红稳定**的标的,用dps+discount_rates)，返回市场隐含的股息增长率与 r×g 敏感性矩阵(不给单点目标价)，不分红或象征性分红的标的会被直接拒绝；anchor=FCFE(反向 FCFE,权益口径股东自由现金流,适用**低分红/不分红但股东自由现金流为正**的标的,用 fcfe_per_share+discount_rates，fcfe_per_share 先用 fetch_fcfe_inputs 取数)，返回市场隐含的 FCFE 增长率与 r_e×g 敏感性矩阵，FCFE≤0(扩产期/周期底)会被直接拒绝，此时应改用 PE/PB/PS 锚",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "price": {"type": "number", "description": "当前股价"},
                     "shares_100m": {"type": "number", "description": "总股本（亿股）"},
-                    "growth_rates": {"type": "array", "items": {"type": "number"}, "description": "三个情景的增长率；anchor=DDM 时作为增长率网格(可省，默认=中档贴现率下的隐含增长率±1个百分点)"},
-                    "anchor": {"type": "string", "enum": ["PE", "PB", "PS", "DDM"], "description": "估值锚：PE(重资产/消费)、PB(银行/保险/周期)、PS(轻资产/互联网)、DDM(高股息稳定分红,反向戈登),默认PE"},
+                    "growth_rates": {"type": "array", "items": {"type": "number"}, "description": "三个情景的增长率；anchor=DDM/FCFE 时作为增长率网格(可省，默认=中档折现率下的隐含增长率±1个百分点)"},
+                    "anchor": {"type": "string", "enum": ["PE", "PB", "PS", "DDM", "FCFE"], "description": "估值锚：PE(重资产/消费)、PB(银行/保险/周期)、PS(轻资产/互联网)、DDM(高股息稳定分红,反向戈登)、FCFE(低分红/不分红但现金流为正,反向 FCFE),默认PE"},
                     "eps": {"type": "number", "description": "当前每股收益(anchor=PE时必填)"},
                     "bvps": {"type": "number", "description": "当前每股净资产(anchor=PB时必填)"},
                     "revenue_per_share": {"type": "number", "description": "当前每股营收(anchor=PS时必填,=营收/股本)"},
                     "multiples": {"type": "array", "items": {"type": "number"}, "description": "三个情景的估值倍数(PE倍数/PB倍数/PS倍数,与anchor对应)"},
                     "pe_multiples": {"type": "array", "items": {"type": "number"}, "description": "兼容旧参数:三个情景的PE倍数,等价于anchor=PE时传multiples"},
                     "dps": {"type": "number", "description": "每股分红 D1(anchor=DDM时必填,口径=预期未来12个月,不是已派发历史)"},
-                    "discount_rates": {"type": "array", "items": {"type": "number"}, "description": "贴现率档(anchor=DDM时必填,建议三档,如[0.08,0.09,0.10])"},
-                    "risk_free_rate": {"type": "number", "description": "无风险利率(anchor=DDM可选,如10年国债1.8%=0.018,用于给出风险补偿与股息率利差)"},
+                    "fcfe_per_share": {"type": "number", "description": "每股股东自由现金流 FCFE1(anchor=FCFE时必填,口径=预期未来12个月;取数用 fetch_fcfe_inputs 的 fcfe_per_share 字段)"},
+                    "discount_rates": {"type": "array", "items": {"type": "number"}, "description": "折现率档(anchor=DDM 时为贴现率;anchor=FCFE 时为权益折现率 r_e。两者都必填,建议三档,如[0.09,0.10,0.11])"},
+                    "risk_free_rate": {"type": "number", "description": "无风险利率(anchor=DDM/FCFE 可选,如10年国债1.8%=0.018,用于给出风险补偿与收益率利差)"},
                     "currency": {"type": "string", "default": "CNY"},
                 },
                 "required": ["price", "shares_100m", "growth_rates"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "fetch_fcfe_inputs",
+            "description": "取 A 股 FCFE(股东自由现金流)输入集:归母净利润+折旧摊销-资本开支-营运资本增加+净借款,并给出每股 FCFE。用于估值时选 anchor=FCFE(低分红/不分红但现金流为正的标的);取数口径全部回传(期间组合/明细/股本来源/告警),分量缺失即如实报错不估算。默认 ttm(最近12个月),另有 annual/h1",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "A股6位代码,如 688008"},
+                    "basis": {"type": "string", "enum": ["ttm", "annual", "h1"], "description": "期间口径,默认 ttm(最近12个月:年报+半年报-上年同期半年报)"},
+                    "price": {"type": "number", "description": "当前股价(可选,给了就同时算 FCFE 收益率)"},
+                    "shares": {"type": "number", "description": "总股本(股,可选;默认用行情口径总市值/价格,取不到时退回资产负债表实收资本)"},
+                },
+                "required": ["symbol"],
             },
         },
     },
@@ -538,6 +556,24 @@ async def _execute_tool(tool_name: str, arguments: dict) -> str:
             "_source": "cninfo-pdf",
         }
 
+    async def _fetch_fcfe_inputs(symbol: str, basis: str = "ttm", price=None, shares=None):
+        """FCFE（股东自由现金流）输入集 —— 供 three_scenario(anchor="FCFE") 使用。
+
+        分量口径全部回传（期间组合/明细/股本来源/告警）；分量缺失即如实返回 ok=False，
+        不做任何估算。取数见 app/tools/fcfe_inputs.py。
+        """
+        from ..tools.fcfe_inputs import aget_fcfe_inputs
+        try:
+            px = float(price) if price is not None else None
+        except (TypeError, ValueError):
+            px = None
+        try:
+            sh = float(shares) if shares is not None else None
+        except (TypeError, ValueError):
+            sh = None
+        r = await aget_fcfe_inputs(symbol, basis=(basis or "ttm"), price=px, shares=sh)
+        return {**r, "_source": "eastmoney-three-statements"}
+
     # --- Industry chain tools (async) ---
     from ..tools.industry_sources import list_industry_sources, search_industry_chain
     from ..tools.market_data import (
@@ -565,6 +601,7 @@ async def _execute_tool(tool_name: str, arguments: dict) -> str:
         "fetch_broker_report_detail": get_report_detail,
         "fetch_company_announcements": _fetch_company_announcements,
         "fetch_announcement_fulltext": _fetch_announcement_fulltext,
+        "fetch_fcfe_inputs": _fetch_fcfe_inputs,
         "fetch_hibor_reports": _fetch_hibor_reports,
         "fetch_hibor_report_detail": _hibor.aget_report_detail,
         "quant_factor_signal": quant_link.get_factor_signal,
@@ -721,6 +758,7 @@ TOOL_DEFS: dict[str, ToolDef] = {
     "verify_valuation": ToolDef("verify_valuation", timeout=5),
     "cross_validate": ToolDef("cross_validate", timeout=5),
     "three_scenario": ToolDef("three_scenario", timeout=5),
+    "fetch_fcfe_inputs": ToolDef("fetch_fcfe_inputs", timeout=60, retries=1),
     "calc": ToolDef("calc", timeout=5),
     "benford": ToolDef("benford", timeout=5),
     # market data — network-bound, cached, own internal fallback chains
