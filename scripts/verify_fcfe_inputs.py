@@ -58,7 +58,25 @@ def main():
     check("A10 NWC 剔除货币资金/拆出资金/交易性金融资产并加回有息短债",
           abs(C.nwc_from_row(row) - ((1000 - 800) - (300 - 25))) < 1e-6,
           f"nwc={C.nwc_from_row(row)}")
+    # A10b：交易性金融资产在东财有两个模板字段名，一般企业走 TRADE_FINASSET_NOTFVTPL
+    # （澜起/宁德/神华/比亚迪…）；旧实现只列 FVTPL_FINASSET，导致理财被算成营运资本占用
+    row_tpl = {"TOTAL_CURRENT_ASSETS": 1000.0, "TOTAL_CURRENT_LIAB": 300.0,
+               "MONETARYFUNDS": 600.0, "TRADE_FINASSET_NOTFVTPL": 200.0,
+               "SHORT_LOAN": 20.0, "NONCURRENT_LIAB_1YEAR": 5.0}
+    check("A10b 一般企业模板的交易性金融资产(TRADE_FINASSET_NOTFVTPL)同样被剔除",
+          abs(C.nwc_from_row(row_tpl) - ((1000 - 800) - (300 - 25))) < 1e-6,
+          f"nwc={C.nwc_from_row(row_tpl)}")
+    check("A10c 两个模板字段名都在剔除清单里",
+          {"FVTPL_FINASSET", "TRADE_FINASSET_NOTFVTPL"} <= set(C.NONOP_CURRENT_ASSETS))
     check("A11 关键科目缺失 → None（不猜）", C.nwc_from_row({"MONETARYFUNDS": 1.0}) is None)
+
+    # 单期摆动提示（纯函数，不依赖联网数据）
+    check("A19a ΔNWC 超过归母一半 → 出提示",
+          (C.nwc_swing_warning(25e8, 30e8) or "").find("营运资本变动") == 0)
+    check("A19b ΔNWC 未超半 → 无提示",
+          C.nwc_swing_warning(2e8, 30e8) is None)
+    check("A19c 归母为 0/None → 不炸且无提示",
+          C.nwc_swing_warning(1e8, 0) is None and C.nwc_swing_warning(1e8, None) is None)
 
     # 流量类：缺项按 0 / 全缺行为
     idx2 = {"20260630": {"RECEIVE_LOAN_CASH": 100.0}, "20251231": {}, "20250630": {}}
@@ -104,8 +122,9 @@ def main():
             check("B5 股本与每股 FCFE 可算", r1["shares"] > 1e9 and r1["fcfe_per_share"] > 0,
                   f"股本={r1['shares'] / 1e8:.4f}亿股 每股={r1['fcfe_per_share']:.4f}元")
             check("B6 股本口径标注来源", r1.get("shares_source") in ("market_cap", "balance_sheet", "override"))
-            check("B7 营运资本被单期摆动主导时有提示（澜起 ΔNWC 25 亿量级）",
-                  any("营运资本" in w for w in r1["warnings"]))
+            check("B7 ΔNWC 已剔除交易性金融资产（22.50 亿理财不再计入营运资本占用）",
+                  abs(c["delta_nwc"]) < 5e8 and not any("营运资本" in w for w in r1["warnings"]),
+                  f"ΔNWC={c['delta_nwc'] / 1e8:.2f}亿（未修口径前是 25.34 亿）")
             r1b = await C.aget_fcfe_inputs("688008", basis="ttm", price=191.96)
             check("B8 第二次调用命中缓存且结果一致", r1b["fcfe"] == r1["fcfe"])
 

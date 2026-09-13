@@ -45,7 +45,8 @@ logger = logging.getLogger("ai_berkshire.fcfe_inputs")
 
 CACHE_CATEGORY = "fcfe_inputs"
 CACHE_TTL = 6 * 3600        # 6 小时：单日多次报告复用，新披露当天内可刷新
-CACHE_SCHEMA = "v4"         # 输出结构/口径/警告项变更时必须改，否则旧缓存会返回旧结果（两次踩过）
+CACHE_SCHEMA = "v5"         # 输出结构/口径/警告项变更时必须改，否则旧缓存会返回旧结果（两次踩过）
+                            # v5 = NWC 非经营性资产补 TRADE_FINASSET_NOTFVTPL（2026-09-13）
 
 DA_FIELDS = ("FA_IR_DEPR", "IA_AMORTIZE", "LPE_AMORTIZE", "USERIGHT_ASSET_AMORTIZE")
 
@@ -100,16 +101,43 @@ def _prev_year(digits: str) -> str:
 
 
 # 非经营性流动资产（从营运资本里剔除）：货币资金 + 各类金融性资产
-#   交易性金融资产(FVTPL_FINASSET)、买入返售(BUY_RESALE_FINASSET)、
+#   交易性金融资产、买入返售(BUY_RESALE_FINASSET)、
 #   拆出资金(LEND_FUND)、衍生金融资产(DERIVE_FINASSET)
 # 依据：Damodaran 的 non-cash working capital = (流动资产 - 现金及有价证券) -
 #       (流动负债 - 短期借款)。不剔的话，理财/拆出资金/结构性存款的进出会被当成
 #       营运资本占用 —— 实测贵州茅台 2026H1 拆出资金 1410.84 亿（财务公司吸存），
 #       混进 ΔNWC 会让 FCFE 严重失真。
+# ⚠️ 2026-09-13 修正（口径缺陷，实测踩到）：东财资产负债表对"交易性金融资产"有**两个
+#    模板字段名**，视公司模板二选一，历史上从未同时非零（20 只样本实测：15 只走
+#    TRADE_FINASSET_NOTFVTPL、1 只银行模板走 FVTPL_FINASSET、4 只两边都是 0）：
+#      * 一般企业模板 → TRADE_FINASSET_NOTFVTPL
+#      * 金融业模板   → FVTPL_FINASSET
+#    原实现只列了 FVTPL_FINASSET ⇒ 一般企业（澜起/宁德/神华/比亚迪/美的…）的**理财
+#    被当成经营性营运资本**。澜起 2026H1 交易性金融资产 29.17 亿（上年同期 6.67 亿），
+#    22.50 亿的理财净买入被算成营运资本占用 → TTM FCFE 被低估到 4.16 亿（真实 26.66 亿）。
+#    两个字段名都列，实测不重叠所以直接求和不会双计；未观测到取值的 TRADE_FINASSET
+#    别名不纳入（宁可少剔也不冒双计风险）。
 NONOP_CURRENT_ASSETS = (
-    "MONETARYFUNDS", "FVTPL_FINASSET", "BUY_RESALE_FINASSET",
-    "LEND_FUND", "DERIVE_FINASSET",
+    "MONETARYFUNDS", "FVTPL_FINASSET", "TRADE_FINASSET_NOTFVTPL",
+    "BUY_RESALE_FINASSET", "LEND_FUND", "DERIVE_FINASSET",
 )
+
+
+def nwc_swing_warning(delta_nwc: float, net_profit_parent: Optional[float]) -> Optional[str]:
+    """单期 FCFE 被营运资本摆动主导时的提示（纯函数，便于单测）。
+
+    ΔNWC 绝对值超过归母净利润的一半 → 说明这一期的 FCFE 主要不是经营赚来的，
+    而是被应收/存货/其他流动资产的进出推着走，单期折现没有意义。
+    """
+    if not net_profit_parent:
+        return None
+    if abs(delta_nwc) > abs(net_profit_parent) * 0.5:
+        return (
+            f"营运资本变动 {delta_nwc / 1e8:.2f} 亿，超过归母净利润的一半 —— FCFE 单期被"
+            "营运资本摆动主导（应收/存货/其他流动资产扩张或收缩），建议结合 3 年趋势判断，"
+            "或对 FCFE 做正常化后再折现"
+        )
+    return None
 
 
 def nwc_from_row(row: dict) -> Optional[float]:
@@ -371,11 +399,9 @@ def get_fcfe_inputs(symbol: str, basis: str = "ttm", price: Optional[float] = No
     out["source"] = "eastmoney_three_statements"
     out["ok"] = True
     if abs(delta_nwc) > abs(np_) * 0.5:
-        out["warnings"].append(
-            f"营运资本变动 {delta_nwc / 1e8:.2f} 亿，超过归母净利润的一半 —— FCFE 单期被"
-            "营运资本摆动主导（应收/存货/其他流动资产扩张或收缩），建议结合 3 年趋势判断，"
-            "或对 FCFE 做正常化后再折现"
-        )
+        warn = nwc_swing_warning(delta_nwc, np_)
+        if warn:
+            out["warnings"].append(warn)
     if fcfe <= 0:
         out["warnings"].append(
             f"FCFE 为负（{fcfe:,.0f} 元）：扩产期/周期底常见，FCFE 折现锚对其无意义"
