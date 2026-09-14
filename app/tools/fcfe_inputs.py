@@ -45,8 +45,9 @@ logger = logging.getLogger("ai_berkshire.fcfe_inputs")
 
 CACHE_CATEGORY = "fcfe_inputs"
 CACHE_TTL = 6 * 3600        # 6 小时：单日多次报告复用，新披露当天内可刷新
-CACHE_SCHEMA = "v5"         # 输出结构/口径/警告项变更时必须改，否则旧缓存会返回旧结果（两次踩过）
+CACHE_SCHEMA = "v6"         # 输出结构/口径/警告项变更时必须改，否则旧缓存会返回旧结果（两次踩过）
                             # v5 = NWC 非经营性资产补 TRADE_FINASSET_NOTFVTPL（2026-09-13）
+                            # v6 = 缓存键纳入价格数值（v5 只记有无价格，导致 fcfe_yield_pct 跨价串味）+ D&A/capex 单期缺失即失败（2026-09-14）
 
 DA_FIELDS = ("FA_IR_DEPR", "IA_AMORTIZE", "LPE_AMORTIZE", "USERIGHT_ASSET_AMORTIZE")
 
@@ -58,6 +59,16 @@ def _get_cache() -> DataCache:
     if _cache is None:
         _cache = DataCache()
     return _cache
+
+
+def _cache_key(em: str, basis: str, price: Optional[float], shares: Optional[float]) -> str:
+    """缓存键必须包含价格**数值**（不是只记有无）：输出里的 fcfe_yield_pct 依赖价格，
+    若只按"有没有传价"建键，同一标的不同价格会命中同一缓存、收益率串味（2026-09-14 实测）。"""
+    try:
+        price_key = f"{float(price):g}" if price is not None else "-"
+    except (TypeError, ValueError):
+        price_key = str(price)
+    return f"{CACHE_SCHEMA}|{em}|{(basis or 'ttm').lower()}|{price_key}|{shares or '-'}"
 
 
 def _digits(v) -> str:
@@ -214,6 +225,10 @@ def _weighted_flow(idx: dict, periods: list, fields, zero_if_all_missing: bool =
       * 折旧摊销/资本开支用 False —— 这两个科目全缺说明补充资料或投资数据没取到，
         不能假设为 0（宁可失败也不编造）。
 
+    严格科目（zero_if_all_missing=False）在 TTM 下**任一期间缺失即失败**：若只把缺的
+    那一期按 0 计入，会静默算出一个偏错的 TTM 值（例如 h1 缺 D&A 却仍返回 年报−上年同期
+    的 6 个月口径），与"宁可失败不编造"矛盾。宽松科目（净借款）仍按 0 计入并留痕。
+
     返回 (值 或 None, 缺失期间列表)。
     """
     total = 0.0
@@ -228,6 +243,8 @@ def _weighted_flow(idx: dict, periods: list, fields, zero_if_all_missing: bool =
         total += w * v
     if not any_value:
         return (0.0 if zero_if_all_missing else None), missing
+    if missing and not zero_if_all_missing:
+        return None, missing
     return total, missing
 
 
@@ -252,7 +269,8 @@ def market_cap_shares(symbol: str) -> Optional[float]:
         code_col = next((c for c in df.columns if "代码" in str(c)), None)
         if code_col is None:
             return None
-        matched = df[df[code_col].astype(str).str.contains(code, na=False)]
+        codes = df[code_col].astype(str).str.replace(r"\D", "", regex=True).str.zfill(6)
+        matched = df[codes == code]
         if len(matched) == 0:
             return None
         row = matched.iloc[0]
@@ -292,7 +310,7 @@ def get_fcfe_inputs(symbol: str, basis: str = "ttm", price: Optional[float] = No
     out["symbol"] = em
 
     cache = _get_cache()
-    key = f"{CACHE_SCHEMA}|{em}|{(basis or 'ttm').lower()}|{'p' if price is not None else '-'}|{shares or '-'}"
+    key = _cache_key(em, basis, price, shares)
     try:
         hit = cache.get(CACHE_CATEGORY, key, max_age_seconds=CACHE_TTL)
         if isinstance(hit, dict) and hit.get("ok"):

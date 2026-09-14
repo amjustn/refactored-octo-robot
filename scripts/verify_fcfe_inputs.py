@@ -86,6 +86,12 @@ def main():
     v2, _ = C._weighted_flow({"20260630": {}}, [("20260630", 1)], ("CONSTRUCT_LONG_ASSET",),
                              zero_if_all_missing=False)
     check("A13 D&A/capex 全缺 → None（宁可失败不编造）", v2 is None)
+    v2b, miss2b = C._weighted_flow(
+        {"20251231": {"FA_IR_DEPR": 30.0}, "20260630": {"FA_IR_DEPR": 12.0}, "20250630": {}},
+        [("20251231", 1), ("20260630", 1), ("20250630", -1)], ("FA_IR_DEPR",),
+        zero_if_all_missing=False)
+    check("A13b D&A/capex TTM 任一期间缺失 → None（不按 0 静默错算）",
+          v2b is None and miss2b == ["20250630"])
     v3, _ = C._weighted_flow({"20260630": {}}, [("20260630", 1)], ("RECEIVE_LOAN_CASH",),
                              zero_if_all_missing=True)
     check("A14 净借款全缺 → 0（不融资的公司成立）", v3 == 0.0)
@@ -96,6 +102,10 @@ def main():
           C._weighted(ps, [("20251231", 1), ("20250630", -1)], ("PARENT_NETPROFIT",)) is None)
 
     check("A16 缓存键含 schema 版本（防旧口径缓存回流）", C.CACHE_SCHEMA.startswith("v"))
+    check("A20 缓存键纳入价格数值（不同价格不串味）",
+          C._cache_key("SH688008", "ttm", 100.0, None) != C._cache_key("SH688008", "ttm", 200.0, None)
+          and C._cache_key("SH688008", "ttm", 100.0, None) == C._cache_key("SH688008", "ttm", 100.0, None)
+          and C._cache_key("SH688008", "ttm", None, None) != C._cache_key("SH688008", "ttm", 100.0, None))
 
     out = C.get_fcfe_inputs("", basis="ttm")
     check("A17 空标的 → ok=False 且不抛异常", out["ok"] is False and "A 股" in out["note"])
