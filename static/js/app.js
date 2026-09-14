@@ -1060,9 +1060,6 @@ var ARG_VALIDATORS = {
   'investment-team': function(a) {
     return a.trim().length >= 2 ? null : '请输入公司名或股票代码，如：腾讯 / 0700.HK / 600519';
   },
-  'investment-checklist': function(a) {
-    return a.trim().length >= 2 ? null : '请输入公司名或股票代码（支持多个逗号分隔），如：腾讯,茅台,美团';
-  },
   'financial-data': function(a) {
     return a.trim().length >= 2 ? null : '请输入公司名或股票代码，如：腾讯 / 600519';
   },

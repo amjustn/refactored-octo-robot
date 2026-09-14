@@ -186,7 +186,6 @@ DOC_EXCERPT_SKILLS = {
     "earnings-team",
     "earnings-review",
     "thesis-tracker",
-    "investment-checklist",
     "deep-company-series",
 }
 DOC_EXCERPT_CHARS = 3000
