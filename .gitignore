@@ -16,3 +16,6 @@ data/skin_settings.json
 data_cache.db
 # 运行时追加的失败留痕（每次 eval replay / 自检都会增长，入库后工作区会持续变脏）
 data/decision-skip-log.jsonl
+# 运行时追加的决策日志（每完成一次研究就 append，入库后工作区会持续变脏）
+# 文件仍在磁盘、应用照常读写；只是不再跟踪。历史内容可由 git 历史取回。
+data/decision-log.md
