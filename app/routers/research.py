@@ -76,6 +76,8 @@ async def api_start_research(request: "Request", req: ResearchRequest):
         caller="http", stream=False,
         attachments=req.attachments or "",
         debate_confirm=bool(getattr(req, "debate_confirm", False)),
+        debate_tools=getattr(req, "debate_tools", None),
+        debate_rebuttal=getattr(req, "debate_rebuttal", None),
     )
     result = await harness_run(spec)
 
@@ -140,9 +142,14 @@ async def api_resume_task(request: "Request", task_id: str):
     llm_config = _validate_llm_config(body.get("llm_config") if isinstance(body, dict) else None)
     # HITL：续跑任务可同样开启辩论后人工确认门
     debate_confirm = bool(body.get("debate_confirm", False)) if isinstance(body, dict) else False
+    # P5 交叉辩论增强开关（None=沿用 skill 元数据，默认关闭）
+    debate_tools = body.get("debate_tools") if isinstance(body, dict) else None
+    debate_rebuttal = body.get("debate_rebuttal") if isinstance(body, dict) else None
 
     plan, error = await harness_prepare_resume(task_id, llm_override=llm_config,
-                                               debate_confirm=debate_confirm)
+                                               debate_confirm=debate_confirm,
+                                               debate_tools=debate_tools,
+                                               debate_rebuttal=debate_rebuttal)
     if error:
         raise HTTPException(status_code=400, detail=error)
 
@@ -188,6 +195,9 @@ async def ws_research(websocket: WebSocket, skill_name: str):
         llm_config = _validate_llm_config(req.get("llm_config"))
         # HITL：辩论后人工确认门开关（默认关闭，缺失/非真值皆为关）
         debate_confirm = bool(req.get("debate_confirm", False))
+        # P5 交叉辩论增强开关（None=沿用 skill 元数据，默认关闭）
+        debate_tools = req.get("debate_tools")
+        debate_rebuttal = req.get("debate_rebuttal")
     except json.JSONDecodeError:
         arguments = data
         attachments = ""
@@ -195,6 +205,8 @@ async def ws_research(websocket: WebSocket, skill_name: str):
         watch_task_id = ""
         llm_config = None
         debate_confirm = False
+        debate_tools = None
+        debate_rebuttal = None
 
     if not _wc._ws_verify_jwt(token):
         await websocket.send_json({"type": "error", "message": "Unauthorized"})
@@ -234,6 +246,8 @@ async def ws_research(websocket: WebSocket, skill_name: str):
         skill, arguments, llm_override=llm_config, caller="ws", stream=True,
         attachments=attachments,
         debate_confirm=debate_confirm,
+        debate_tools=debate_tools,
+        debate_rebuttal=debate_rebuttal,
     )
 
     # Subscribe BEFORE run() so no events are lost; forward bus → websocket.

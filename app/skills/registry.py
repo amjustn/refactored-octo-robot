@@ -18,6 +18,8 @@ SKILLS = [
         "category": "深度研究",
         "is_multi_agent": True,
         "agent_count": 4,
+        # P5：交叉辩论开放受限核对工具（复算/原始数据白名单，评审者≤2次）
+        "debate_tools": True,
         "agents": ["business-analyst", "financial-analyst", "industry-researcher", "risk-assessor"],
         "input_hint": "描述你的分析目标，可包含公司名/代码，如：分析美团外卖业务的竞争壁垒",
     },
@@ -95,6 +97,7 @@ SKILLS = [
         "category": "深度研究",
         "is_multi_agent": True,
         "agent_count": 3,
+        "debate_tools": True,
         "agents": ["macro-institutional-economist", "macro-forecaster", "macro-strategist"],
         "input_hint": "描述你想分析的全球宏观问题，如：美联储2026年降息路径与全球资产影响",
     },
@@ -105,6 +108,7 @@ SKILLS = [
         "category": "深度研究",
         "is_multi_agent": True,
         "agent_count": 4,
+        "debate_tools": True,
         "agents": ["cn-policy-framework", "cn-data-cycle", "cn-fx-external", "cn-structure-trend"],
         "input_hint": "描述你想分析的中国宏观问题，如：2026年地产企稳对信用周期和A股的影响",
     },
@@ -115,6 +119,7 @@ SKILLS = [
         "category": "深度研究",
         "is_multi_agent": True,
         "agent_count": 3,
+        "debate_tools": True,
         "agents": ["researcher", "editor", "reader-reviewer"],
         "post_synthesis_agents": ["editor", "reader-reviewer"],
         "input_hint": "描述文章主题，如：写一篇解读大模型OPD技术的公众号文章",
@@ -135,6 +140,7 @@ SKILLS = [
         "category": "财报分析",
         "is_multi_agent": True,
         "agent_count": 6,
+        "debate_tools": True,
         "agents": ["business-interpreter", "financial-auditor", "competition-analyst", "risk-hunter", "editor", "reader-reviewer"],
         # Phased execution: these agents run AFTER Team Lead synthesis
         # Phase 1: 4 research agents run in parallel
@@ -213,6 +219,7 @@ SKILLS = [
         "category": "持仓管理",
         "is_multi_agent": True,
         "agent_count": 4,
+        "debate_tools": True,
         "agents": ["company-event-scout", "regulatory-watcher", "industry-peer-analyst", "sentiment-tracker"],
         "input_hint": "描述异动情况，如：腾讯今天跌了5%，帮我归因",
     },

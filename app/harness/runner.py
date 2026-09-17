@@ -46,12 +46,26 @@ from .prompts import (
     get_synthesis_prompt,
 )
 from .spec import TaskSpec
-from .tools import ALL_TOOL_SCHEMAS, TOOL_ENABLED_AGENTS, get_gateway
+from .tools import (
+    ALL_TOOL_SCHEMAS,
+    DEBATE_TOOL_SCHEMAS,
+    DEBATE_TOOL_WHITELIST,
+    TOOL_ENABLED_AGENTS,
+    get_gateway,
+)
 
 logger = logging.getLogger("ai_berkshire.harness.runner")
 
 # ── P1: soft loop limits ────────────────────────────────────────
 MAX_SAME_TOOL_CALLS = 3  # per agent per tool name within one task
+
+# ── P5: cross-debate budget ─────────────────────────────────────
+DEBATE_TIMEOUT = 60                 # seconds per debate / rebuttal LLM call
+DEBATE_INPUT_HEAD = 1200            # chars kept from the report head (摘要/结论)
+DEBATE_INPUT_TAIL = 1800            # chars kept from the report tail (结论/风险)
+DEBATE_OUTPUT_MAX = 1500            # chars kept from a review/rebuttal
+DEBATE_MAX_TOOL_CALLS = 2           # total verification-tool calls per reviewer
+_DEBATE_ELLIPSIS = "\n\n...[中间内容省略]...\n\n"
 
 # ── P2: audit trail / scratchpad ─────────────────────────────────
 SCRATCHPAD_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "scratchpad"
@@ -105,17 +119,70 @@ def _with_attachments(prompt: str, attachments: str) -> str:
     )
 
 
+def _truncate_head_tail(text: str, head: int, tail: int) -> str:
+    """Keep the report head (摘要/论点) and tail (结论/风险), elide the middle.
+
+    纯头部截断会砍掉结论与关键数字（结论通常在报告尾部），纯尾部截断
+    又会丢掉开头的核心论点，因此辩论输入保留头+尾两段。
+    """
+    if len(text) <= head + tail:
+        return text
+    return text[:head] + _DEBATE_ELLIPSIS + text[-tail:]
+
+
+def _truncate_at_boundary(text: str, limit: int) -> str:
+    """Truncate at a paragraph / line / sentence boundary to avoid 残句。
+
+    评审理由被拦腰砍断会误导 Team Lead，因此优先在段落或句子边界收口。
+    """
+    if len(text) <= limit:
+        return text
+    window = text[:limit]
+    for sep in ("\n\n", "\n", "。", "！", "？", "；", ". ", "! ", "? ", "; "):
+        idx = window.rfind(sep)
+        if idx >= limit // 2:
+            return window[: idx + len(sep)].rstrip() + "…"
+    return window.rstrip() + "…"
+
+
 # ── HITL：交叉辩论结论 → 确认卡片摘要 ─────────────────────────
 _DEBATE_VOTE_RE = _re.compile(r"\b(BUY|HOLD|SELL)\b", _re.IGNORECASE)
 _DEBATE_REVIEW_MAX = 8      # 评审条目上限（控制事件载荷体积）
 _DEBATE_OPINION_MAX = 120   # 单条意见字数上限
+_DEBATE_DISPUTE_MAX = 3     # 单条评审的结构化质疑条数上限
+_DEBATE_DISPUTE_FIELD_MAX = 80  # 结构化质疑单字段字数上限
+_DEBATE_FIELD_SEP_RE = _re.compile(r"\s*[｜|]\s*")
+
+
+def _parse_disputes(body: str) -> list[dict]:
+    """解析结构化质疑行「对象｜反证据｜置信度」。
+
+    解析不到（旧格式 / 自由文本）时返回空列表，绝不影响主流程。
+    """
+    disputes: list[dict] = []
+    for line in body.splitlines():
+        s = line.strip().lstrip("0123456789.、*#- ").strip()
+        if not s or ("｜" not in s and "|" not in s):
+            continue
+        parts = [p.strip() for p in _DEBATE_FIELD_SEP_RE.split(s) if p.strip()]
+        if len(parts) < 2:
+            continue
+        disputes.append({
+            "target": parts[0][:_DEBATE_DISPUTE_FIELD_MAX],
+            "evidence": parts[1][:_DEBATE_DISPUTE_FIELD_MAX],
+            "confidence": (parts[2][:_DEBATE_DISPUTE_FIELD_MAX] if len(parts) > 2 else ""),
+        })
+        if len(disputes) >= _DEBATE_DISPUTE_MAX:
+            break
+    return disputes
 
 
 def _summarize_debate(debate_output: str) -> tuple[dict, list]:
     """从交叉辩论结论提取投票计数（BUY/HOLD/SELL）与每个评审的一句话意见。
 
     仅供 awaiting_confirmation 事件载荷与前端确认卡片展示；解析不到时
-    返回零计数与空列表，绝不影响主流程。整体载荷控制在 2000 字以内。
+    返回零计数与空列表，绝不影响主流程。各字段均按上限截断以约束载荷。
+    结构化质疑（对象｜反证据｜置信度）解析成功时附在 review["disputes"]。
     """
     votes = {"BUY": 0, "HOLD": 0, "SELL": 0}
     reviews: list[dict] = []
@@ -135,7 +202,12 @@ def _summarize_debate(debate_output: str) -> tuple[dict, list]:
             if s:
                 opinion = s[:_DEBATE_OPINION_MAX]
                 break
-        reviews.append({"pair": pair, "vote": vote, "opinion": opinion})
+        reviews.append({
+            "pair": pair,
+            "vote": vote,
+            "opinion": opinion,
+            "disputes": _parse_disputes(body),
+        })
         if len(reviews) >= _DEBATE_REVIEW_MAX:
             break
     return votes, reviews
@@ -438,6 +510,31 @@ class AgentRunner:
 
         return _exec
 
+    def _debate_tool_executor(self, reviewer_label: str, max_calls: int = DEBATE_MAX_TOOL_CALLS):
+        """受限取证通道：只允许白名单核对工具，且整场评审最多 max_calls 次。
+
+        评审者用它复算关键数字，而不是发起第二轮开放式研究；超预算或
+        越权调用返回显式错误，让模型基于已有信息收口。
+        """
+        inner = self._tool_executor(reviewer_label)
+        state = {"used": 0}
+
+        async def _exec(name: str, args: dict) -> str:
+            if name not in DEBATE_TOOL_WHITELIST:
+                return json.dumps({
+                    "error": "TOOL_NOT_ALLOWED",
+                    "message": f"辩论核对阶段不允许调用 {name}，仅限复算/原始数据类工具。",
+                }, ensure_ascii=False)
+            if state["used"] >= max_calls:
+                return json.dumps({
+                    "error": "TOOL_BUDGET_EXHAUSTED",
+                    "message": f"核对工具调用已达上限 {max_calls} 次，请基于现有信息给出评审结论。",
+                }, ensure_ascii=False)
+            state["used"] += 1
+            return await inner(name, args)
+
+        return _exec
+
     # ---------- single ----------
 
     async def run_single(
@@ -681,25 +778,29 @@ class AgentRunner:
             self._progress("system", "running", "Agent 交叉辩论中...")
             success_results = [(n, r) for n, r in results if not r.startswith("[错误]")]
 
-            async def _debate_one(idx: int) -> tuple[str, str]:
+            debate_tools = bool(getattr(spec, "debate_tools", False)) if spec is not None else False
+            debate_rebuttal = bool(getattr(spec, "debate_rebuttal", False)) if spec is not None else False
+
+            async def _debate_one(idx: int) -> tuple[str, str, str, str]:
                 """Agent idx reviews agent (idx+1)%n's work."""
                 reviewer_name, _ = success_results[idx]
                 target_idx = (idx + 1) % len(success_results)
                 target_name, target_report = success_results[target_idx]
                 target_role = get_role_label(target_name)
                 reviewer_role = get_role_label(reviewer_name)
+                pair = f"{reviewer_name}→{target_name}"
 
-                # Truncate target report to avoid token issues
-                _max_debate_input = 3000
-                _short = target_report[:_max_debate_input] if len(target_report) > _max_debate_input else target_report
+                # 头+尾截断：报告结论通常在尾部，纯头部截断会砍掉结论与关键数字
+                _short = _truncate_head_tail(target_report, DEBATE_INPUT_HEAD, DEBATE_INPUT_TAIL)
 
                 debate_prompt = (
-                    f"你是{reviewer_role}。以下是{target_role}的分析报告（已截取关键部分）。\n\n"
+                    f"你是{reviewer_role}。以下是{target_role}的分析报告（超长时保留开头与结尾，中间省略）。\n\n"
                     f"## {target_role}的报告\n{_short}\n\n"
                     "请从你的专业角度审视这份报告，完成以下三项：\n"
                     "1. **同意/反对**：你同意还是反对其核心结论？（一句话）\n"
-                    "2. **质疑点**：列出1-2个最关键的质疑或补充（具体、可操作）\n"
-                    "3. **投票**：BUY / HOLD / SELL（基于这份报告的逻辑，不是你的个人观点）\n\n"
+                    "2. **质疑点**：列出1-2个最关键的质疑或补充，每条按"
+                    "「质疑对象｜反证据或反例｜置信度(高/中/低)」格式输出\n"
+                    "3. **独立判断**：BUY / HOLD / SELL（你自己的判断，不是复述对方结论）\n\n"
                     "请用中文回复，保持简洁。"
                 )
 
@@ -709,24 +810,37 @@ class AgentRunner:
                     dcfg = spec.llm.to_agent_config_dict(reviewer_name)
 
                 try:
-                    review_text = await asyncio.wait_for(
-                        chat_complete(debate_prompt, "请给出你的交叉评审意见。", llm_config=dcfg),
-                        timeout=60,  # shorter timeout for debate
-                    )
-                    return f"{reviewer_name}→{target_name}", review_text[:800]
+                    if debate_tools:
+                        # 受限取证通道：评审者可复算关键数字，但有白名单与预算上限
+                        review_text = await asyncio.wait_for(
+                            chat_complete_with_tools(
+                                debate_prompt, "请给出你的交叉评审意见。",
+                                tools=DEBATE_TOOL_SCHEMAS,
+                                tool_executor=self._debate_tool_executor(f"debate-{reviewer_name}"),
+                                llm_config=dcfg,
+                            ),
+                            timeout=DEBATE_TIMEOUT,
+                        )
+                    else:
+                        review_text = await asyncio.wait_for(
+                            chat_complete(debate_prompt, "请给出你的交叉评审意见。", llm_config=dcfg),
+                            timeout=DEBATE_TIMEOUT,  # shorter timeout for debate
+                        )
+                    return pair, _truncate_at_boundary(review_text, DEBATE_OUTPUT_MAX), target_name, reviewer_name
                 except Exception as e:
-                    logger.warning(f"Debate {reviewer_name}→{target_name} failed: {e}")
-                    return f"{reviewer_name}→{target_name}", f"[评审失败: {e}]"
+                    logger.warning(f"Debate {pair} failed: {e}")
+                    return pair, f"[评审失败: {e}]", target_name, reviewer_name
 
             debates = await asyncio.gather(
                 *(_debate_one(i) for i in range(len(success_results))),
                 return_exceptions=True,
             )
 
+            good_reviews: list[tuple[str, str, str, str]] = []
             for item in debates:
                 if isinstance(item, Exception):
                     continue
-                pair, text = item
+                pair, text, target_name, reviewer_name = item
                 if text.startswith("[评审失败"):
                     # Never feed a failed review into the synthesis prompt as
                     # if it were a real peer review — the Team Lead would read
@@ -735,7 +849,43 @@ class AgentRunner:
                     # disguised as content).
                     logger.warning(f"Debate {pair} failed, excluded from synthesis input")
                     continue
+                good_reviews.append((pair, text, target_name, reviewer_name))
                 debate_output += f"\n\n### 交叉评审：{pair}\n{text}\n"
+
+            # 被评审者答辩权（可选，默认关闭）：给目标 Agent 一次回应机会，
+            # 筛掉因输入截断或误读产生的假分歧。答辩失败同样只留日志。
+            if debate_rebuttal and good_reviews:
+                async def _rebut_one(review: tuple[str, str, str, str]) -> Optional[tuple[str, str]]:
+                    pair, review_text, target_name, reviewer_name = review
+                    target_role = get_role_label(target_name)
+                    reviewer_role = get_role_label(reviewer_name)
+                    rcfg = llm_config
+                    if per_agent_enabled and spec is not None:
+                        rcfg = spec.llm.to_agent_config_dict(target_name)
+                    rebuttal_prompt = (
+                        f"你是{target_role}。以下是{reviewer_role}对你报告的交叉质疑：\n\n"
+                        f"{review_text}\n\n"
+                        "请逐条回应：接受并修正，或反驳并给出依据。不要复述原报告，保持简洁。"
+                    )
+                    try:
+                        text = await asyncio.wait_for(
+                            chat_complete(rebuttal_prompt, "请回应上述质疑。", llm_config=rcfg),
+                            timeout=DEBATE_TIMEOUT,
+                        )
+                        return pair, _truncate_at_boundary(text, DEBATE_OUTPUT_MAX)
+                    except Exception as e:
+                        logger.warning(f"Rebuttal {pair} failed: {e}")
+                        return None
+
+                rebuttals = await asyncio.gather(
+                    *(_rebut_one(r) for r in good_reviews),
+                    return_exceptions=True,
+                )
+                for item in rebuttals:
+                    if isinstance(item, Exception) or item is None:
+                        continue
+                    pair, text = item
+                    debate_output += f"\n\n### 答辩：{pair}\n{text}\n"
 
             self._progress("system", "completed", f"{len(success_results)} 位 Agent 交叉辩论完成", 1.0)
             # 断点续跑检查点：辩论结论落库（重启后 Team Lead 前的辩论不重跑）

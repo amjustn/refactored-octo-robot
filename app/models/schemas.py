@@ -32,6 +32,8 @@ class ResearchRequest(BaseModel):
     stream: bool = Field(default=False, description="Stream the response")
     llm_config: Optional[dict] = Field(default=None, description="Per-request LLM override: {api_key, base_url, model, synthesis_model}（synthesis_model 为 Team Lead 综合环节可选的独立模型）")
     debate_confirm: bool = Field(default=False, description="HITL：multi 策略辩论完成后暂停等待人工确认（默认关闭）")
+    debate_tools: Optional[bool] = Field(default=None, description="P5：交叉辩论开放受限核对工具（复算/原始数据白名单）；None=沿用 skill 元数据，默认关闭")
+    debate_rebuttal: Optional[bool] = Field(default=None, description="P5：被评审者获得一轮答辩权，筛掉截断造成的假分歧；None=沿用 skill 元数据，默认关闭")
 
 
 class AgentProgress(BaseModel):

@@ -303,6 +303,25 @@ BROKER_TOOL_SCHEMAS = [
 ALL_TOOL_SCHEMAS = FINANCIAL_TOOL_SCHEMAS + DATA_TOOL_SCHEMAS + WEB_TOOL_SCHEMAS + INDUSTRY_TOOL_SCHEMAS + BROKER_TOOL_SCHEMAS
 
 
+# ── 交叉辩论：受限核对工具白名单 ──────────────────────────────
+# 评审者只用只读的「复算 / 原始数据」类工具核对被评审报告里的关键
+# 数字（同比、毛利率、市值、估值口径），不开放 web_search /
+# read_webpage 等开放式检索，避免辩论退化为第二轮研究并放大成本。
+DEBATE_TOOL_WHITELIST = {
+    "get_financial_data",
+    "get_stock_price",
+    "verify_market_cap",
+    "verify_valuation",
+    "cross_validate",
+    "calc",
+}
+
+DEBATE_TOOL_SCHEMAS = [
+    schema for schema in ALL_TOOL_SCHEMAS
+    if (schema.get("function") or {}).get("name") in DEBATE_TOOL_WHITELIST
+]
+
+
 # ==================== Tool Executor ====================
 
 async def _execute_tool(tool_name: str, arguments: dict) -> str:

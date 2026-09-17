@@ -680,7 +680,14 @@ class TestRunner:
                 raise RuntimeError("debate API down")
             return "complete output"
 
+        async def failing_debate_tools(system, user, tools=None, tool_executor=None, llm_config=None, **kw):
+            if "交叉评审" in (system or "") + (user or ""):
+                raise RuntimeError("debate API down")
+            return "complete output"
+
         monkeypatch.setattr(runner_mod, "chat_complete", failing_debate)
+        # investment-team 现默认 debate_tools=True：辩论走工具通道，同样注入失败
+        monkeypatch.setattr(runner_mod, "chat_complete_with_tools", failing_debate_tools)
         spec = _make_spec("investment-team")
         report = asyncio.run(AgentRunner(task_id=spec.task_id).run(spec))
         assert "评审失败" not in report
