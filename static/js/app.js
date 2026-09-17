@@ -421,8 +421,7 @@ var AGENT_LABELS = {
   'competition-analyst': '竞争变化解读者',
   'risk-hunter': '风险信号猎手',
   'editor': '公众号财经编辑',
-  'reader-reviewer': '投资者评审',
-  'researcher': '深度研究员'
+  'reader-reviewer': '投资者评审'
 };
 
 function _getAgentLabel(name) {
@@ -1068,9 +1067,6 @@ var ARG_VALIDATORS = {
   },
   'industry-funnel': function(a) {
     return a.trim().length >= 2 ? null : '请输入行业或方向，如：AI应用 / 光伏 / 创新药';
-  },
-  'quality-screen': function(a) {
-    return a.trim().length >= 2 ? null : '请输入行业/指数/主题，如：沪深300 / 半导体';
   },
   'bottleneck-hunter': function(a) {
     return a.trim().length >= 2 ? null : '请输入超级趋势方向，如：AI算力 / 固态电池';

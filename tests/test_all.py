@@ -333,7 +333,7 @@ class TestOrchestrator:
         assert "financial-analyst" in TOOL_ENABLED_AGENTS
         assert "industry-researcher" in TOOL_ENABLED_AGENTS
         assert "company-event-scout" in TOOL_ENABLED_AGENTS
-        assert "researcher" in TOOL_ENABLED_AGENTS
+        assert "macro-forecaster" in TOOL_ENABLED_AGENTS
         # Editor and reader-reviewer should NOT have tools
         assert "editor" not in TOOL_ENABLED_AGENTS
         assert "reader-reviewer" not in TOOL_ENABLED_AGENTS

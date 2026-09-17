@@ -66,9 +66,6 @@ var ARG_VALIDATORS = {
   'industry-funnel': function(a) {
     return a.trim().length >= 2 ? null : '请输入行业或方向，如：AI应用 / 光伏 / 创新药';
   },
-  'quality-screen': function(a) {
-    return a.trim().length >= 2 ? null : '请输入行业/指数/主题，如：沪深300 / 半导体';
-  },
   'bottleneck-hunter': function(a) {
     return a.trim().length >= 2 ? null : '请输入超级趋势方向，如：AI算力 / 固态电池';
   }

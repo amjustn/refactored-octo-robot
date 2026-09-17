@@ -100,8 +100,7 @@ var AGENT_LABELS = {
   'competition-analyst': '竞争变化解读者',
   'risk-hunter': '风险信号猎手',
   'editor': '公众号财经编辑',
-  'reader-reviewer': '投资者评审',
-  'researcher': '深度研究员'
+  'reader-reviewer': '投资者评审'
 };
 
 function _getAgentLabel(name) {

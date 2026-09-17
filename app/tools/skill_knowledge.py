@@ -84,15 +84,6 @@ DEFAULT_SKILL_KNOWLEDGE = {
         "update_notes": "关注注册制下的退市风险和壳价值归零趋势",
         "last_updated": "default_bootstrap",
     },
-    "quality-screen": {
-        "skill_name": "quality-screen",
-        "display_name": "去劣筛选",
-        "latest_frameworks": "7条硬指标：1)ROE>15% 2)FCF>0 3)利息覆盖>5倍 4)毛利率>30% 5)利润质量(经营现金流/净利润>80%) 6)净利率>10% 7)无大幅稀释",
-        "key_criteria": "任一指标不达标即标记，不打分直接淘汰",
-        "data_sources": "财务报表数据via get_financial_data工具",
-        "update_notes": "关注不同行业的指标基准差异（如银行不适用毛利率指标）",
-        "last_updated": "default_bootstrap",
-    },
     "bottleneck-hunter": {
         "skill_name": "bottleneck-hunter",
         "display_name": "瓶颈猎手",
@@ -163,15 +154,6 @@ DEFAULT_SKILL_KNOWLEDGE = {
         "key_criteria": "关键指标必须≥2源交叉验证，偏差>5%标记FAIL",
         "data_sources": "A股:akshare / 美股港股:yfinance / 官方年报为最终基准",
         "update_notes": "关注最新IFRS/US GAAP/CAS准则差异对数据可比性的影响",
-        "last_updated": "default_bootstrap",
-    },
-    "wechat-article": {
-        "skill_name": "wechat-article",
-        "display_name": "公众号文章",
-        "latest_frameworks": "三Agent协作：1)研究员搜集资料 2)编辑改写(段落<4行,每500字小结) 3)读者评审(可读性+信息价值+可信度)",
-        "key_criteria": "专业术语用类比解释，数据来源明确，观点有支撑",
-        "data_sources": "实时行情+新闻+研究报告，via工具获取",
-        "update_notes": "关注公众号内容监管新规和读者偏好变化",
         "last_updated": "default_bootstrap",
     },
     "daily-briefing": {

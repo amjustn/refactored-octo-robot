@@ -101,17 +101,6 @@ SKILLS = [
         "input_hint": "描述你想分析的中国宏观问题，如：2026年地产企稳对信用周期和A股的影响",
     },
     {
-        "name": "wechat-article",
-        "display_name": "公众号文章",
-        "description": "三Agent协作生成公众号文章：研究+编辑+评审",
-        "category": "深度研究",
-        "is_multi_agent": True,
-        "agent_count": 3,
-        "agents": ["researcher", "editor", "reader-reviewer"],
-        "post_synthesis_agents": ["editor", "reader-reviewer"],
-        "input_hint": "描述文章主题，如：写一篇解读大模型OPD技术的公众号文章",
-    },
-    {
         "name": "earnings-review",
         "display_name": "财报精读",
         "description": "一手资料深度解读财报：核心数据+管理层语气+附注挖掘+承诺追踪",
@@ -161,15 +150,6 @@ SKILLS = [
         "is_multi_agent": False,
         "agent_count": 1,
         "input_hint": "描述筛选方向，如：从机器人行业筛出3家最值得配置的公司",
-    },
-    {
-        "name": "quality-screen",
-        "display_name": "去劣筛选",
-        "description": "7条硬指标快速排除非一流公司：ROE/FCF/利息覆盖/毛利率/利润质量/净利率/稀释",
-        "category": "行业筛选",
-        "is_multi_agent": False,
-        "agent_count": 1,
-        "input_hint": "描述筛选对象，如：用硬指标排除恒生指数成分股中的非一流公司",
     },
     {
         "name": "bottleneck-hunter",

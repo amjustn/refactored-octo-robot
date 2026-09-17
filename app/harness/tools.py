@@ -626,7 +626,6 @@ TOOL_ENABLED_AGENTS = {
     "business-analyst", "financial-analyst", "industry-researcher", "risk-assessor",
     "company-event-scout", "industry-peer-analyst",
     "business-interpreter", "financial-auditor", "competition-analyst", "risk-hunter",
-    "researcher",
     "macro-institutional-economist", "macro-forecaster", "macro-strategist",
     "cn-policy-framework", "cn-data-cycle", "cn-fx-external", "cn-structure-trend",
 }

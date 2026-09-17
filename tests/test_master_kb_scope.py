@@ -97,7 +97,7 @@ def test_missing_skill_name_injects_nothing():
 
 
 def test_other_skills_get_no_master_knowledge():
-    for skill in ("daily-briefing", "industry-research", "quality-screen", "earnings-review", "wechat-article"):
+    for skill in ("daily-briefing", "industry-research", "portfolio-review", "earnings-review", "industry-funnel"):
         assert build_knowledge_context(skill) == "", f"{skill} 不该注入大师知识块"
 
 
