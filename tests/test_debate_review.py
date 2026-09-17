@@ -207,9 +207,10 @@ class TestDebateIntegration:
     def test_skill_metadata_enables_debate_tools(self, captured_llm, tmp_repo):
         spec = _make_spec()
         assert spec.debate_tools is True, "investment-team 应在 registry 元数据默认开启 debate_tools"
-        assert spec.debate_rebuttal is False
+        assert spec.debate_rebuttal is True, "investment-team 应在 registry 元数据默认开启 debate_rebuttal"
         _run(spec)
         assert [c for c in _debate_calls(captured_llm) if c["kind"] == "tools"]
+        assert _rebuttal_calls(captured_llm), "registry 默认开启答辩权后应产生答辩调用"
 
     def test_explicit_flag_overrides_skill_metadata(self):
         assert _make_spec(debate_tools=False).debate_tools is False
@@ -247,7 +248,8 @@ class TestDebateIntegration:
         assert synthesis and "### 答辩：" in synthesis[-1]["system"]
 
     def test_rebuttal_default_off(self, captured_llm, tmp_repo):
-        _run(_make_spec())
+        # 显式关闭时行为与旧版一致：无答辩调用、综合不含答辩段
+        _run(_make_spec(debate_rebuttal=False))
         assert not _rebuttal_calls(captured_llm)
         synthesis = [c for c in captured_llm if c["kind"] == "stream"]
         assert synthesis and "### 答辩：" not in synthesis[-1]["system"]

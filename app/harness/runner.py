@@ -60,7 +60,7 @@ logger = logging.getLogger("ai_berkshire.harness.runner")
 MAX_SAME_TOOL_CALLS = 3  # per agent per tool name within one task
 
 # ── P5: cross-debate budget ─────────────────────────────────────
-DEBATE_TIMEOUT = 60                 # seconds per debate / rebuttal LLM call
+DEBATE_TIMEOUT = 90                 # seconds per debate / rebuttal LLM call (工具通道含2次取证往返)
 DEBATE_INPUT_HEAD = 1200            # chars kept from the report head (摘要/结论)
 DEBATE_INPUT_TAIL = 1800            # chars kept from the report tail (结论/风险)
 DEBATE_OUTPUT_MAX = 1500            # chars kept from a review/rebuttal
