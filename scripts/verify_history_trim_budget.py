@@ -87,17 +87,30 @@ check("2-真实最大注入块在预算内", worst_real[0] <= budget,
 print(f"  同组标的 {len(sizes)} 个；最大注入块 {worst_real[0]} token（{worst_real[1]}）；"
       f"预算 {budget}，余量 {budget - worst_real[0]}")
 
-# ── 3. 体积上界（全库最大 5 条相加 + 框架开销）必须被预算覆盖 ──────────
-per_entry = []
+# ── 3. 单组体积上界（同标的 5 条最长 + 框架开销）必须被预算覆盖 ──────────
+# 注入路径是「同一标的的最近 5 条」（load_decisions 按标的分组），跨标的最长
+# 5 条凑在一起不会发生。原断言取全库 Top5，会随无关标的长条目增长而误报
+# （实测 ≈2222 超预算 22，而同一标的的真实最大仅 1258）——按标的组计算才对得上
+# 本脚本开头所述的保护目标（5 条长结论的块不被截尾）。
+by_code: dict[str, list[int]] = {}
 for s in raw_secs:
     p = dl._parse_section(s)
-    if not p or not (p.get("code") or "").strip() or p.get("code") in ("未指定",):
+    if not p:
         continue
-    per_entry.append(tok(s))
-per_entry.sort(reverse=True)
-upper = sum(per_entry[:5]) + 90  # 90 ≈ 表头/时间线/提示语等框架开销
-check("3-体积上界(5 条最大+框架)在预算内", upper <= budget,
-      f"上界≈{upper} token vs 预算 {budget}")
+    code = (p.get("code") or "").strip()
+    if not code or code in ("未指定",):
+        continue
+    by_code.setdefault(code, []).append(tok(s))
+
+worst_upper, worst_code = 0, "-"
+for code, vals in by_code.items():
+    vals.sort(reverse=True)
+    upper = sum(vals[:5]) + 90  # 90 ≈ 表头/时间线/提示语等框架开销
+    if upper > worst_upper:
+        worst_upper, worst_code = upper, code
+check("3-体积上界(单组 5 条最大+框架)在预算内", worst_upper <= budget,
+      f"最坏单组上界≈{worst_upper} token（{worst_code}）vs 预算 {budget}")
+upper = worst_upper  # 兼容后续引用
 
 # ── 4. 真实标的实测：裁剪后块完整、冲突块与最新版都在 ──────────────────
 for q, want_conflict in [("英维克", True), ("中际旭创", False), ("腾讯控股", False)]:

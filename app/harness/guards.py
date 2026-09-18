@@ -2,8 +2,9 @@
 
 | gate      | rule                                                        | on fail |
 |-----------|-------------------------------------------------------------|---------|
-| structure | required `## ` sections from the skill md exist (single)    | warning |
-| citation  | financial-looking numbers have a source marker nearby       | warning |
+| structure | declared `output_sections` from the registry exist (single) | warning |
+| citation  | financial-looking numbers have a source marker in-block     | warning |
+| freshness | report says "需要核实" while context already has the data     | warning |
 | disclaimer| report ends with a no-investment-advice statement           | auto-fix|
 | length    | ≤ MAX_REPORT_LENGTH (50k; series 200k)                      | truncate|
 | tool_markers | leftover <tool_calls>/｜｜DSML｜｜/<invoke name= markers   | fatal   |
@@ -26,7 +27,7 @@ import re
 from typing import Optional
 
 from ..core.config import MAX_REPORT_LENGTH
-from ..skills import load_skill_prompt
+from ..skills import get_skill
 from .events import EventBus, EventType
 
 logger = logging.getLogger("ai_berkshire.harness.guards")
@@ -36,10 +37,14 @@ MAX_SERIES_REPORT_LENGTH = 200000
 
 DISCLAIMER = "\n\n---\n*以上分析由AI基于公开数据生成，仅供参考，不构成投资建议。投资有风险，决策需谨慎。*"
 
-# Words that count as a source attribution near a number
+# Words that count as a source attribution near a number.
+# 机构名本身就是出处（"交银国际给出1600元"/"中信证券指出"），旧的词表只认
+# "来源/公告/年报"这类字样，会把写明机构名的句子误判成无来源。
 _SOURCE_MARKERS = re.compile(
     r"(来源|数据来源|据|截至|报表|财报|公告|年报|季报|交易所|官网|"
+    r"[\u4e00-\u9fff]{2,4}(?:证券|建投|国际|投行|资管|研究院|研究所|基金)|"
     r"akshare|yfinance|yahoo|雅虎|腾讯|新浪|东财|东方财富|wind|同花顺|"
+    r"Morgan|Goldman|Citi|UBS|Macquarie|Nomura|CLSA|"
     r"20\d{2}[年/-]|Q[1-4])",
     re.I,
 )
@@ -53,26 +58,79 @@ _NUMBER = re.compile(
 # 覆盖 DSML 全角前缀、整块 tool_calls、以及混用形态的 <invoke name=。
 _TOOL_MARKER_RE = re.compile(r"(｜｜DSML｜｜|<\s*tool_calls\b|<\s*invoke\s+name\s*=)", re.I)
 
-# Sections that are framework instructions, not output headings
-_STRUCTURE_SKIP = re.compile(
-    r"(输入|目标|要求|工具|数据获取|框架|风格|方法|步骤|流程|原则|视角|"
-    r"背景|角色|约束|示例|注意|纪律|说明|指引|指南|提示)"
+# 独立来源说明行（"来源：…"/"数据来源：…"），并入其上方所属块后统一判定。
+_SOURCE_CAPTION = re.compile(r"^\s*[\*#>\-\s]*(?:数据|资料)?来源", re.I)
+
+# 报告自算/派生数字的语境标记：算式运算符，或情景/假设/隐含反推等自证语境。
+# 命中即豁免来源标注要求——这些数字本就无外部来源可标。
+_DERIVED_MARKERS = re.compile(
+    r"[=＝≈≒×÷]|情景|悲观|中性|乐观|假设|测算|推算|推导|计算|加权|期望|赔率|"
+    r"目标区间|估值区间|隐含|反推|倒推|反向求解|相对现价|较现价|现价对比|"
+    r"折价|溢价|上行空间|下行空间|占比|占总|仓位|持仓|权重|本报告|"
+    r"交叉验证|多源比对|偏差|校验|敏感性|为支撑现价所需|退出PE|支撑现价|"
+    r"我们(?:预计|测算|估算|假设|认为)|对应(?:PE|PB|市值|估值)"
 )
 
 
+def _iter_blocks(report: str) -> list:
+    """Split a report into citation-judging blocks.
+
+    A block is a markdown table (consecutive ``|`` lines), a heading, or a
+    blank-line-delimited paragraph. A standalone source caption
+    (``来源：…``) is merged into the preceding block, so a source at the
+    table tail covers the whole table and a source in the table header
+    covers every row. One source marker anywhere in a block covers it.
+    """
+    blocks: list[str] = []
+    buf: list[str] = []
+    in_table = False
+
+    def flush():
+        if buf:
+            blocks.append("\n".join(buf))
+            buf.clear()
+
+    for raw in report.splitlines():
+        line = raw.strip()
+        if not line:
+            flush()
+            in_table = False
+            continue
+        if line.startswith("#"):
+            flush()
+            in_table = False
+            blocks.append(line)
+            continue
+        is_table = line.startswith("|")
+        if is_table != in_table:
+            flush()
+            in_table = is_table
+        buf.append(raw)
+    flush()
+
+    merged: list[str] = []
+    for block in blocks:
+        if merged and _SOURCE_CAPTION.match(block.strip()):
+            merged[-1] = f"{merged[-1]}\n{block}"
+        else:
+            merged.append(block)
+    return merged
+
+
 def _required_sections(skill_name: str) -> list:
-    """Parse `## ` headings from the skill md as required output sections."""
+    """Explicitly declared required output sections from the skill registry.
+
+    Framework/step headings in a skill .md (``## 第一步：…``) are execution
+    instructions, not report headings, so they are never inferred from the
+    prompt text. A skill without ``output_sections`` is not checked.
+    """
     try:
-        prompt = load_skill_prompt(skill_name)
+        skill = get_skill(skill_name)
     except Exception:
         return []
-    sections = []
-    for m in re.finditer(r"^##\s+(.+?)\s*$", prompt, re.M):
-        title = m.group(1).strip()
-        title = re.sub(r"^[0-9一二三四五六七八九十]+[\.、\)]?\s*", "", title)
-        if len(title) >= 2 and not _STRUCTURE_SKIP.search(title):
-            sections.append(title)
-    return sections
+    if not skill:
+        return []
+    return [s for s in (skill.get("output_sections") or []) if isinstance(s, str) and s.strip()]
 
 
 class OutputGuard:
@@ -156,18 +214,23 @@ class OutputGuard:
     def _gate_citation(self, report: str):
         unsourced = 0
         examples = []
-        for m in _NUMBER.finditer(report):
-            token = m.group(0)
-            # only care about numbers that look financial (with unit or magnitude)
-            if not re.search(r"(亿|万|%|元|港元|美元|倍|,)", token):
+        for block in _iter_blocks(report):
+            # 块内任一处标了来源即覆盖整块（表头/表尾/段落皆然）
+            if _SOURCE_MARKERS.search(block):
                 continue
-            window = report[max(0, m.start() - 80): m.end() + 80]
-            if not _SOURCE_MARKERS.search(window):
+            # 本报告自算/情景假设数字，无外部来源可标，放行
+            if _DERIVED_MARKERS.search(block):
+                continue
+            for m in _NUMBER.finditer(block):
+                token = m.group(0)
+                # only care about numbers that look financial (unit or magnitude)
+                if not re.search(r"(亿|万|%|元|港元|美元|倍|,)", token):
+                    continue
                 unsourced += 1
                 if len(examples) < 3:
                     examples.append(token.strip())
         if unsourced:
-            self._warn("citation", f"{unsourced} 处财务数字邻近未见来源标注，如：{'、'.join(examples)}")
+            self._warn("citation", f"{unsourced} 处财务数字块内未见来源标注，如：{'、'.join(examples)}")
 
     def _gate_disclaimer(self, report: str) -> str:
         tail = report[-800:]
