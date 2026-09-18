@@ -69,6 +69,9 @@ SKILLS = [
         "is_multi_agent": False,
         "agent_count": 1,
         "tools_enabled": True,
+        # 结构门闸只认显式声明的报告章节；技能文档里的"第一步/第二步…"
+        # 是执行流程，不是报告必备章节。
+        "output_sections": ["机构观点总览", "主流机构观点归纳", "独立判断"],
         "input_hint": "A股公司名或代码，如：查看贵州茅台(600519)的最新券商研报与机构观点",
     },
     {
@@ -233,6 +236,8 @@ SKILLS = [
         # P5：被评审者一轮答辩权，筛掉截断/误读产生的假分歧
         "debate_rebuttal": True,
         "agents": ["company-event-scout", "regulatory-watcher", "industry-peer-analyst", "sentiment-tracker"],
+        # 输出章节（multi 策略下结构门闸只校验顶层标题，此处登记以声明契约）
+        "output_sections": ["一句话归因", "事件时间线", "异动归因表", "性质判断", "行动建议"],
         "input_hint": "描述异动情况，如：腾讯今天跌了5%，帮我归因",
     },
     {
@@ -246,6 +251,8 @@ SKILLS = [
         # fetch_market_indices / get_stock_price，需走 function-calling 循环，
         # 否则模型只会输出 <tool_calls> 文本标记（DSML 泄漏根因）。
         "tools_enabled": True,
+        # 报告模板章节（见 daily-briefing.md「报告结构（严格按此模板）」）
+        "output_sections": ["一、数据快照", "二、补充说明", "三、信息边界说明"],
         "input_hint": "留空生成今日日报，或描述关注方向，如：关注新能源和腾讯的今日动态",
     },
 
