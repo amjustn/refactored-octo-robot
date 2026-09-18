@@ -271,7 +271,10 @@ def update_entry_fields(task_id: str, fields: dict) -> bool:
         # Only touch matching entries — 同一任务可能产生多条同名决策,
         # 全部更新(不 break), 避免第二条漏更新。
         lines = sec.split("\n")
-        matched = any(f"**任务ID**: {task_id}" in ln for ln in lines[:12])
+        # 批D(2026-09-18): 旧版只扫 lines[:12] —— 带「最新价/复核」的条目任务ID
+        # 排到第 13 行及以后，永远匹配不到，写回静默失败（81 条里 72 条）。
+        # 每个 section 只含一个条目，直接扫全段；task_id 匹配的是完整字段行。
+        matched = any(f"**任务ID**: {task_id}" in ln for ln in lines)
         if not matched:
             continue
         found = True
@@ -387,6 +390,11 @@ def load_decisions(arguments: str, max_entries: int = 5) -> str:
         else:
             head.append("历史各版未给出明确买卖口径（多为描述性结论），本次请给出明确立场。")
 
+        # 批D(2026-09-18): 上次决策详情。旧版只注入一句「上次结论」，把上次的
+        # 关键假设与算出的目标价/区间全丢了（"只记得我看过，不记得为什么、按什么价"）。
+        # 只对最新一版展开以控制体积，并放在头部 —— 预算裁剪从尾部切，头部先保住。
+        head += _last_decision_detail(last_e)
+
         if conflict:
             L, P = conflict["last"], conflict["prev"]
             head += [
@@ -447,8 +455,9 @@ def load_decisions(arguments: str, max_entries: int = 5) -> str:
                              "请先验证其关键假设是否仍然成立，再决定是否参考")
         lines += [
             "",
-            "请基于以上复盘（含冲突与重复标注）更新你的分析，特别关注验证状态为"
-            "已证伪/已过期的历史结论——它们意味着上次判断被市场否定或失效。",
+            "请基于以上复盘（含冲突与重复标注）更新你的分析。验证行只记录记录价以来的"
+            "价格变动与观察窗口——那是市场短期投票的结果，不代表论点对错；请结合结论与"
+            "关键假设自行判断上次判断是否仍然成立。",
         ]
 
         logger.info(f"Loaded {len(shown)}/{len(group)} past decisions for "
@@ -466,9 +475,10 @@ def load_decisions(arguments: str, max_entries: int = 5) -> str:
 # 描述性结论（"这是一门好生意"）一律 未判定 —— 给描述性结论乱贴"看多"
 # 比不贴更有害，会污染报告头并误导后续判断。
 _STANCE_BEAR_KEYS = ("不建议", "不宜", "不推荐", "不参与", "别买", "不会买", "回避",
-                     "卖出", "减仓", "止损", "看空", "已证伪", "证伪", "高估", "风险大于")
+                     "卖出", "减持", "减仓", "清仓", "止损", "看空", "悲观",
+                     "已证伪", "证伪", "高估", "风险大于", "不买入", "不追")
 _STANCE_BULL_KEYS = ("建议买入", "建议增持", "可以买入", "买入评级", "增持", "加仓",
-                     "看多", "值得买入", "显著低估", "低估")
+                     "买入", "重仓", "看多", "乐观", "值得买入", "显著低估", "低估")
 _STANCE_NEUTRAL_KEYS = ("持有", "观望", "等待", "HOLD", "中性", "合理区间", "合理估值",
                         "不便宜", "不贵", "安全边际不厚")
 _STANCE_LABEL = {"bear": "谨慎/看空", "bull": "看多",
@@ -540,6 +550,29 @@ def _brief(text: Optional[str], limit: int = 60) -> str:
     return s[:limit] + ("…" if len(s) > limit else "")
 
 
+def _last_decision_detail(e: dict) -> list:
+    """最新一版决策详情（结论/关键假设/目标价/置信度/记录价）。
+
+    旧版注入只有一句「上次结论」，上次用了什么假设、算出的目标价与区间全部
+    丢失。这里把最新一版的推理依据与数字一并带上，供本次沿用或反驳。
+    字段为空或「未指定」时省略，避免往上下文里塞噪音。
+    """
+    detail = ["", "### 上次决策详情（最新一版）"]
+    conc = _one_line(e.get("conclusion") or "")
+    if conc:
+        detail.append(f"- 结论: {conc[:200]}")
+    for label, key, limit in (
+        ("关键假设", "assumptions", 200),
+        ("目标价/信号", "target", 80),
+        ("置信度", "confidence", 40),
+        ("记录价", "record_price", 40),
+    ):
+        val = _one_line(e.get(key) or "")
+        if val and val != "未指定":
+            detail.append(f"- {label}: {val[:limit]}")
+    return detail if len(detail) > 2 else []
+
+
 def _dup_key(e: dict) -> tuple:
     """重复判定键：结论归一文本 + 记录价。空键（无结论）不参与合并。"""
     norm = _norm_conclusion(e)
@@ -556,13 +589,15 @@ def _norm_conclusion(e: dict) -> str:
     return s
 
 
-def _classify_stance(e: dict) -> str:
-    """从结论/目标价文本判立场: bear / bull / neutral / unknown。
+def classify_stance(conclusion: str, target: str = "") -> str:
+    """结论/目标文本 → 立场: bear / bull / neutral / unknown。
 
-    判定顺序 bear → bull → neutral：否定口径必须先判，
-    "不建议买入" 里的"买入"不能让整条变成 bull。
+    批D(2026-09-18): 全项目唯一口径。此前 decision_log._classify_stance 与
+    decision_verify._classify_conclusion 各写一套，且后者先判"买入"——
+    "不建议买入" 会被判成 buy，跌了反而标"已证伪"，方向完全反向。这里统一为
+    先否定(bear) → 再肯定(bull) → 中性(neutral)，两处调用共用。
     """
-    raw = _one_line((e.get("conclusion") or "") + " " + (e.get("target") or ""))
+    raw = _one_line((conclusion or "") + " " + (target or ""))
     if not raw:
         return "unknown"
     up = raw.upper()
@@ -576,6 +611,11 @@ def _classify_stance(e: dict) -> str:
         if kw.upper() in up:
             return "neutral"
     return "unknown"
+
+
+def _classify_stance(e: dict) -> str:
+    """dict 包装，保持既有调用方兼容；判定逻辑见 classify_stance。"""
+    return classify_stance(e.get("conclusion") or "", e.get("target") or "")
 
 
 def _code_variants(code: str) -> list[str]:
@@ -868,6 +908,104 @@ def _extract_stock_name(arguments: str) -> str:
     return arg[:15].rstrip("，,。. ")
 
 
+# 批D(2026-09-18): 结论抽取放宽。真实报告大量写成
+#   「### 一、一句话结论」「**最终结论：**」「## 九、结论」——
+# 标签独占一行、正文在下一行、甚至不带冒号；旧实现要求「标签后紧跟冒号且同行有
+# 正文」，这些报告全部静默漏记（澜起/茅台/中际旭创的多次分析即如此）。
+# 现按行匹配 + 下一行取正文；失败再回退旧正则，保证既有写法一条不漏。
+_CONCLUSION_LABELS = sorted(
+    [
+        "一句话结论", "综合结论", "最终结论", "核心结论", "投资结论", "研究结论",
+        "结论与行动建议", "结论与建议", "结论和建议",
+        "最终投资建议", "最终建议", "投资策略建议", "策略建议",
+        "当前操作建议", "当前建议", "当前结论",
+        "操作建议", "投资建议", "综合评级", "最终评级", "投资评级", "立场", "结论",
+    ],
+    key=len,
+    reverse=True,
+)
+
+_NUM_PREFIX_RE = re.compile(r"^[0-9一二三四五六七八九十]+[、.．)）]\s*")
+
+
+def _clean_conclusion_text(text: str) -> str:
+    """结论行清理：去加粗/引用/列表符号后再交给 _strip_conclusion。"""
+    s = (text or "").replace("**", "").replace("__", "")
+    s = s.lstrip(">* \t")
+    s = re.sub(r"^[-*]\s+", "", s)
+    return _strip_conclusion(s)
+
+
+def _next_conclusion_line(lines: list, idx: int, limit: int = 140) -> str:
+    """取标签行之后的第一个正文行；空行/分隔线跳过，遇标题或纯引语放弃。"""
+    for j in range(idx + 1, min(idx + 6, len(lines))):
+        s = lines[j].strip()
+        if not s or set(s) <= {"-", "—", "*", " ", "=", "|"}:
+            continue
+        if s.startswith("#"):
+            return ""
+        s = s.lstrip(">* \t")
+        s = re.sub(r"^[-*]\s+", "", s)
+        if not s:
+            continue
+        if len(s) >= 2 and s[0] in "“\"「" and s[-1] in "”\"」":
+            continue  # 纯引语行（"……"）不是结论
+        return s[:limit]
+    return ""
+
+
+def _is_intro_conclusion(c: str) -> bool:
+    """排除「结论如下：」这类引出句与反问句，它们不是结论本身。"""
+    if not c or len(c) < 2:
+        return True
+    if c.endswith(("：", ":", "如下", "如下：", "如下:")):
+        return True
+    if c.endswith(("？", "?")):
+        return True
+    if c.startswith("以下"):
+        return True
+    return False
+
+
+def _same_as_query(cand: str, arguments: str) -> bool:
+    """结论与用户提问逐字相同 → 是标题复述，不是结论。"""
+    def _norm(s: str) -> str:
+        return re.sub(r"[\s，。；、：:！？!?.,;\"'“”‘’（）()【】\[\]—\-~*]", "", s or "")
+    return bool(cand) and _norm(cand) == _norm(arguments)
+
+
+def _find_conclusion(report: str, arguments: str) -> tuple:
+    """按行找结论，返回 (结论文本, 命中标签)；找不到返回 ("", "")。
+
+    支持三种真实写法：
+      1. `**结论**：正文`（标签+冒号+同行正文）
+      2. `**最终结论：**`（标签独占一行，正文在下一行）
+      3. `### 一、一句话结论`（无冒号标题，正文在下一行）
+    """
+    lines = report.split("\n")
+    for i, raw in enumerate(lines):
+        s = raw.strip().lstrip(">#* \t")
+        s = re.sub(r"^[-*]\s+", "", s)
+        s = _NUM_PREFIX_RE.sub("", s)
+        for label in _CONCLUSION_LABELS:
+            if not s.startswith(label):
+                continue
+            after = s[len(label):].strip()
+            after = re.sub(r"^[（(][^）)]*[）)]", "", after).strip()
+            after = after.strip("*").strip()
+            cand = ""
+            if after[:1] in ("：", ":"):
+                cand = _clean_conclusion_text(after[1:]) or _clean_conclusion_text(
+                    _next_conclusion_line(lines, i)
+                )
+            elif after == "":
+                cand = _clean_conclusion_text(_next_conclusion_line(lines, i))
+            if cand and not _is_intro_conclusion(cand) and not _same_as_query(cand, arguments):
+                return cand, label
+            break
+    return "", ""
+
+
 def _extract_decision(report: str, arguments: str) -> Optional[dict]:
     """Extract investment decision from a research report.
 
@@ -876,34 +1014,30 @@ def _extract_decision(report: str, arguments: str) -> Optional[dict]:
     if not report or len(report) < 100:
         return None
 
-    # 结论标记模式（批B 2026-09-11 扩展）。真实报告里的写法比旧版 5 条多得多：
-    # 旧版只认 「**结论**：/ **投资建议**：/ **最终结论**：/ 投资建议：/ 操作建议：」，
-    # 而投资团队报告实际写的是「**综合结论：…**」「**综合评级：⚡持有（附条件）**」
-    # —— 一个都不匹配，于是结论静默不入库（英维克两篇即如此）。
-    # 冒号前的 `**` 用 `(?:\*\*)?` 兼容两种加粗写法：闭合在冒号前（**结论**：）
-    # 与"加粗在句首、闭合成对在句尾"（**综合结论：…**）。
-    patterns = [
-        ("综合结论", r"\*\*综合结论(?:\*\*)?\s*[：:]\s*([^\n]{2,140})"),
-        ("综合结论", r"综合结论[：:]\s*([^\n]{2,140})"),
-        ("综合评级", r"\*\*综合评级(?:\*\*)?\s*[：:]\s*([^\n]{2,140})"),
-        ("综合评级", r"综合评级[：:]\s*([^\n]{2,140})"),
-        ("最终评级", r"\*\*最终评级(?:\*\*)?\s*[：:]\s*([^\n]{2,140})"),
-        ("投资评级", r"\*\*投资评级(?:\*\*)?\s*[：:]\s*([^\n]{2,140})"),
-        ("最终结论", r"\*\*最终结论(?:\*\*)?\s*[：:]\s*([^\n]{2,140})"),
-        ("结论", r"\*\*结论(?:\*\*)?\s*[：:]\s*([^\n]{2,140})"),
-        ("投资建议", r"\*\*投资建议(?:\*\*)?\s*[：:]\s*([^\n]{2,140})"),
-        ("投资建议", r"投资建议[：:]\s*([^\n]{2,140})"),
-        ("操作建议", r"操作建议[：:]\s*([^\n]{2,140})"),
-    ]
-
-    conclusion = ""
-    matched = ""
-    for label, pat in patterns:
-        m = re.search(pat, report)
-        if m:
-            conclusion = _strip_conclusion(m.group(1))
-            matched = label
-            break
+    conclusion, matched = _find_conclusion(report, arguments)
+    if not conclusion:
+        # 回退旧正则（批B 2026-09-11 的写法表）——新抽取器失败时兜底，
+        # 确保历史已能抓到的写法不因本次放宽而丢失。
+        patterns = [
+            ("综合结论", r"\*\*综合结论(?:\*\*)?\s*[：:]\s*([^\n]{2,140})"),
+            ("综合结论", r"综合结论[：:]\s*([^\n]{2,140})"),
+            ("综合评级", r"\*\*综合评级(?:\*\*)?\s*[：:]\s*([^\n]{2,140})"),
+            ("综合评级", r"综合评级[：:]\s*([^\n]{2,140})"),
+            ("最终评级", r"\*\*最终评级(?:\*\*)?\s*[：:]\s*([^\n]{2,140})"),
+            ("投资评级", r"\*\*投资评级(?:\*\*)?\s*[：:]\s*([^\n]{2,140})"),
+            ("最终结论", r"\*\*最终结论(?:\*\*)?\s*[：:]\s*([^\n]{2,140})"),
+            ("结论", r"\*\*结论(?:\*\*)?\s*[：:]\s*([^\n]{2,140})"),
+            ("投资建议", r"\*\*投资建议(?:\*\*)?\s*[：:]\s*([^\n]{2,140})"),
+            ("投资建议", r"投资建议[：:]\s*([^\n]{2,140})"),
+            ("操作建议", r"操作建议[：:]\s*([^\n]{2,140})"),
+        ]
+        for label, pat in patterns:
+            m = re.search(pat, report)
+            if m:
+                candidate = _strip_conclusion(m.group(1))
+                if candidate:
+                    conclusion, matched = candidate, label
+                    break
 
     if not conclusion:
         return None
