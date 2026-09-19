@@ -26,6 +26,8 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))          # 复用自清理 helper
+from verify_cleanup import VERIFY_ARG_MARK, cleanup_task  # noqa: E402
 sys.path.insert(0, str(ROOT))          # 让 app.* 可导入（脚本必须能直接跑）
 
 RESULTS: list[tuple[str, str, str, str]] = []
@@ -159,7 +161,7 @@ def main() -> int:
         else:
             payload = {
                 "skill_name": "investment-research",
-                "arguments": "验证用例-缺Key拦截-请勿当真",
+                "arguments": f"{VERIFY_ARG_MARK}缺 Key 拦截（请勿当真）",
                 "llm_config": {"model": "qwen3.8-max",
                                "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1"},
             }
@@ -167,8 +169,13 @@ def main() -> int:
             err = str((body or {}).get("error", "")) if isinstance(body, dict) else str(body)
             status = (body or {}).get("status") if isinstance(body, dict) else None
             ok = st == 200 and status == "failed" and "缺少 API Key" in err and dt < 20
+            tid = (body or {}).get("task_id") if isinstance(body, dict) else None
+            cleanup_note = ""
+            if tid:
+                cl = cleanup_task(tid)
+                cleanup_note = (f"；已自动清理 {tid}（报告 {len(cl['reports'])} 份、"                                f"DB 行 {cl['db_rows']}）")
             record("R7", "端到端：缺 Key 请求秒失败（不再吃 401/不耗 5 分钟）", ok,
-                   f"HTTP={st} status={status} 用时={dt}s error={err[:70]!r}")
+                   f"HTTP={st} status={status} 用时={dt}s error={err[:60]!r}{cleanup_note}")
 
     # ── R8 数据源熔断：摘除不是永久生效，冷却后能半开探活恢复 ──
     from app.harness.tools import CircuitBreaker, get_gateway

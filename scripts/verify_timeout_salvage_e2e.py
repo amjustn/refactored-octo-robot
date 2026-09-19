@@ -27,6 +27,8 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))          # 复用自清理 helper
+from verify_cleanup import VERIFY_ARG_MARK, cleanup_task  # noqa: E402
 RESULTS: list[tuple[str, str, bool, str]] = []
 
 
@@ -76,6 +78,7 @@ def main() -> int:
     env = dict(os.environ)
     env["AGENT_TIMEOUT"] = str(args.agent_timeout)
     log_path = ROOT / "logs" / f"verify_timeout_e2e_{args.port}.log"
+    tid = None
     logf = open(log_path, "w", encoding="utf-8")
     proc = subprocess.Popen(
         ["venv/bin/python", "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1",
@@ -102,7 +105,8 @@ def main() -> int:
 
         st, res, dt = http_json(base + "/api/research", {
             "skill_name": "investment-team",
-            "arguments": "300308",
+            # 打标记：脚本被强杀时兜底扫描（verify_cleanup.py）也能认出残留
+            "arguments": f"{VERIFY_ARG_MARK}300308 超时抢救",
         }, jwt=jwt, timeout=900)
         res = res if isinstance(res, dict) else {}
         status = res.get("status")
@@ -142,7 +146,18 @@ def main() -> int:
         except Exception:
             proc.kill()
         logf.close()
-        print(f"临时实例已关闭（日志留在 {log_path}）")
+        print(f"临时实例已关闭")
+        # ── 自清理：验证造出来的任务/报告/留痕一个都不留（用户要求）──
+        if tid:
+            cl = cleanup_task(tid)
+            print(f"已自动清理 {tid}：报告 {len(cl['reports'])} 份、"
+                  f"留痕 {'有' if cl['scratchpad'] else '无'}、DB 行 {cl['db_rows']}"
+                  + (f"、错误 {cl['errors']}" if cl["errors"] else ""))
+        if all(r[2] for r in RESULTS):
+            log_path.unlink(missing_ok=True)          # 全过 → 日志也清掉
+            print("全部断言通过，验证日志一并清理")
+        else:
+            print(f"⚠️ 有断言失败，保留日志供排查：{log_path}")
 
 
 if __name__ == "__main__":
