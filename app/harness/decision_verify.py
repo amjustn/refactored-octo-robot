@@ -5,7 +5,9 @@ time.  This module closes the loop:
 
 1. backfill_missing_prices(): 老条目(缺代码/记录价)按决策时点拉历史K线
    收盘价回填 — 让验证对历史决策立即生效。
-2. verify_pending_decisions(): 对照真实行情自动标记 已兑现/已证伪/已过期。
+2. verify_pending_decisions(): 对照真实行情判定结论方向（内部 已兑现/已证伪/
+   已过期），但落盘只写中性事实（较记录价涨跌幅 / 观察窗口），不替模型下
+   "你对/你错"的结论（批D 2026-09-18）。
 
 Both are async (they call market-data tools / network).  Failures are
 per-entry and never fatal — a single bad entry is skipped, not an error.
@@ -20,7 +22,7 @@ import re
 from datetime import datetime, timezone
 from typing import Optional
 
-from .decision_log import list_decisions, update_entry_fields
+from .decision_log import classify_stance, list_decisions, update_entry_fields
 
 logger = logging.getLogger("ai_berkshire.harness.decision_verify")
 
@@ -210,13 +212,16 @@ async def _fetch_historical_price(code: str, asof: datetime) -> Optional[float]:
 async def backfill_missing_prices(limit: int = 50) -> dict:
     """Backfill code/record_price for entries missing them.
 
-    Returns a summary dict {backfilled, skipped, retry_later, failed} for
-    logging.  Entries whose code search fails with a network error are
-    left untouched (retry_later) so a later run can try again — a network
-    outage must never permanently skip an entry.
+    Returns a summary dict {backfilled, skipped, retry_later, failed,
+    write_failed} for logging.  Entries whose code search fails with a
+    network error are left untouched (retry_later) so a later run can try
+    again — a network outage must never permanently skip an entry.
+    write_failed counts entries whose field write-back could not locate the
+    entry (批D 2026-09-18): "判了但没落盘" 必须可见，不能静默。
     """
     entries = list_decisions(max_entries=1000)
-    summary = {"backfilled": 0, "skipped": 0, "retry_later": 0, "failed": 0}
+    summary = {"backfilled": 0, "skipped": 0, "retry_later": 0, "failed": 0,
+               "write_failed": 0}
     processed = 0
 
     for e in entries:
@@ -235,8 +240,11 @@ async def backfill_missing_prices(limit: int = 50) -> dict:
         stock = e.get("stock") or ""
         asof = _parse_ts(e.get("time") or "")
         if not asof:
-            update_entry_fields(task_id, {"验证": "跳过:时间无法解析"})
-            summary["skipped"] += 1
+            if update_entry_fields(task_id, {"验证": "跳过:时间无法解析"}):
+                summary["skipped"] += 1
+            else:
+                summary["write_failed"] += 1
+                logger.warning(f"backfill: write-back MISS for {stock} task={task_id or '(空)'}")
             continue
 
         # 1) resolve code: local map first, then async search
@@ -253,27 +261,38 @@ async def backfill_missing_prices(limit: int = 50) -> dict:
             if results:
                 code = results[0].get("symbol")
         if not code:
-            update_entry_fields(task_id, {"验证": "跳过:无法解析代码"})
-            summary["skipped"] += 1
+            if update_entry_fields(task_id, {"验证": "跳过:无法解析代码"}):
+                summary["skipped"] += 1
+            else:
+                summary["write_failed"] += 1
+                logger.warning(f"backfill: write-back MISS for {stock} task={task_id or '(空)'}")
             continue
 
         # 2) fetch price at decision time
         price = await _fetch_historical_price(code, asof)
         if price is None:
-            update_entry_fields(
+            ok = update_entry_fields(
                 task_id,
                 {"代码": code, "验证": f"跳过:行情不可用({asof.strftime('%Y-%m-%d')})"},
             )
-            summary["skipped"] += 1
+            if ok:
+                summary["skipped"] += 1
+            else:
+                summary["write_failed"] += 1
+                logger.warning(f"backfill: write-back MISS for {stock} task={task_id or '(空)'}")
             continue
 
         # 3) write back
-        update_entry_fields(
+        ok = update_entry_fields(
             task_id,
             {"代码": code, "记录价": f"{price:.2f}", "验证": "待验证"},
         )
-        summary["backfilled"] += 1
-        logger.info(f"Backfilled {stock}: {code} @ {price:.2f} ({asof.strftime('%Y-%m-%d')})")
+        if ok:
+            summary["backfilled"] += 1
+            logger.info(f"Backfilled {stock}: {code} @ {price:.2f} ({asof.strftime('%Y-%m-%d')})")
+        else:
+            summary["write_failed"] += 1
+            logger.warning(f"backfill: write-back MISS for {stock} task={task_id or '(空)'}")
 
     return summary
 
@@ -281,15 +300,15 @@ async def backfill_missing_prices(limit: int = 50) -> dict:
 # ==================== 验证判定 ====================
 
 def _classify_conclusion(conclusion: str) -> str:
-    """Map conclusion text to a direction: buy / sell / hold / unknown."""
-    c = conclusion or ""
-    if any(k in c for k in ("买入", "增持", "加仓", "重仓", "看多", "乐观")):
-        return "buy"
-    if any(k in c for k in ("卖出", "减持", "减仓", "回避", "看空", "悲观", "清仓")):
-        return "sell"
-    if any(k in c for k in ("持有", "观望", "等待", "中性", "HOLD", "hold")):
-        return "hold"
-    return "unknown"
+    """Map conclusion text to a direction: buy / sell / hold / unknown.
+
+    批D(2026-09-18): 唯一口径来自 decision_log.classify_stance（先否定后肯定）。
+    旧版此处先判"买入"，"不建议买入"会被判成 buy，价格下跌反标"已证伪"——
+    方向完全反向。两处分类器并存正是这次 bug 的温床，现合并为一处。
+    """
+    return {"bear": "sell", "bull": "buy", "neutral": "hold"}.get(
+        classify_stance(conclusion), "unknown"
+    )
 
 
 def _extract_target_price(target: str) -> Optional[float]:
@@ -307,6 +326,12 @@ def judge_entry(e: dict, current_price: float, now: Optional[datetime] = None) -
 
     Returns one of: 已兑现 / 已证伪 / 已过期 / 待验证.
     Pure function — no I/O, unit-test friendly.
+
+    批D(2026-09-18) 三处修正：
+    - 顺序：先判阈值/目标价，最后才判年龄。旧版先查 90 天，一个第 91 天才涨过
+      +8% 的正确买点会被吞成"已过期"，判赢的机会没了。
+    - 目标价分支方向感知：sell 的下行目标价被向上击穿是"证伪"，不是"兑现"。
+    - direction 由 decision_log.classify_stance 统一判定（先否定后肯定）。
     """
     now = now or datetime.now(timezone.utc)
     record_price = e.get("record_price")
@@ -315,39 +340,78 @@ def judge_entry(e: dict, current_price: float, now: Optional[datetime] = None) -
     except (TypeError, ValueError):
         return "待验证"  # no base price → cannot judge
 
-    # Age check: 超90天仍无定论 → 过期(只对结论尚未验证的条目)
-    asof = _parse_ts(e.get("time") or "")
-    if asof:
-        age_days = (now - asof).total_seconds() / 86400
-        if age_days > VERIFY_MAX_AGE_DAYS:
-            return "已过期"
-
     ret = (current_price - base) / base
     direction = _classify_conclusion(e.get("conclusion") or "")
-
-    # 目标价优先: 现价达到目标价区间 → 兑现; 跌破记录价-8% → 证伪
     target_price = _extract_target_price(e.get("target") or "")
-    if target_price and target_price > 0:
-        if current_price >= target_price:
-            return "已兑现"
-        if ret <= -VERIFY_THRESHOLD:
-            return "已证伪"
-        return "待验证"
 
-    if direction == "buy":
+    # 目标价优先；方向必须参与 —— buy 看上破目标，sell 看下破目标。
+    # 方向一致性闸门：只有落在记录价正确一侧的目标才算该方向的目标。
+    # sell 结论若误抓到高于记录价的看多研报目标（如 601318 抓到"招银国际75.0元"），
+    # 那不是下行目标，忽略它，否则会拿牛市目标给空头判"兑现"。
+    target_valid = bool(target_price and target_price > 0 and (
+        (direction == "buy" and target_price > base)
+        or (direction == "sell" and target_price < base)
+    ))
+    if target_valid:
+        if direction == "sell":
+            if current_price <= target_price:
+                return "已兑现"          # 跌到空头目标 → 论点兑现
+            if ret >= VERIFY_THRESHOLD:
+                return "已证伪"          # 涨破记录价+8% → 卖飞
+        else:  # buy
+            if current_price >= target_price:
+                return "已兑现"          # 达到多头目标
+            if ret <= -VERIFY_THRESHOLD:
+                return "已证伪"          # 跌破记录价-8% → 证伪
+    elif direction == "buy":
         if ret >= VERIFY_THRESHOLD:
             return "已兑现"
         if ret <= -VERIFY_THRESHOLD:
             return "已证伪"
-        return "待验证"
-    if direction == "sell":
+    elif direction == "sell":
         if ret <= -VERIFY_THRESHOLD:
             return "已兑现"  # 避损成功
         if ret >= VERIFY_THRESHOLD:
             return "已证伪"  # 卖飞
-        return "待验证"
-    # hold / unknown → 不自动判定
+
+    # 阈值/目标价均未触发 → 最后才判年龄(超90天窗口 → 过期)
+    asof = _parse_ts(e.get("time") or "")
+    if asof and (now - asof).total_seconds() / 86400 > VERIFY_MAX_AGE_DAYS:
+        return "已过期"
     return "待验证"
+
+
+def _verify_fact(e: dict, status: str, current_price: float, now: datetime) -> str:
+    """把内部判定降级为中性事实（批D 2026-09-18）。
+
+    旧版直接写"已兑现/已证伪"——那是替模型下"你对/你错"的结论，而价格越过
+    ±8% 只是市场短期投票，不等于论点对错。这里只陈述可核对的客观事实：
+    记录价以来的涨跌幅、观察窗口。方向对错留给模型看结论自行判断。
+    status 仍用于内部统计与日志。
+    """
+    if status == "已过期":
+        asof = _parse_ts(e.get("time") or "")
+        days = int((now - asof).total_seconds() / 86400) if asof else None
+        return f"观察 {days} 天未越阈（窗口已过）" if days is not None else "观察窗口已过"
+    try:
+        base = float(e.get("record_price"))
+        ret = (current_price - base) / base * 100
+    except (TypeError, ValueError):
+        return "价格已刷新"
+
+    # 说明真实触发来源：目标价优先，其次 ±8% 阈值。别一律写成"越过阈值"——
+    # 目标价触发的条目涨跌幅可能远不到 8%（601318 就是 -4.9%）。
+    direction = _classify_conclusion(e.get("conclusion") or "")
+    target = _extract_target_price(e.get("target") or "")
+    if target and target > 0 and (
+        (direction == "buy" and target > base)
+        or (direction == "sell" and target < base)
+    ):
+        if direction == "sell" and current_price <= target:
+            return f"较记录价 {ret:+.1f}%（跌破目标价 {target:g}）"
+        if direction == "buy" and current_price >= target:
+            return f"较记录价 {ret:+.1f}%（达到目标价 {target:g}）"
+    return f"较记录价 {ret:+.1f}%（越过 ±{VERIFY_THRESHOLD * 100:.0f}% 阈值）"
 
 
 async def verify_pending_decisions(limit: int = 50) -> dict:
@@ -356,10 +420,10 @@ async def verify_pending_decisions(limit: int = 50) -> dict:
     Uses historical kline close (not intraday realtime) so noisy ticks do
     not flip ±8% thresholds, and to avoid hammering the realtime API.
 
-    Returns summary dict {verified, unchanged, skipped} for logging.
+    Returns summary dict {verified, unchanged, skipped, write_failed} for logging.
     """
     entries = list_decisions(max_entries=1000)
-    summary = {"verified": 0, "unchanged": 0, "skipped": 0}
+    summary = {"verified": 0, "unchanged": 0, "skipped": 0, "write_failed": 0}
     processed = 0
     now = datetime.now(timezone.utc)
 
@@ -387,23 +451,35 @@ async def verify_pending_decisions(limit: int = 50) -> dict:
 
         status = judge_entry(e, price, now)
         if status != "待验证":
-            update_entry_fields(
-                e.get("task_id") or "",
-                {
-                    "验证": status,
-                    "最新价": f"{price:.2f}",
-                    "上次验证": now.strftime("%Y-%m-%d %H:%M UTC"),
-                },
-            )
-            summary["verified"] += 1
-            logger.info(f"Verified {e.get('stock')}: {status} (record={record_price}, now={price:.2f})")
+            # 批D(2026-09-18): 落盘写中性事实，不写"已兑现/已证伪"这种替模型
+            # 下的强判断；内部 status 只用于统计与日志。
+            fields = {
+                "验证": _verify_fact(e, status, price, now),
+                "最新价": f"{price:.2f}",
+                "上次验证": now.strftime("%Y-%m-%d %H:%M UTC"),
+            }
         else:
             # 待验证也刷新最新价 — 复盘注入需要"记录价→当前价(涨跌幅)",
             # 否则 LLM 看不到上次判断后来涨跌了多少。
-            update_entry_fields(
-                e.get("task_id") or "",
-                {"最新价": f"{price:.2f}"},
+            fields = {"最新价": f"{price:.2f}"}
+
+        # 批D(2026-09-18): 写回必须校验返回值。旧版不看返回，条目定位失败也照样
+        # 记 verified/unchanged 并打日志，于是"判了 91 轮、库里 0 条已证伪"。
+        if not update_entry_fields(e.get("task_id") or "", fields):
+            summary["write_failed"] += 1
+            logger.warning(
+                f"verify: write-back MISS for {e.get('stock')} "
+                f"task={e.get('task_id') or '(空)'} status={status} — 条目未定位"
             )
+            continue
+
+        if status != "待验证":
+            summary["verified"] += 1
+            logger.info(
+                f"Verified {e.get('stock')}: {status} → 落盘「{fields['验证']}」"
+                f" (record={record_price}, now={price:.2f})"
+            )
+        else:
             summary["unchanged"] += 1
 
     return summary

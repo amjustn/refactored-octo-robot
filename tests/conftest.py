@@ -42,6 +42,21 @@ def _reset_harness_globals():
 
 
 @pytest.fixture(autouse=True)
+def _isolate_decision_log(monkeypatch, tmp_path):
+    """测试绝不许写生产 decision-log.md。
+
+    跑 runner 的用例会走到 `_asave_decision` → 真实的 DECISION_LOG_PATH，
+    把「测试目标」等假决策写进生产库（2026-09-17/18 已发生多次，污染注入）。
+    统一重定向到临时目录，任何用例都碰不到 data/decision-log.md。
+    显式自己 monkeypatch 该路径的用例不受影响（会覆盖本 fixture）。
+    """
+    from app.harness import decision_log
+    d = tmp_path / "decision-log-isolated"
+    monkeypatch.setattr(decision_log, "DECISION_LOG_PATH", d / "decision-log.md")
+    monkeypatch.setattr(decision_log, "DECISION_SKIP_PATH", d / "decision-skip-log.jsonl")
+
+
+@pytest.fixture(autouse=True)
 def _reset_rate_limiter():
     """每个用例前后清空 IP 限流桶（web_common 单一事实源，app.main 兼容再导出）。"""
     limiter = None

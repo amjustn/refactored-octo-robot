@@ -635,6 +635,16 @@ class TestDecisionVerify:
         assert judge_entry(e, 110, now) == "已证伪"   # 涨破记录价+8% → 卖飞
         assert judge_entry(e, 95, now) == "待验证"    # 未到目标未越阈
 
+    def test_judge_target_wrong_side_ignored(self):
+        """批D: 空头结论误抓到看多目标价(高于记录价) → 不作下行目标。"""
+        from datetime import datetime, timezone
+
+        from app.harness.decision_verify import judge_entry
+        now = datetime(2026, 9, 18, tzinfo=timezone.utc)
+        e = {"conclusion": "段永平大概率不会买", "record_price": "56.13",
+             "time": "2026-08-26 13:41 UTC", "target": "招银国际75.0元（+33.6%）"}
+        assert judge_entry(e, 53.37, now) == "待验证"   # -4.9%, 目标在错误一侧 → 忽略
+
     def test_verify_fact_is_neutral(self):
         """批D: 落盘是中性事实, 不含"已兑现/已证伪"这类强判断。"""
         from datetime import datetime, timezone
@@ -646,6 +656,16 @@ class TestDecisionVerify:
         assert "较记录价 -12.0%" in fact and "已证伪" not in fact
         expired = _verify_fact(e, "已过期", 101.0, now)
         assert "窗口已过" in expired and "已过期" not in expired
+
+    def test_verify_fact_reports_target_trigger(self):
+        """批D: 目标价触发的条目, 事实必须写"目标价"而不是"越过阈值"。"""
+        from datetime import datetime, timezone
+
+        from app.harness.decision_verify import _verify_fact
+        now = datetime(2026, 9, 1, tzinfo=timezone.utc)
+        e = {"record_price": "100", "time": "2026-08-10 10:00 UTC",
+             "conclusion": "卖出回避", "target": "目标价 80"}
+        assert "跌破目标价 80" in _verify_fact(e, "已兑现", 75.0, now)
 
     def test_tencent_symbol(self):
         from app.harness.decision_verify import _tencent_symbol
