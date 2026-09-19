@@ -54,7 +54,7 @@ class TestPricing:
             "claude-sonnet-4-6", "claude-opus-4-6-20260205",
             "gemini-3.6-flash", "gemini-3.5-flash", "gemini-2.5-pro",
             "gemini-2.5-flash", "gemini-2.0-flash",
-            "qwen3-max", "qwen3-plus", "qwen3-turbo", "qwen-vl-max", "qwen-vl-plus",
+            "qwen3.8-max", "qwen3.7-plus", "qwen3.8-flash",
             "ernie-4.5-turbo", "ernie-4.5", "ernie-4.0-turbo", "ernie-speed", "ernie-lite",
             "hunyuan-turbos", "hunyuan-t1", "hunyuan-a13b", "hunyuan-lite",
             "doubao-1.5-pro-256k", "doubao-1.5-lite-128k", "doubao-1.5-vision-pro",

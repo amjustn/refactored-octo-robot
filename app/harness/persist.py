@@ -78,14 +78,11 @@ MODEL_PRICING = {
     "gemini-2.5-flash": {"prompt": 1.0, "completion": 4.0},
     "gemini-2.0-flash": {"prompt": 1.0, "completion": 4.0},
     "gemini": {"prompt": 1.0, "completion": 4.0},
-    # 阿里通义 (dashscope.aliyuncs.com)
-    "qwen3-max": {"prompt": 4.0, "completion": 16.0},
-    "qwen3-plus": {"prompt": 2.0, "completion": 8.0},
-    "qwen3-turbo": {"prompt": 1.0, "completion": 4.0},
-    "qwen-vl-max": {"prompt": 2.0, "completion": 8.0},
-    "qwen-vl-plus": {"prompt": 1.0, "completion": 4.0},
-    "qwen-vl": {"prompt": 1.0, "completion": 4.0},
-    "qwen": {"prompt": 2.0, "completion": 8.0},
+    # 阿里通义千问 (dashscope.aliyuncs.com) — 2026-09 官方价，华北2(北京)，元/百万 Token
+    # 阶梯计费取第一档（常规请求落在最小 Token 区间）。
+    "qwen3.8-max": {"prompt": 12.0, "completion": 36.0},
+    "qwen3.7-plus": {"prompt": 2.0, "completion": 8.0},
+    "qwen3.8-flash": {"prompt": 0.8, "completion": 2.7},
     # 百度文心 (qianfan.baidubce.com)
     "ernie-speed": {"prompt": 0.5, "completion": 2.0},
     "ernie-lite": {"prompt": 0.5, "completion": 2.0},

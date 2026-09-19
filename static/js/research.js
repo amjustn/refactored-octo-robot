@@ -114,7 +114,7 @@ var _uploadedFiles = [];  // extracted text from uploaded files
 var _uploadedFileItems = [];  // uploaded file metadata for cumulative display
 
 // Known multimodal models
-var _MULTIMODAL_MODELS = ['gpt-4o', 'gpt-4-turbo', 'gpt-4-vision', 'gpt-5.6', 'gpt-5.5', 'gpt-5.4', 'claude-sonnet-5', 'claude-opus-5', 'claude-sonnet-4', 'claude-opus-4', 'claude-3', 'gemini', 'glm-4v', 'qwen-vl', 'qwenvl', 'doubao-vision', 'doubao-1.5-vision', 'llava', 'pixtral', 'yi-vision', 'grok-vision', 'gemma3'];
+var _MULTIMODAL_MODELS = ['gpt-4o', 'gpt-4-turbo', 'gpt-4-vision', 'gpt-5.6', 'gpt-5.5', 'gpt-5.4', 'claude-sonnet-5', 'claude-opus-5', 'claude-sonnet-4', 'claude-opus-4', 'claude-3', 'gemini', 'glm-4v', 'qwen3.8-max', 'qwen3.7-plus', 'doubao-vision', 'doubao-1.5-vision', 'llava', 'pixtral', 'yi-vision', 'grok-vision', 'gemma3'];
 
 function updateUploadVisibility() {
   // Upload row is always visible — vision model only affects image OCR quality

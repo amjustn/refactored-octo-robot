@@ -46,7 +46,7 @@ var LLM_PROVIDER_PRESETS = {
   qwen: {
     label: '阿里（通义千问）',
     base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-    models: ['qwen3-max', 'qwen3-plus', 'qwen3-turbo', 'qwen-vl-max', 'qwen-vl-plus']
+    models: ['qwen3.8-max', 'qwen3.7-plus', 'qwen3.8-flash']
   },
   baidu: {
     label: '百度（文心）',
