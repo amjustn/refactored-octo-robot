@@ -91,7 +91,10 @@ async def api_start_research(request: "Request", req: ResearchRequest):
         }
     if result.status == "cancelled":
         return {"task_id": result.task_id, "status": "cancelled", "error": result.error}
-    return {"task_id": result.task_id, "status": "failed", "error": result.error}
+    return {"task_id": result.task_id, "status": "failed", "error": result.error,
+            # 全员超时也把抢救出来的原始数据带回去，前端直接能渲染，
+            # 不必让用户去历史报告里找（空错误页对用户毫无价值）
+            "report": result.report or ""}
 
 
 @router.post("/api/cancel/{task_id}")

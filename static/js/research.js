@@ -645,6 +645,16 @@ async function batchResearch(args, attachments) {
       currentReport = data.report;
       updateAllAgents('completed');
       finishResearch(true, null, { duration: data.duration_seconds, tokens: data.tokens });
+    } else if (data.report) {
+      // 失败/全员超时，但后端抢救出了中断前取到的原始数据：直接渲染出来，
+      // 别让它只剩一页空错误（用户看不到数据等于白跑）。
+      currentReport = data.report;
+      document.getElementById('progress-area').style.display = 'none';
+      document.getElementById('result-area').style.display = 'block';
+      renderReport(data.report);
+      buildToc();
+      showToast('任务未跑完，但已保留中断前取到的原始数据（见报告正文）', 'warning');
+      finishResearch(false, data.error || '任务未跑完');
     } else {
       finishResearch(false, data.error || 'Unknown error');
     }

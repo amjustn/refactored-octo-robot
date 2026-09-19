@@ -14,7 +14,7 @@ from typing import AsyncGenerator, Awaitable, Callable, Optional
 
 from openai import AsyncOpenAI
 
-from .config import AGENT_TIMEOUT, LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
+from .config import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL, LLM_REQUEST_TIMEOUT
 
 logger = logging.getLogger("ai_berkshire.llm")
 
@@ -42,9 +42,34 @@ def get_client(base_url: str = None, api_key: str = None) -> AsyncOpenAI:
         _clients[key] = AsyncOpenAI(
             api_key=api_key,
             base_url=base_url,
-            timeout=AGENT_TIMEOUT,
+            timeout=LLM_REQUEST_TIMEOUT,
         )
     return _clients[key]
+
+
+def _norm_base(u: str) -> str:
+    return (u or "").strip().rstrip("/").lower()
+
+
+def custom_base_without_key(llm_config: dict = None) -> Optional[str]:
+    """自定义服务商但没带 Key —— 返回用户可读的错误，否则 None。
+
+    2026-09-19 线上踩过（task 3ca21a69f0ac / a031a4ac291e）：前端传了阿里的
+    base_url + model 却没有 api_key，于是拿服务端的 DeepSeek Key 去请求阿里，
+    每个 Agent 都吃 401「Incorrect API key provided」，任务只报「所有 4 个 Agent
+    均执行失败」，真正原因完全看不出来。这里在发请求之前就拦下并说清怎么修。
+    """
+    cfg = llm_config or {}
+    base = _norm_base(cfg.get("base_url") or "")
+    if not base or base == _norm_base(LLM_BASE_URL):
+        return None                      # 服务端网关：用服务端 Key，正常
+    if (cfg.get("api_key") or "").strip():
+        return None                      # 自带 Key，正常
+    return (
+        f"模型配置缺少 API Key：base_url 指向 {cfg.get('base_url')}，"
+        "但没带该服务商的 api_key。请到「模型设置」里补上它的 Key"
+        "（点「测试连接」确认通过），或把服务商切回「服务端网关」。"
+    )
 
 
 def _close_client_safely(client: AsyncOpenAI) -> None:

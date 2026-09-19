@@ -665,6 +665,17 @@ function saveLlmConfig() {
     return;
   }
 
+  // base_url 兜底（2026-09-19）：上面的 preset 白名单管不住「自定义」和手填地址 ——
+  // 只要最终接口地址不是服务端网关的、又没有自带 Key，后端就会拿服务端的
+  // DeepSeek Key 去请求它，回 401（线上 task a031a4ac291e 就是这么挂的）。
+  var _effBase = (baseUrl || info.base_url || '').trim().replace(/\/+$/, '').toLowerCase();
+  var _srvBase = (_serverBaseUrl || '').trim().replace(/\/+$/, '').toLowerCase();
+  if (_effBase && _srvBase && _effBase !== _srvBase && !apiKey) {
+    showToast('这个接口地址（' + (baseUrl || info.base_url) +
+      '）必须填写它自己的 API Key；留空会拿服务端 DeepSeek Key 去请求，必然 401', 'error');
+    return;
+  }
+
   var remember = !!(document.getElementById('llm-remember') || {}).checked;
 
   // Per-agent model config: read provider + model + url + key from each row
@@ -769,6 +780,15 @@ async function testLlmConfig() {
 
   if (!cfg.model && !cfg.base_url && !cfg.api_key) {
     resultEl.textContent = '请先填写配置';
+    resultEl.className = 'llm-test-result err';
+    return;
+  }
+
+  // 缺 Key 兜底：这个地址不是服务端网关的，就别测了 —— 说清楚要补什么
+  var _tb = (baseUrl || '').trim().replace(/\/+$/, '').toLowerCase();
+  var _sb = (_serverBaseUrl || '').trim().replace(/\/+$/, '').toLowerCase();
+  if (_tb && _sb && _tb !== _sb && !apiKey) {
+    resultEl.textContent = '✗ 这个接口地址需要它自己的 API Key（留空会拿服务端 DeepSeek Key 去请求，必然 401）';
     resultEl.className = 'llm-test-result err';
     return;
   }

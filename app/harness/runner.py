@@ -28,7 +28,10 @@ from typing import Optional
 
 from ..core.config import AGENT_TIMEOUT, MAX_PARALLEL_AGENTS
 from ..core.context import data_source_label  # 定义在 core/context.py，非 harness/context.py
-from ..core.llm import chat_complete, chat_complete_with_tools, chat_stream, get_usage, pop_tool_fallback
+from ..core.llm import (
+    chat_complete, chat_complete_with_tools, chat_stream,
+    custom_base_without_key, get_usage, pop_tool_fallback,
+)
 from ..models.schemas import AgentProgress
 from ..skills import build_user_prompt, get_skill
 from ..tools.valuation_guard import annotate_report, check_report
@@ -63,6 +66,12 @@ MAX_SAME_TOOL_CALLS_SINGLE = 8
 
 # ── P2: audit trail / scratchpad ─────────────────────────────────
 SCRATCHPAD_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "scratchpad"
+# 超时中断的 Agent 会把「中断前已取到的工具原始数据」交出来，用这个前缀标记。
+# ⚠️ resume 的复用判定必须把这类 artifact 当成「要重跑」（它只有数据、没有分析）。
+PARTIAL_SALVAGE_MARK = "[部分成果·超时中断]"
+SALVAGE_MAX_CALLS = 24          # 最多列多少次工具调用
+SALVAGE_PER_RESULT_CHARS = 900  # 每条结果截断长度
+SALVAGE_MAX_CHARS = 12000       # 整段部分成果的上限
 
 import re as _re
 
@@ -215,7 +224,16 @@ def get_tool_counts(task_id: str) -> dict:
 
 
 class AllAgentsFailedError(RuntimeError):
-    """Raised when every research agent in a multi-agent run failed."""
+    """Raised when every research agent in a multi-agent run failed.
+
+    report：本次运行仍产出的报告文本（全员超时时里面是「超时中断·仅原始数据」——
+    从 scratchpad 抢救回来的工具往返数据）。带上它，HTTP 失败响应与前端才不至于
+    只剩一页空错误，用户不用跑去历史报告里翻。
+    """
+
+    def __init__(self, message: str, report: str = ""):
+        super().__init__(message)
+        self.report = report or ""
 
 
 class AgentRunner:
@@ -456,6 +474,69 @@ class AgentRunner:
 
     # ---------- tool execution ----------
 
+    def _require_llm_config(self, llm_config: Optional[dict]) -> None:
+        """自定义服务商缺 Key 时立刻说清楚，别等 N 个 Agent 各吃一次 401。"""
+        err = custom_base_without_key(llm_config)
+        if err:
+            raise RuntimeError(err)
+
+    def _salvage_tool_trace(self, agent: str, timeout_s: int) -> str:
+        """超时中断时，把该 Agent 已执行的工具调用与结果捞回来。
+
+        工具型 Agent 走的是非流式 function-calling 循环（chat_complete_with_tools），
+        被 asyncio.wait_for 取消时中间文本没留存 —— 真正有价值的是已经取到的一手
+        数据，它们逐条落在 data/scratchpad/<task>.jsonl（_log_tool_call 写的）。
+        这里按 agent 过滤、按调用顺序渲染成「原始数据清单」，让超时不等于全白跑。
+
+        返回空串表示这次超时没捞到任何数据（调用方退回原错误文案）。
+        """
+        path = SCRATCHPAD_DIR / f"{self.task_id}.jsonl"
+        if not path.exists():
+            return ""
+        rows = []
+        try:
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except Exception:
+                        continue
+                    if (row.get("agent") or "") != agent:
+                        continue
+                    rows.append(row)
+        except Exception as e:
+            logger.warning(f"salvage scratchpad read failed ({self.task_id}/{agent}): {e}")
+            return ""
+        if not rows:
+            return ""
+        rows = rows[-SALVAGE_MAX_CALLS:]
+        out = [
+            f"{PARTIAL_SALVAGE_MARK} 本 Agent 没能在 {timeout_s}s 上限内跑完。"
+            f"以下是中断前已经取到的原始数据（{len(rows)} 次工具调用，未经模型分析、未经交叉验证）：",
+            "",
+        ]
+        used = 0
+        for i, row in enumerate(rows, 1):
+            res = str(row.get("result") or "").replace("\r", " ")
+            if len(res) > SALVAGE_PER_RESULT_CHARS:
+                res = res[:SALVAGE_PER_RESULT_CHARS] + "…（已截断）"
+            item = (f"{i}. `{row.get('tool')}` "
+                    f"{json.dumps(row.get('args') or {}, ensure_ascii=False)}\n   → {res}")
+            used += len(item)
+            if used > SALVAGE_MAX_CHARS:
+                out.append(f"……（其余 {len(rows) - i + 1} 次调用见 data/scratchpad/{self.task_id}.jsonl）")
+                break
+            out.append(item)
+        out += [
+            "",
+            f"> ⚠️ 数据已落缓存与调用留痕（`data/scratchpad/{self.task_id}.jsonl`）。"
+            "回任务列表点「继续任务」只会补跑本次超时/失败的 Agent，已完成的 Agent 直接复用。",
+        ]
+        return "\n".join(out)
+
     async def _log_tool_call(self, agent: str, tool_name: str, args: dict, result: str):
         """P2: append one JSONL line to the scratchpad file (non-fatal)."""
         try:
@@ -539,6 +620,7 @@ class AgentRunner:
         proper context). Tool-enabled roles use function calling; with
         stream=True non-tool roles stream tokens as chunk events.
         """
+        self._require_llm_config(llm_config)
         if agent_role and agent_role in AGENT_ROLE_PROMPTS:
             system_prompt = AGENT_ROLE_PROMPTS[agent_role]
             user_msg = _with_attachments(f"请分析以下目标：{arguments}", attachments)
@@ -640,6 +722,7 @@ class AgentRunner:
         直接沿用上次落库的辩论结论 checkpoint（空串表示上次辩论阶段
         已执行但未产出有效结论，同样不重跑）。
         """
+        self._require_llm_config(llm_config)
         skill = get_skill(skill_name)
         agent_names = skill.get("agents", [])
         post_synthesis_agents = skill.get("post_synthesis_agents", [])
@@ -711,8 +794,13 @@ class AgentRunner:
                 try:
                     name, result = await asyncio.wait_for(agent_task(name), timeout=AGENT_TIMEOUT)
                 except asyncio.TimeoutError:
-                    self._progress(name, "failed", "超时")
-                    result = f"[错误] Agent 超时 ({AGENT_TIMEOUT}s)"
+                    salvage = self._salvage_tool_trace(name, AGENT_TIMEOUT)
+                    if salvage:
+                        self._progress(name, "failed", "超时（已保留中断前取到的原始数据）")
+                        result = salvage
+                    else:
+                        self._progress(name, "failed", "超时")
+                        result = f"[错误] Agent 超时 ({AGENT_TIMEOUT}s)"
             # Strip DSML noise BEFORE persisting so partial reports are clean.
             clean = result if result.startswith("[错误]") else _strip_dsml(result)
             await self._save_artifact(name, clean)
@@ -735,10 +823,21 @@ class AgentRunner:
         success_count = 0
         failed_count = 0
         failed_details: list[tuple[str, str]] = []
+        partial_reports = ""
+        partial_count = 0
         for name, result in results:
             if result.startswith("[错误]"):
                 failed_count += 1
                 failed_details.append((name, result))
+                continue
+            if result.startswith(PARTIAL_SALVAGE_MARK):
+                # 超时中断但有原始数据：不进 success_count（不喂给辩论/综合，
+                # 半成品绝不能冒充完整分析），单独成节放进报告，别让 Agent 白跑。
+                partial_count += 1
+                failed_details.append((name, "超时中断（已保留原始数据）"))
+                partial_reports += (
+                    f"\n\n---\n## {get_role_label(name)}（未完成·超时中断）\n\n{result}\n"
+                )
                 continue
             success_count += 1
             role_label = get_role_label(name)
@@ -749,6 +848,20 @@ class AgentRunner:
             # E2: every research agent failed — flag a hard failure so harness
             # marks the task failed (the generic exception path still persists
             # a partial report built from the error artifacts).
+            if partial_reports:
+                # 全部超时但抢回了原始数据：把数据交出去（任务仍是 failed，
+                # 界面「继续任务」只补跑没跑完的 Agent），而不是甩一页空错误。
+                self.fatal_error = (
+                    f"所有 {failed_count + partial_count} 个 Agent 均未在 {AGENT_TIMEOUT}s 内跑完"
+                )
+                return (
+                    f"# AI Berkshire 投研报告（超时中断·仅原始数据）\n\n"
+                    f"**目标**：{arguments}\n\n"
+                    f"> ⚠️ {partial_count} 个 Agent 都没能在 {AGENT_TIMEOUT}s 上限内跑完，"
+                    "下面是它们中断前已经取到的原始数据（未经模型分析、未经交叉验证）。\n"
+                    "> 想要完整报告：回任务列表点「继续任务」，只会补跑这些没跑完的 Agent。\n"
+                    + partial_reports
+                )
             self.fatal_error = f"所有 {failed_count} 个 Agent 均执行失败"
             return f"# AI Berkshire 投研报告\n\n**目标**：{arguments}\n\n## 错误\n\n所有 {failed_count} 个 Agent 均执行失败，无法生成报告。\n\n请检查 LLM API 配置和网络连接。"
 

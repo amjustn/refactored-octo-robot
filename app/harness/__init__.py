@@ -300,7 +300,7 @@ async def _execute(spec: TaskSpec, bus: EventBus, prefill_results: Optional[dict
         # E2: every research agent failed — surface as a hard failure so the
         # task is marked failed.  The generic exception path still persists
         # a partial report built from the error artifacts.
-        raise AllAgentsFailedError(runner.fatal_error)
+        raise AllAgentsFailedError(runner.fatal_error, report=report)
     return report, runner.extra_warnings
 
 
@@ -541,7 +541,8 @@ async def run(
             if not report_saved:
                 await _save_partial_report(spec, repo, "失败", overwrite_name=report_overwrite)
             bus.emit(spec.task_id, EventType.ERROR, message=str(e))
-            return RunResult(task_id=spec.task_id, status="failed", error=str(e))
+            return RunResult(task_id=spec.task_id, status="failed", error=str(e),
+                             report=getattr(e, "report", "") or "")
 
         finally:
             _jobs.pop(spec.task_id, None)
@@ -552,6 +553,18 @@ async def run(
 
 
 # ==================== resume (断点续跑) ====================
+
+def _is_reusable_artifact(content: str) -> bool:
+    """artifact 内容能否直接复用（= 上次真的跑成了）。
+
+    两种不能复用：`[错误]` 开头（失败/超时无数据）与 `[部分成果` 开头
+    （超时中断但抢回了原始数据 —— 只有数据、没有分析结论，必须重跑）。
+    2026-09-19：后者是新增的，漏判会让续跑把半成品当成果直接跳过。
+    """
+    if not content:
+        return False
+    return not content.startswith("[错误]") and not content.startswith("[部分成果")
+
 
 async def prepare_resume(task_id: str, llm_override: Optional[dict] = None,
                          debate_confirm: bool = False) -> tuple:
@@ -698,7 +711,7 @@ async def prepare_resume(task_id: str, llm_override: Optional[dict] = None,
 
         post = set(skill.get("post_synthesis_agents", []))
         roster = [a for a in skill.get("agents", []) if a not in post]
-        prefill = {n: c for n, c in latest.items() if n in roster and not c.startswith("[错误]")}
+        prefill = {n: c for n, c in latest.items() if n in roster and _is_reusable_artifact(c)}
         debate_ckpt = latest_ckpt.get("debate")
         if not prefill and debate_ckpt is None:
             return None, "没有可复用的 Agent 成果，请整局重跑"
