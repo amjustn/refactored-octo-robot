@@ -291,6 +291,7 @@ async function startResearch() {
   // Hide other areas
   document.getElementById('empty-state').style.display = 'none';
   document.getElementById('history-area').style.display = 'none';
+  _reportOrigin = '';   // 新研究 → 「← 返回」回主页面，不再回历史列表原处
   document.getElementById('compare-area').style.display = 'none';
   document.getElementById('costs-area').style.display = 'none';
   document.getElementById('decisions-area').style.display = 'none';
@@ -443,6 +444,7 @@ function _streamResearchImpl(args, attachments, watchTaskId) {
           }
         } else {
           currentReport += data.content;
+          _reportOrigin = '';
           document.getElementById('progress-area').style.display = 'none';
           document.getElementById('result-area').style.display = 'block';
           scheduleRender();
@@ -875,6 +877,7 @@ function finishResearch(success, errorMsg, meta) {
   }
 
   if (currentReport && currentReport.indexOf('# 错误') !== 0) {
+    _reportOrigin = '';   // 本次研究生成的报告 → 返回回主页面
     document.getElementById('progress-area').style.display = 'none';
     document.getElementById('result-area').style.display = 'block';
     renderReport(currentReport);
