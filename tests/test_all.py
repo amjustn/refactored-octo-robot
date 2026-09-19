@@ -14,7 +14,7 @@ import tempfile
 from pathlib import Path
 from datetime import datetime, timedelta
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
@@ -333,7 +333,7 @@ class TestOrchestrator:
         assert "financial-analyst" in TOOL_ENABLED_AGENTS
         assert "industry-researcher" in TOOL_ENABLED_AGENTS
         assert "company-event-scout" in TOOL_ENABLED_AGENTS
-        assert "researcher" in TOOL_ENABLED_AGENTS
+        assert "macro-forecaster" in TOOL_ENABLED_AGENTS
         # Editor and reader-reviewer should NOT have tools
         assert "editor" not in TOOL_ENABLED_AGENTS
         assert "reader-reviewer" not in TOOL_ENABLED_AGENTS

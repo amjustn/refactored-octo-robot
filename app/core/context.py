@@ -138,10 +138,57 @@ def build_company_context(symbol: str, price_data: dict = None, news_data: list 
     return "\n".join(parts) if parts else ""
 
 
-def build_knowledge_context() -> str:
-    """Build investment philosophy context from knowledge base."""
+# ── 大师知识库注入范围（2026-09-13）────────────────────────────
+# 该知识库是四位投资大师（巴菲特/芒格/段永平/李录）的理念摘要，实测 4317 字符/次，
+# 原先在 build_full_context 里【无条件】注入给全部 21 个技能 —— 用户指出管理层深研 /
+# 未上市公司研究 / 券商研报这类技能与"大师视角"无关，属重复包装，要求删减。
+# 现改为按技能白名单注入；白名单依据 = 技能本体就是四大师框架（见各技能 .md）。
+# 知识库本身与定时抓取任务保留，白名单内技能照旧使用。
+MASTER_KB_SKILLS = {
+    "investment-research",   # 四大师综合分析（7 模块按四位大师视角编排）
+    "investment-team",       # 多 Agent 投研团队（4 个 Agent 各按一位大师视角）
+    "earnings-team",         # 财报精读团队（4 个 Agent 各按一位大师视角）
+    "thesis-tracker",        # 持仓评估（技能文件内即段永平/李录语录）
+}
+
+
+def build_knowledge_context(skill_name: str = "") -> str:
+    """Build investment philosophy context from knowledge base.
+
+    只对 MASTER_KB_SKILLS 内的技能注入；其余技能返回空串。
+    skill_name 缺省（无技能上下文）时同样不注入 —— 缺省关闭，避免"无条件注入"回归。
+    """
+    if skill_name not in MASTER_KB_SKILLS:
+        return ""
     from ..tools.knowledge_updater import get_knowledge_summary_for_prompt
     return get_knowledge_summary_for_prompt()
+
+
+def data_source_label(skill_name: str = "") -> str:
+    """报告头「数据源」标注。
+
+    只对 MASTER_KB_SKILLS 内的技能声称使用了大师知识库 —— 否则报告头会对
+    非白名单技能做出假陈述（2026-09-13 白名单化后同步收紧）。
+    """
+    return "实时市场数据" + (
+        " + 投资大师知识库" if skill_name in MASTER_KB_SKILLS else ""
+    )
+
+
+# ── 定期报告正文摘录（董监高/持股/薪酬）注入范围（2026-09-13）──────
+# 只有年报 PDF 里有完整的「董事和高级管理人员的情况」章节（实测 2025 年报 248 页，
+# 含持股变动/薪酬/离任与逝世等治理细节），半年报没有该章节。
+# 首次注入需下载 3~4MB PDF（实测 4.4s~35s 波动），命中缓存后 <0.01s（TTL 30 天），
+# 所以只对"管理层/财务精读"类技能开启，不给全部技能加首次下载成本。
+DOC_EXCERPT_SKILLS = {
+    "management-deep-dive",
+    "investment-research",
+    "earnings-team",
+    "earnings-review",
+    "thesis-tracker",
+    "deep-company-series",
+}
+DOC_EXCERPT_CHARS = 3000
 
 
 async def build_web_search_context(symbol: str = "", arguments: str = "", skill_name: str = "", search_query: str = "") -> str:
@@ -160,20 +207,42 @@ async def build_web_search_context(symbol: str = "", arguments: str = "", skill_
     """
     parts = []
 
-    # Build search keywords — ALWAYS prioritize user's own words
-    # The user's arguments (what they typed) are the ground truth.
-    # Symbol-based keywords are fallbacks for when arguments are absent.
-    if arguments:
-        # Primary keyword = user's exact input (truncated to 60 chars)
-        primary_keyword = arguments.strip()[:60]
-    elif symbol:
-        primary_keyword = symbol
-    else:
-        return ""
+    # ── 关键词构造（2026-09-13 重写）────────────────────────────
+    # 优先级：goal-parser 的 search_query 提示 > 目标公司+代码 > 清洗后的用户原话。
+    # 历史故障：原先把用户原话整句直接当搜索词发出去（"澜起科技你给我一个
+    # 深度报告 2026 最新"），门闸把整句中文当一个 token → 全源判"无结果"，
+    # 白等 14.6 秒后注入的还是无关的爬取噪声（实测 918 字符全是消费电子新闻）。
+    from ..tools.market_data import company_display_name
+    from ..tools.text_relevance import clean_search_keyword
 
-    # Goal-parser hint: a concise search query beats the raw (possibly long) goal
+    _cleaned_user = clean_search_keyword(arguments) if arguments else ""
+    _company = ""
+    if symbol:
+        try:
+            _company = company_display_name(symbol, arguments or "") or ""
+        except Exception:
+            _company = ""
+
+    primary_keyword = ""
     if search_query and search_query.strip():
-        primary_keyword = search_query.strip()[:60]
+        primary_keyword = clean_search_keyword(search_query) or search_query.strip()[:60]
+    elif symbol and _company:
+        if _cleaned_user and len(_cleaned_user) >= 6 and _cleaned_user != _company:
+            # 用户给了具体分析角度（如"渠道库存去化+批价走势"），保留其核心词
+            primary_keyword = _cleaned_user[:60]
+        else:
+            primary_keyword = f"{_company} {symbol.split('.')[0]}"
+    elif symbol:
+        primary_keyword = symbol if not _cleaned_user else f"{_cleaned_user} {symbol}"
+    elif _cleaned_user:
+        primary_keyword = _cleaned_user[:60]
+
+    if not primary_keyword:
+        # 清洗后没有任何可用检索词 → 直接跳过搜索，不要拿噪声词去搜
+        logger.info(
+            f"Auto web search skipped: 无可检索关键词 (arguments={str(arguments)[:40]!r})"
+        )
+        return ""
 
     parts.append("## 网络最新信息（自动搜索）")
     parts.append(f"*搜索关键词: {primary_keyword}*")
@@ -370,61 +439,36 @@ async def build_full_context(arguments: str = "", skill_name: str = "", goal_hin
             fetch_company_news,
             fetch_market_indices,
             get_stock_price,
+            resolve_symbol,
         )
 
-        # Try to extract stock symbol from arguments
-        # Strategy: 1) Check Chinese company name map 2) Regex for code patterns
-
-        # Goal-parser hints take priority when available:
-        # validated hint symbol → company-name resolution → legacy path below
+        # 标的解析统一走 market_data.resolve_symbol（2026-09-13）：
+        #   显式代码（环视断言，中文相邻也能命中）> 硬编码名表 > 全A名称索引。
+        # 历史故障：原正则用 \b 做边界，而中文也算 \w，于是
+        # "688981分析一下是否可以买入"/"能不能买300308" 永远匹配不到（137 个
+        # 历史任务里 9 个属此类）；硬编码表只有 143 条，沪深300 里按全名仅能
+        # 命中 14%，"澜起科技""长鑫科技"这类表外公司名解析为 None → 行情/新闻/
+        # 券商研报块全不注入，报告只能靠模型内部知识写。
+        _sym_source = "none"
         if goal_hints:
             _hint_symbol = (goal_hints.get("symbol") or "").strip()
             if _hint_symbol and re.match(
                 r'^\d{6}(\.(SH|SZ))?$|^\d{1,5}\.HK$|^[A-Za-z]{1,6}(\.HK)?$', _hint_symbol
             ):
                 symbol = _hint_symbol
+                _sym_source = "goal_hints"
             else:
                 _hint_company = (goal_hints.get("company") or "").strip()
                 if _hint_company:
                     symbol = _resolve_company_name(_hint_company)
+                    if symbol:
+                        _sym_source = "goal_hints_company"
 
         if symbol is None:
-            # 优先级: 显式股票代码(最强证据) > 公司名模糊匹配(最弱证据)
-            # 2026-08-27 修复: 原顺序名称匹配在前, "分析平安银行(000001)"因映射表
-            # 无"平安银行"全称而子串命中"平安"→601318(中国平安), 行情/新闻/研报
-            # 全部抓错标的。数字代码是用户显式给出的最强信号, 必须最先消费。
-            _FALSE_POSITIVES = {
-                "Q1", "Q2", "Q3", "Q4", "AI", "PE", "PB", "ROE", "ROI",
-                "EPS", "CEO", "CFO", "CTO", "IPO", "SPAC", "ETF", "API",
-                "GDP", "CPI", "PPI", "EBIT", "FCF", "DCA", "NAV", "AUM",
-                "YTD", "MTD", "QTD", "H1", "H2", "YOY", "MOM",
-                "IT", "HR", "PR", "US", "UK", "EU", "JP", "KR",
-                "URL", "PDF", "CSV", "HTML", "JSON", "XML",
-                # Single-letter false positives (A股, B股, H股, etc.)
-                "A", "B", "H", "T", "F", "C", "S", "P", "V", "D", "E",
-                "I", "K", "M", "N", "R", "U", "W", "X", "Y", "Z", "G", "L", "O", "J", "Q",
-                # Common financial abbreviations that could be tickers
-                "EBITDA", "CAPEX", "OPEX", "MARGIN", "CASH", "DEBT", "BOOK",
-                "SALE", "ASSET", "EBIT", "REVENUE", "PROFIT", "LOSS", "COST",
-                "BOOK", "DEEP", "GOOD", "REAL", "TICK", "BOND", "FUND",
-            }
-            symbol_match = re.search(
-                r'\b(\d{6}(?:\.SH|\.SZ|\.HK)?|[A-Za-z]{2,6}(?:\.HK)?)\b',
-                arguments
-            )
-            if symbol_match:
-                candidate = symbol_match.group(1).upper()
-                # Skip common false positives (only for short purely-alpha codes)
-                if candidate in _FALSE_POSITIVES and not re.match(r'^\d{6}', candidate):
-                    pass  # Don't use this as a symbol
-                else:
-                    symbol = candidate
-
-            if symbol is None:
-                # Fallback: resolve Chinese company names (腾讯, 茅台, 平安银行, etc.)
-                resolved = _resolve_company_name(arguments.strip())
-                if resolved:
-                    symbol = resolved
+            symbol, _sym_source = resolve_symbol(arguments or "")
+        logger.info(
+            f"标的解析: {str(arguments)[:30]!r} -> {symbol or '无标的'} (source={_sym_source})"
+        )
 
         _md = (fetch_market_indices, get_stock_price, fetch_company_news)
 
@@ -503,9 +547,64 @@ async def build_full_context(arguments: str = "", skill_name: str = "", goal_hin
             logger.debug(f"Broker context failed: {e}")
             return ""
 
+    async def _fetch_announcement_ctx():
+        # 2026-09-13 批2/P1：公告与定期报告注入（巨潮+东财+同花顺）。
+        # 正面解决"2026 半年报应已披露却写需要核实"：实测同一时刻同一标的，
+        # 无工具链路（3826 tokens）写"需要核实"，有工具链路给出精确数字。
+        # 2026-09-13 补（静态审计第 1 条）：正文经网页读不到（东财/巨潮详情页都是
+        # JS 空壳，实测只有 51/264 字符），改走巨潮原文 PDF 抽取董监高章节。
+        if not symbol:
+            return ""
+        _nm_hint = ""
+        try:
+            from ..tools.market_data import company_display_name
+            _nm_hint = company_display_name(symbol, arguments or "") or ""
+        except Exception:
+            _nm_hint = ""
+
+        def _sync():
+            from ..tools.announcements import format_announcement_context
+            blocks = [format_announcement_context(symbol, _nm_hint)]
+            if (skill_name or "") in DOC_EXCERPT_SKILLS:
+                from ..tools.announcement_docs import build_doc_context
+                doc = build_doc_context(symbol, _nm_hint, max_chars=DOC_EXCERPT_CHARS)
+                if doc:
+                    blocks.append(doc)
+            return "\n\n".join(b for b in blocks if b)
+
+        try:
+            # 首次要下 3~4MB PDF（实测 4.4s~35s），命中缓存 <0.01s，故超时给 90s
+            return await asyncio.wait_for(asyncio.to_thread(_sync), timeout=90.0) or ""
+        except Exception as e:
+            logger.debug(f"Announcement context failed: {e}")
+            return ""
+
+    async def _fetch_hibor_ctx():
+        # 2026-09-13 批2/P1：慧博机构研报注入。覆盖东财研报中心没有的
+        # 港股/美股研报（慧博"港美研究"频道实测 98 条/页可匿名抓取）。
+        if not symbol and not arguments:
+            return ""
+        try:
+            from ..tools.hibor_reports import aformat_hibor_context
+            from ..tools.market_data import company_display_name
+            from ..tools.text_relevance import clean_search_keyword
+            nm = company_display_name(symbol, arguments or "") if symbol else ""
+            # 关键词兜底：公司查询用简称，行业/主题查询用清洗后的用户词。
+            # 实测：慧博列表页按行业词命中良好（"半导体设备"→3 条、"商业航天"→1 条），
+            # 但中盘个股名字可能不在当天快照内 → 返回空块（诚实留白，不编造）。
+            kw = clean_search_keyword(arguments or "")[:40] or nm
+            return await asyncio.wait_for(
+                aformat_hibor_context(keyword=kw, symbol=symbol or "", company_name=nm or "", limit=12),
+                timeout=30.0,
+            ) or ""
+        except Exception as e:
+            logger.debug(f"HIBOR context failed: {e}")
+            return ""
+
     import asyncio
-    idx_ctx, comp_ctx, web_ctx, broker_ctx = await asyncio.gather(
+    idx_ctx, comp_ctx, web_ctx, broker_ctx, ann_ctx, hibor_ctx = await asyncio.gather(
         _fetch_indices_ctx(), _fetch_company_ctx(), _fetch_web_ctx(), _fetch_broker_ctx(),
+        _fetch_announcement_ctx(), _fetch_hibor_ctx(),
     )
     # Assemble sections in the same order as the sequential implementation
     if idx_ctx is not None:
@@ -514,6 +613,10 @@ async def build_full_context(arguments: str = "", skill_name: str = "", goal_hin
         parts.append(comp_ctx)
     if broker_ctx:
         parts.append(broker_ctx)
+    if ann_ctx:
+        parts.append(ann_ctx)
+    if hibor_ctx:
+        parts.append(hibor_ctx)
     if web_ctx:
         parts.append(web_ctx)
 
@@ -527,9 +630,9 @@ async def build_full_context(arguments: str = "", skill_name: str = "", goal_hin
         except Exception as e:
             logger.debug(f"Skill knowledge context failed: {e}")
 
-    # Add investment philosophy knowledge
+    # Add investment philosophy knowledge（仅 MASTER_KB_SKILLS 内的技能，2026-09-13）
     try:
-        knowledge = build_knowledge_context()
+        knowledge = build_knowledge_context(skill_name)
         if knowledge:
             parts.append(knowledge)
     except Exception as e:
@@ -572,7 +675,8 @@ async def build_full_context(arguments: str = "", skill_name: str = "", goal_hin
             + "2. 禁止生成\u201c观察清单\u201d、\u201c发布前展望\u201d、\u201c核心关注点\u201d、\u201c预览\u201d、\u201c指南\u201d等替代性内容。\n"
             + "3. 禁止用旧季度/旧年份的数据拼凑成用户要求的分析。\n"
             + "4. 只有确认数据确实存在且可获取时，才进行实际分析。\n"
-            + "5. 如果你的训练数据与用户指定的时间范围不一致，以用户为准并明确标注数据来源的时间。\n")
+            + "5. 如果你的训练数据与用户指定的时间范围不一致，以用户为准并明确标注数据来源的时间。\n"
+            + "6. 数据表格与成段的数据罗列，必须紧贴其后写出来源行（如：来源：2026年半年报 / 来源：东方财富研报中心 / 来源：<机构名> <日期> 研报）；表格的来源行写在表格正下方，不得只写在报告开头或结尾。自己推算/假设得到的数字标注为「本报告测算」，不得伪装成外部数据。\n")
         if goal_hints:
             _intent = (goal_hints.get("intent") or "").strip()
             if _intent:

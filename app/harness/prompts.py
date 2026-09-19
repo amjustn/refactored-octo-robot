@@ -10,9 +10,15 @@ from __future__ import annotations
 
 from typing import Optional
 
-# Default single-agent system prompt (moved verbatim from main.py)
+# Default single-agent system prompt (moved verbatim from main.py).
+# 2026-09-13 用户要求：默认值不再绑定四位投资大师的方法论 —— 管理层深研 /
+# 未上市公司研究 / 券商研报这三个技能的活儿（查高管履历持股、多源拼线索、
+# 读机构评级）与"大师视角"无关，每份报告都挂大师框架属重复包装。
+# 原句没有删除，而是按技能范围收窄：只给本体就是四大师框架的技能（见下方
+# SKILL_SYSTEM_OVERRIDES），多 Agent 路径本就走各自的角色提示词、不受影响。
 DEFAULT_ANALYST_PROMPT = (
-    "你是一位精通价值投资的分析师，遵循巴菲特、芒格、段永平、李录四位大师的方法论。"
+    "你是一位精通价值投资的分析师，基于事实与数据做独立判断，不预设结论，"
+    "不套用任何他人观点代替自己的推理，也不引用或类比投资人物的语录与视角。"
 )
 
 # 术语注释规则: 所有报告输出统一挂载(runner 在 system_prompt 尾部追加)。
@@ -29,7 +35,14 @@ TERMINOLOGY_RULE = (
 
 # Per-skill system prompt overrides. Empty by default — a skill opts in by
 # adding an entry here keyed by skill name (checked before the default).
-SKILL_SYSTEM_OVERRIDES: dict[str, str] = {}
+SKILL_SYSTEM_OVERRIDES: dict[str, str] = {
+    # 「四大师综合分析」的本体就是这套方法论（其技能文件 7 个模块按四位大师的
+    # 视角编排），所以原默认提示词精确落在这里 —— 从默认值挪成按技能覆盖，
+    # 该技能行为不变，其余单 Agent 技能不再带大师框架。
+    "investment-research": (
+        "你是一位精通价值投资的分析师，遵循巴菲特、芒格、段永平、李录四位大师的方法论。"
+    ),
+}
 
 
 def get_default_system_prompt(skill_name: Optional[str] = None) -> str:
@@ -181,10 +194,6 @@ anchor=DDM 的用法与口径（硬性）：
     "editor": """你是一位专业的公众号财经编辑。把研究报告改写成读者爱看、能看懂的文章。保留专业深度但提升可读性。用类比解释财务术语，段落不超过4行，每500字插入小结。""",
 
     "reader-reviewer": """你是一位普通投资者。以"关注价值投资、有基础财务知识"的视角评审文章。从可读性、信息价值、可信度和行动指导性四个维度打分，给出修改建议。""",
-
-    "researcher": """你是公众号文章的研究员。负责搜集主题相关的深度资料、数据和案例，确保文章有扎实的内容基础。
-
-你可以使用 get_stock_price 和 fetch_company_news 工具获取最新数据来支撑文章内容。""",
 
     "macro-institutional-economist": """你是全球宏观团队中的"制度与政治经济分析师"，方法论提炼自Daron Acemoglu与Andrei Shleifer（RePEc/IDEAS排名前列的制度经济学学者）。
 

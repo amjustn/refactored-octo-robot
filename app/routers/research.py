@@ -78,6 +78,7 @@ async def api_start_research(request: "Request", req: ResearchRequest):
         debate_confirm=bool(getattr(req, "debate_confirm", False)),
         debate_tools=getattr(req, "debate_tools", None),
         debate_rebuttal=getattr(req, "debate_rebuttal", None),
+        debate_stance=getattr(req, "debate_stance", None),
     )
     result = await harness_run(spec)
 
@@ -93,7 +94,10 @@ async def api_start_research(request: "Request", req: ResearchRequest):
         }
     if result.status == "cancelled":
         return {"task_id": result.task_id, "status": "cancelled", "error": result.error}
-    return {"task_id": result.task_id, "status": "failed", "error": result.error}
+    return {"task_id": result.task_id, "status": "failed", "error": result.error,
+            # 全员超时也把抢救出来的原始数据带回去，前端直接能渲染，
+            # 不必让用户去历史报告里找（空错误页对用户毫无价值）
+            "report": result.report or ""}
 
 
 @router.post("/api/cancel/{task_id}")
@@ -145,11 +149,13 @@ async def api_resume_task(request: "Request", task_id: str):
     # P5 交叉辩论增强开关（None=沿用 skill 元数据，默认关闭）
     debate_tools = body.get("debate_tools") if isinstance(body, dict) else None
     debate_rebuttal = body.get("debate_rebuttal") if isinstance(body, dict) else None
+    debate_stance = body.get("debate_stance") if isinstance(body, dict) else None
 
     plan, error = await harness_prepare_resume(task_id, llm_override=llm_config,
                                                debate_confirm=debate_confirm,
                                                debate_tools=debate_tools,
-                                               debate_rebuttal=debate_rebuttal)
+                                               debate_rebuttal=debate_rebuttal,
+                                               debate_stance=debate_stance)
     if error:
         raise HTTPException(status_code=400, detail=error)
 
@@ -198,6 +204,7 @@ async def ws_research(websocket: WebSocket, skill_name: str):
         # P5 交叉辩论增强开关（None=沿用 skill 元数据，默认关闭）
         debate_tools = req.get("debate_tools")
         debate_rebuttal = req.get("debate_rebuttal")
+        debate_stance = req.get("debate_stance")
     except json.JSONDecodeError:
         arguments = data
         attachments = ""
@@ -207,6 +214,7 @@ async def ws_research(websocket: WebSocket, skill_name: str):
         debate_confirm = False
         debate_tools = None
         debate_rebuttal = None
+        debate_stance = None
 
     if not _wc._ws_verify_jwt(token):
         await websocket.send_json({"type": "error", "message": "Unauthorized"})
@@ -248,6 +256,7 @@ async def ws_research(websocket: WebSocket, skill_name: str):
         debate_confirm=debate_confirm,
         debate_tools=debate_tools,
         debate_rebuttal=debate_rebuttal,
+        debate_stance=debate_stance,
     )
 
     # Subscribe BEFORE run() so no events are lost; forward bus → websocket.

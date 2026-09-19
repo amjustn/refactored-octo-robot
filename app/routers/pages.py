@@ -21,21 +21,17 @@ router = APIRouter()
 _SHORT_HINTS = {
     "investment-research": "公司名/代码",
     "investment-team": "公司名/代码",
-    "dyp-ask": "投资问题",
-    "investment-checklist": "多公司",
     "management-deep-dive": "管理层+公司名",
     "private-company-research": "公司名",
     "broker-reports": "A股代码/公司名",
     "deep-company-series": "公司名",
     "global-macro-analysis": "宏观问题",
     "china-macro-analysis": "宏观问题",
-    "wechat-article": "主题",
     "earnings-review": "公司名+季度",
     "earnings-team": "公司名+季度",
     "financial-data": "股票代码",
     "industry-research": "行业名",
     "industry-funnel": "行业/方向",
-    "quality-screen": "个股/行业",
     "bottleneck-hunter": "趋势名",
     "portfolio-review": "持仓清单",
     "thesis-tracker": "公司名",
@@ -129,10 +125,9 @@ MANUAL_HTML = """<!DOCTYPE html>
 <h2>典型使用场景</h2>
 <ol>
 <li><b>快速评估</b>：选「多Agent投研团队」→ 输入「美团」→ 开始研究</li>
-<li><b>对比多家</b>：选「巴菲特Checklist」→ 输入「茅台,五粮液,泸州老窖」</li>
 <li><b>行业选股</b>：选「行业漏斗筛选」→ 输入「机器人」</li>
 <li><b>持仓体检</b>：选「组合审视」→ 输入「腾讯30%,美团20%,茅台20%,现金30%」</li>
-<li><b>新闻归因</b>：选「新闻脉搏」→ 输入「腾讯 -5%」</li>
+<li><b>新闻归因</b>：选「股价异动归因」→ 输入「腾讯 -5%」</li>
 <li><b>每日复盘</b>：选「金融日报」→ 直接点开始（无需输入）</li>
 </ol>
 

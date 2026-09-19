@@ -300,7 +300,7 @@ async def _execute(spec: TaskSpec, bus: EventBus, prefill_results: Optional[dict
         # E2: every research agent failed — surface as a hard failure so the
         # task is marked failed.  The generic exception path still persists
         # a partial report built from the error artifacts.
-        raise AllAgentsFailedError(runner.fatal_error)
+        raise AllAgentsFailedError(runner.fatal_error, report=report)
     return report, runner.extra_warnings
 
 
@@ -465,6 +465,7 @@ async def run(
                 "by_model": billing.get("by_model", []),
                 "priced": billing.get("priced", True),
             }
+            from .runner import get_tool_counts as _get_tool_counts
             report_path = await repo.asave_report(
                 spec.skill_name, spec.arguments, report, duration, tokens,
                 summary=summary,
@@ -478,6 +479,8 @@ async def run(
                     "gates": sorted({str(w.get("gate") or "") for w in guard_warnings
                                      if isinstance(w, dict) and w.get("gate")}),
                 },
+                # 第3步(2026-09-13): 工具调用汇总随报告落盘（此前只在 scratchpad JSONL）
+                tool_calls=_get_tool_counts(spec.task_id),
             )
             report_saved = True
 
@@ -538,7 +541,8 @@ async def run(
             if not report_saved:
                 await _save_partial_report(spec, repo, "失败", overwrite_name=report_overwrite)
             bus.emit(spec.task_id, EventType.ERROR, message=str(e))
-            return RunResult(task_id=spec.task_id, status="failed", error=str(e))
+            return RunResult(task_id=spec.task_id, status="failed", error=str(e),
+                             report=getattr(e, "report", "") or "")
 
         finally:
             _jobs.pop(spec.task_id, None)
@@ -550,10 +554,23 @@ async def run(
 
 # ==================== resume (断点续跑) ====================
 
+def _is_reusable_artifact(content: str) -> bool:
+    """artifact 内容能否直接复用（= 上次真的跑成了）。
+
+    两种不能复用：`[错误]` 开头（失败/超时无数据）与 `[部分成果` 开头
+    （超时中断但抢回了原始数据 —— 只有数据、没有分析结论，必须重跑）。
+    2026-09-19：后者是新增的，漏判会让续跑把半成品当成果直接跳过。
+    """
+    if not content:
+        return False
+    return not content.startswith("[错误]") and not content.startswith("[部分成果")
+
+
 async def prepare_resume(task_id: str, llm_override: Optional[dict] = None,
                          debate_confirm: bool = False,
                          debate_tools: Optional[bool] = None,
-                         debate_rebuttal: Optional[bool] = None) -> tuple:
+                         debate_rebuttal: Optional[bool] = None,
+                         debate_stance: Optional[bool] = None) -> tuple:
     """Validate a task for resume and assemble the execution plan.
 
     Returns (plan, error). plan keys:
@@ -571,7 +588,8 @@ async def prepare_resume(task_id: str, llm_override: Optional[dict] = None,
 
     debate_confirm：续跑任务同样启用辩论后人工确认门（HITL）；默认关闭，
     与整局重跑的同名开关语义一致。
-    debate_tools / debate_rebuttal：P5 交叉辩论增强开关，续跑沿用；默认关闭。
+    debate_tools / debate_rebuttal / debate_stance：P5 交叉辩论增强开关，
+    续跑沿用；默认关闭。
 
     检查点优先：multi 的辩论结论、series 的单篇正文、single 的上下文
     先读 task_checkpoints；multi 研究 Agent 成果仍复用 task_artifacts
@@ -636,6 +654,7 @@ async def prepare_resume(task_id: str, llm_override: Optional[dict] = None,
             debate_confirm=debate_confirm,
             debate_tools=debate_tools,
             debate_rebuttal=debate_rebuttal,
+            debate_stance=debate_stance,
         )
 
     # ── series：从最后一个完成的 episode 之后继续，前文从 checkpoint 恢复 ──
@@ -700,7 +719,7 @@ async def prepare_resume(task_id: str, llm_override: Optional[dict] = None,
 
         post = set(skill.get("post_synthesis_agents", []))
         roster = [a for a in skill.get("agents", []) if a not in post]
-        prefill = {n: c for n, c in latest.items() if n in roster and not c.startswith("[错误]")}
+        prefill = {n: c for n, c in latest.items() if n in roster and _is_reusable_artifact(c)}
         debate_ckpt = latest_ckpt.get("debate")
         if not prefill and debate_ckpt is None:
             return None, "没有可复用的 Agent 成果，请整局重跑"
@@ -737,7 +756,8 @@ async def resume(task_id: str, llm_override: Optional[dict] = None,
                  bus: Optional[EventBus] = None,
                  debate_confirm: bool = False,
                  debate_tools: Optional[bool] = None,
-                 debate_rebuttal: Optional[bool] = None) -> RunResult:
+                 debate_rebuttal: Optional[bool] = None,
+                 debate_stance: Optional[bool] = None) -> RunResult:
     """Resume a terminal task: reuse checkpoints/artifacts, rerun the rest.
 
     multi 复用研究 Agent artifact + 辩论 checkpoint；series 从最后一篇
@@ -748,6 +768,7 @@ async def resume(task_id: str, llm_override: Optional[dict] = None,
     plan, error = await prepare_resume(
         task_id, llm_override, debate_confirm=debate_confirm,
         debate_tools=debate_tools, debate_rebuttal=debate_rebuttal,
+        debate_stance=debate_stance,
     )
     if error:
         return RunResult(task_id=task_id, status="error", error=error)

@@ -22,17 +22,27 @@ import asyncio
 import json
 import logging
 import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import Optional
 
 from ..core.config import AGENT_TIMEOUT, MAX_PARALLEL_AGENTS
-from ..core.llm import chat_complete, chat_complete_with_tools, chat_stream, get_usage, pop_tool_fallback
+from ..core.context import data_source_label  # 定义在 core/context.py，非 harness/context.py
+from ..core.llm import (
+    chat_complete,
+    chat_complete_with_tools,
+    chat_stream,
+    custom_base_without_key,
+    get_usage,
+    pop_tool_fallback,
+)
 from ..models.schemas import AgentProgress
 from ..skills import build_user_prompt, get_skill
 from ..tools.valuation_guard import annotate_report, check_report
 from .context import ContextBuilder
 
 # P3: decision log
+from .decision_log import _extract_decision
 from .decision_log import asave_decision as _asave_decision
 from .events import EventBus, EventType
 from .guards import MAX_SERIES_REPORT_LENGTH  # noqa: F401  # re-export (sole definition lives in guards)
@@ -57,7 +67,14 @@ from .tools import (
 logger = logging.getLogger("ai_berkshire.harness.runner")
 
 # ── P1: soft loop limits ────────────────────────────────────────
-MAX_SAME_TOOL_CALLS = 3  # per agent per tool name within one task
+# 每 agent 每工具名在一次任务内的调用上限（多Agent技能）。
+# 2026-09-19 由 3 提到 5：财报团队 E2E 实测 96 次工具调用里 25 次撞上限被拒
+# （calc 19、web_search 4、行情 2）——多Agent角色同样会连算多步（比率/年化/
+# 增速），3 次把计算截断在半路。用户决定整体提到 5。
+MAX_SAME_TOOL_CALLS = 5
+# 单Agent技能（skill_tools_enabled）是一个人干完整篇深度研究，上限给到 8：
+# 2026-09-13 实测 3 次不够，报告出现"网络检索工具本次调用已达上限…"。
+MAX_SAME_TOOL_CALLS_SINGLE = 8
 
 # ── P5: cross-debate budget ─────────────────────────────────────
 DEBATE_TIMEOUT = 90                 # seconds per debate / rebuttal LLM call (工具通道含2次取证往返)
@@ -69,6 +86,12 @@ _DEBATE_ELLIPSIS = "\n\n...[中间内容省略]...\n\n"
 
 # ── P2: audit trail / scratchpad ─────────────────────────────────
 SCRATCHPAD_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "scratchpad"
+# 超时中断的 Agent 会把「中断前已取到的工具原始数据」交出来，用这个前缀标记。
+# ⚠️ resume 的复用判定必须把这类 artifact 当成「要重跑」（它只有数据、没有分析）。
+PARTIAL_SALVAGE_MARK = "[部分成果·超时中断]"
+SALVAGE_MAX_CALLS = 24          # 最多列多少次工具调用
+SALVAGE_PER_RESULT_CHARS = 900  # 每条结果截断长度
+SALVAGE_MAX_CHARS = 12000       # 整段部分成果的上限
 
 import re as _re
 
@@ -213,8 +236,219 @@ def _summarize_debate(debate_output: str) -> tuple[dict, list]:
     return votes, reviews
 
 
+# ── P5：立场卡（防漂移）+ 法官分离 ──────────────────────────────
+# Phase 1 结论冻结成「立场卡」，答辩时注入初版立场 + 证据硬约束，综合时
+# 以结构化对照表（初版/修订版/理由/证据）替代原文措辞供 Team Lead 判读。
+_STANCE_MARKER = "## 立场卡（Phase 1 冻结初版，防漂移）"
+_STANCE_CONCLUSION_RE = _re.compile(r"(?:总体)?结论[：:]\s*([^\n]{2,140})")
+_CONF_RANK = {"高": 3, "中": 2, "低": 1}
+
+
+def _extract_stance(report: str, arguments: str) -> Optional[dict]:
+    """从 Phase 1 报告抽取可冻结的初版立场（结论+置信度）。
+
+    优先复用 decision_log 的结论解析（已有大量真实报告写法覆盖）；
+    解析不到时退回宽松的「结论：」正则。失败返回 None，绝不影响主流程。
+    """
+    if not report or report.startswith("[错误]"):
+        return None
+    d = _extract_decision(report, arguments)
+    if d:
+        return {"conclusion": d["conclusion"], "confidence": d.get("confidence") or "中"}
+    m = _STANCE_CONCLUSION_RE.search(report)
+    if m:
+        return {"conclusion": m.group(1).strip()[:140], "confidence": "中"}
+    return None
+
+
+def _format_stance_cards(stance_cards: dict) -> str:
+    """立场卡落盘文本（随 debate checkpoint 持久化，续跑原样复用）。"""
+    if not stance_cards:
+        return ""
+    lines = [_STANCE_MARKER]
+    for name, st in stance_cards.items():
+        lines.append(f"### {name}｜{get_role_label(name)}")
+        lines.append(f"- 结论：{st.get('conclusion') or '未抽取到'}")
+        lines.append(f"- 置信度：{st.get('confidence') or '中'}")
+    return "\n".join(lines)
+
+
+def _parse_stance_cards(debate_output: str) -> dict:
+    """从辩论 checkpoint 还原立场卡（续跑路径）；解析不到返回 {}。"""
+    text = debate_output or ""
+    if _STANCE_MARKER not in text:
+        return {}
+    section = text.split(_STANCE_MARKER, 1)[1].split("### 交叉评审：", 1)[0]
+    out: dict[str, dict] = {}
+    current: Optional[str] = None
+    for line in section.splitlines():
+        s = line.strip()
+        if s.startswith("### "):
+            head = s[4:].strip()
+            current = head.split("｜", 1)[0].strip()
+            out[current] = {"conclusion": "", "confidence": ""}
+        elif current and s.startswith("- 结论"):
+            out[current]["conclusion"] = s.split("：", 1)[-1].strip()
+        elif current and s.startswith("- 置信度"):
+            out[current]["confidence"] = s.split("：", 1)[-1].strip()
+    return out
+
+
+def _parse_rebuttals(debate_output: str) -> dict:
+    """解析答辩结构化行「原结论→新结论｜修改理由｜证据」。
+
+    自由文本 / 旧格式解析不到时返回 {}，绝不影响主流程。
+    """
+    out: dict[str, dict] = {}
+    for block in (debate_output or "").split("### 答辩：")[1:]:
+        pair, _, body = block.partition("\n")
+        target = pair.strip().split("→")[-1].strip()
+        if not target or target in out:
+            continue
+        for line in body.splitlines():
+            s = line.strip().lstrip("0123456789.、*#- ").strip()
+            if not s or ("→" not in s and not s.startswith("维持")):
+                continue
+            parts = [p.strip() for p in _DEBATE_FIELD_SEP_RE.split(s) if p.strip()]
+            if not parts:
+                continue
+            head = parts[0]
+            if "→" in head:
+                old, new = (head.split("→", 1) + [""])[:2]
+            else:
+                old, new = "", "维持原结论"
+            out[target] = {
+                "old": old.strip()[:_DEBATE_DISPUTE_FIELD_MAX],
+                "new": new.strip()[:_DEBATE_DISPUTE_FIELD_MAX],
+                "reason": (parts[1] if len(parts) > 1 else "")[:_DEBATE_DISPUTE_FIELD_MAX],
+                "evidence": (parts[2] if len(parts) > 2 else "")[:_DEBATE_DISPUTE_FIELD_MAX],
+            }
+            break
+    return out
+
+
+def _format_stance_table(stance_cards: dict, debate_output: str) -> str:
+    """初版 / 修订版 / 修改理由 / 证据 三方对照表（让让步成本显性化）。"""
+    if not stance_cards:
+        return ""
+    revised = _parse_rebuttals(debate_output)
+    lines = [
+        "| 分析师 | 初版结论 | 修订版结论 | 修改理由 | 证据 |",
+        "|--------|---------|-----------|---------|------|",
+    ]
+    for name, st in stance_cards.items():
+        rev = revised.get(name, {})
+        lines.append("| " + " | ".join([
+            get_role_label(name),
+            st.get("conclusion") or "-",
+            rev.get("new") or "（未答辩/未修订）",
+            rev.get("reason") or "-",
+            rev.get("evidence") or "-",
+        ]) + " |")
+    return "\n".join(lines)
+
+
+def _format_dispute_table(debate_output: str) -> str:
+    """结构化质疑证据表（对象｜反证据｜置信度），按置信度 高>中>低 排序。
+
+    复用 _summarize_debate 的解析结果；解析不到返回 ""，不改变主流程。
+    """
+    _, reviews = _summarize_debate(debate_output)
+    rows: list[tuple[str, str, str, str, str]] = []
+    for r in reviews:
+        for d in r.get("disputes", []):
+            rows.append((
+                r.get("pair", ""), d.get("target", ""),
+                d.get("evidence", ""), d.get("confidence", ""), r.get("vote", ""),
+            ))
+    if not rows:
+        return ""
+    rows.sort(key=lambda x: _CONF_RANK.get(x[3], 0), reverse=True)
+    lines = [
+        "| 评审 | 质疑对象 | 反证据/反例 | 置信度 | 评审独立判断 |",
+        "|------|---------|------------|--------|------------|",
+    ]
+    for row in rows:
+        lines.append("| " + " | ".join((c or "-") for c in row) + " |")
+    return "\n".join(lines)
+
+
+# ── 工具调用汇总留痕（第3步，2026-09-13）────────────────────────
+# meta.json 里此前没有任何工具字段，工具调用只落在 data/scratchpad/<task>.jsonl；
+# 于是"每任务工具调用数 / 是否撞上限"在报告侧完全不可观测（静态审计风险项）。
+# 这里按 task_id 留一份汇总，由 persist.save_report 写进 meta["tool_calls"]。
+_TOOL_COUNTS: "OrderedDict[str, dict]" = OrderedDict()
+_TOOL_COUNTS_MAX = 64
+
+
+def summarize_tool_calls(counts: dict, limit_hits: dict = None) -> dict:
+    """把 {agent: {tool: n}} + {tool: 撞上限次数} 汇总成 meta 友好的结构。"""
+    by_tool: dict = {}
+    by_agent: dict = {}
+    total = 0
+    for agent, tools in (counts or {}).items():
+        for tool, n in (tools or {}).items():
+            try:
+                n = int(n)
+            except (TypeError, ValueError):
+                continue
+            if n <= 0:
+                continue
+            by_tool[tool] = by_tool.get(tool, 0) + n
+            by_agent[agent] = by_agent.get(agent, 0) + n
+            total += n
+    hits = {}
+    for tool, n in (limit_hits or {}).items():
+        try:
+            n = int(n)
+        except (TypeError, ValueError):
+            continue
+        if n > 0:
+            hits[tool] = n
+    out = {
+        "total": total,
+        "by_tool": dict(sorted(by_tool.items(), key=lambda kv: (-kv[1], kv[0]))),
+        "by_agent": dict(sorted(by_agent.items(), key=lambda kv: (-kv[1], kv[0]))),
+        "agents_with_tools": len([k for k, v in by_agent.items() if v]),
+    }
+    if hits:
+        out["limit_hits"] = dict(sorted(hits.items(), key=lambda kv: (-kv[1], kv[0])))
+    return out
+
+
+def record_tool_counts(task_id: str, counts: dict, limit_hits: dict = None) -> dict:
+    """记录某任务的工具调用汇总（有界字典，失败一律吞掉）。"""
+    summary = summarize_tool_calls(counts, limit_hits)
+    try:
+        if task_id:
+            _TOOL_COUNTS[task_id] = summary
+            _TOOL_COUNTS.move_to_end(task_id)
+            while len(_TOOL_COUNTS) > _TOOL_COUNTS_MAX:
+                _TOOL_COUNTS.popitem(last=False)
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"record_tool_counts failed: {e}")
+    return summary
+
+
+def get_tool_counts(task_id: str) -> dict:
+    """取回某任务的工具调用汇总；没有留痕返回 {}。"""
+    try:
+        return _TOOL_COUNTS.get(task_id or "", {}) or {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 class AllAgentsFailedError(RuntimeError):
-    """Raised when every research agent in a multi-agent run failed."""
+    """Raised when every research agent in a multi-agent run failed.
+
+    report：本次运行仍产出的报告文本（全员超时时里面是「超时中断·仅原始数据」——
+    从 scratchpad 抢救回来的工具往返数据）。带上它，HTTP 失败响应与前端才不至于
+    只剩一页空错误，用户不用跑去历史报告里翻。
+    """
+
+    def __init__(self, message: str, report: str = ""):
+        super().__init__(message)
+        self.report = report or ""
 
 
 class AgentRunner:
@@ -225,6 +459,9 @@ class AgentRunner:
         self.task_id = task_id or "adhoc"
         # P1: per-agent per-tool call counts — reset each run()
         self._tool_call_counts: dict[str, dict[str, int]] = {}
+        # 撞上每工具循环上限的次数（按工具名）——被拒的调用不计入 _tool_call_counts，
+        # 但"撞上限"本身是要观测的信号（第3步）
+        self._tool_limit_hits: dict[str, int] = {}
         # P2: scratchpad path — written once on first tool call
         self._scratchpad_path: Optional[Path] = None
         # Custom-model tool fallbacks — merged into guard_warnings by harness run()
@@ -358,6 +595,7 @@ class AgentRunner:
         """
         # P1: reset tool call counters at the start of each run
         self._tool_call_counts.clear()
+        self._tool_limit_hits.clear()
         self._scratchpad_path = None
         llm_config = spec.llm.to_llm_config_dict()
 
@@ -405,6 +643,9 @@ class AgentRunner:
                 company_hint=(self._last_goal_hints or {}).get("company") or "",
             )
 
+        # 工具调用汇总留痕：供 persist 写进 meta["tool_calls"]（第3步，2026-09-13）
+        record_tool_counts(self.task_id, self._tool_call_counts, self._tool_limit_hits)
+
         return report
 
     # ---------- 估值一致性校验 ----------
@@ -448,6 +689,69 @@ class AgentRunner:
 
     # ---------- tool execution ----------
 
+    def _require_llm_config(self, llm_config: Optional[dict]) -> None:
+        """自定义服务商缺 Key 时立刻说清楚，别等 N 个 Agent 各吃一次 401。"""
+        err = custom_base_without_key(llm_config)
+        if err:
+            raise RuntimeError(err)
+
+    def _salvage_tool_trace(self, agent: str, timeout_s: int) -> str:
+        """超时中断时，把该 Agent 已执行的工具调用与结果捞回来。
+
+        工具型 Agent 走的是非流式 function-calling 循环（chat_complete_with_tools），
+        被 asyncio.wait_for 取消时中间文本没留存 —— 真正有价值的是已经取到的一手
+        数据，它们逐条落在 data/scratchpad/<task>.jsonl（_log_tool_call 写的）。
+        这里按 agent 过滤、按调用顺序渲染成「原始数据清单」，让超时不等于全白跑。
+
+        返回空串表示这次超时没捞到任何数据（调用方退回原错误文案）。
+        """
+        path = SCRATCHPAD_DIR / f"{self.task_id}.jsonl"
+        if not path.exists():
+            return ""
+        rows = []
+        try:
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except Exception:
+                        continue
+                    if (row.get("agent") or "") != agent:
+                        continue
+                    rows.append(row)
+        except Exception as e:
+            logger.warning(f"salvage scratchpad read failed ({self.task_id}/{agent}): {e}")
+            return ""
+        if not rows:
+            return ""
+        rows = rows[-SALVAGE_MAX_CALLS:]
+        out = [
+            f"{PARTIAL_SALVAGE_MARK} 本 Agent 没能在 {timeout_s}s 上限内跑完。"
+            f"以下是中断前已经取到的原始数据（{len(rows)} 次工具调用，未经模型分析、未经交叉验证）：",
+            "",
+        ]
+        used = 0
+        for i, row in enumerate(rows, 1):
+            res = str(row.get("result") or "").replace("\r", " ")
+            if len(res) > SALVAGE_PER_RESULT_CHARS:
+                res = res[:SALVAGE_PER_RESULT_CHARS] + "…（已截断）"
+            item = (f"{i}. `{row.get('tool')}` "
+                    f"{json.dumps(row.get('args') or {}, ensure_ascii=False)}\n   → {res}")
+            used += len(item)
+            if used > SALVAGE_MAX_CHARS:
+                out.append(f"……（其余 {len(rows) - i + 1} 次调用见 data/scratchpad/{self.task_id}.jsonl）")
+                break
+            out.append(item)
+        out += [
+            "",
+            f"> ⚠️ 数据已落缓存与调用留痕（`data/scratchpad/{self.task_id}.jsonl`）。"
+            "回任务列表点「继续任务」只会补跑本次超时/失败的 Agent，已完成的 Agent 直接复用。",
+        ]
+        return "\n".join(out)
+
     async def _log_tool_call(self, agent: str, tool_name: str, args: dict, result: str):
         """P2: append one JSONL line to the scratchpad file (non-fatal)."""
         try:
@@ -467,9 +771,10 @@ class AgentRunner:
         except Exception:
             pass  # never let scratchpad failure block research
 
-    def _tool_executor(self, agent: Optional[str] = None):
+    def _tool_executor(self, agent: Optional[str] = None, max_same_tool_calls: int = MAX_SAME_TOOL_CALLS):
         """P1: function-calling tool executor with soft loop limits.
-        Each agent can call the same tool at most MAX_SAME_TOOL_CALLS times.
+        Each agent can call the same tool at most ``max_same_tool_calls`` times
+        (single-agent tool loops get a larger budget, see the constants above).
         Exceeding returns a limit message instead of executing.
         P2: every call is logged to the scratchpad JSONL.
 
@@ -489,10 +794,11 @@ class AgentRunner:
             current = counts.get(name, 0)
 
             # P1: soft loop limit check
-            if current >= MAX_SAME_TOOL_CALLS:
+            if current >= max_same_tool_calls:
+                runner._tool_limit_hits[name] = runner._tool_limit_hits.get(name, 0) + 1
                 limit_msg = json.dumps({
                     "error": "TOOL_LOOP_LIMIT",
-                    "message": f"已调用 {name} {current} 次，达到上限 {MAX_SAME_TOOL_CALLS} 次。"
+                    "message": f"已调用 {name} {current} 次，达到上限 {max_same_tool_calls} 次。"
                                f"请基于已有数据直接输出结论，不要再调用此工具。",
                 }, ensure_ascii=False)
                 # Log the limit hit to scratchpad
@@ -554,6 +860,7 @@ class AgentRunner:
         proper context). Tool-enabled roles use function calling; with
         stream=True non-tool roles stream tokens as chunk events.
         """
+        self._require_llm_config(llm_config)
         if agent_role and agent_role in AGENT_ROLE_PROMPTS:
             system_prompt = AGENT_ROLE_PROMPTS[agent_role]
             user_msg = _with_attachments(f"请分析以下目标：{arguments}", attachments)
@@ -595,11 +902,13 @@ class AgentRunner:
         )
         if agent_role in TOOL_ENABLED_AGENTS or skill_tools_enabled:
             tool_label = agent_role or skill_name or "default"
+            # 单Agent技能一个人干完整篇研究 → 放宽每工具循环上限（见常量注释）
+            _cap = MAX_SAME_TOOL_CALLS_SINGLE if skill_tools_enabled else MAX_SAME_TOOL_CALLS
             # Function-calling loop is non-streaming; emit whole result.
             result = await chat_complete_with_tools(
                 system_prompt, user_msg,
                 tools=ALL_TOOL_SCHEMAS,
-                tool_executor=self._tool_executor(tool_label),
+                tool_executor=self._tool_executor(tool_label, max_same_tool_calls=_cap),
                 llm_config=llm_config,
             )
             self._note_tool_fallback(tool_label)
@@ -653,6 +962,7 @@ class AgentRunner:
         直接沿用上次落库的辩论结论 checkpoint（空串表示上次辩论阶段
         已执行但未产出有效结论，同样不重跑）。
         """
+        self._require_llm_config(llm_config)
         skill = get_skill(skill_name)
         agent_names = skill.get("agents", [])
         post_synthesis_agents = skill.get("post_synthesis_agents", [])
@@ -724,8 +1034,13 @@ class AgentRunner:
                 try:
                     name, result = await asyncio.wait_for(agent_task(name), timeout=AGENT_TIMEOUT)
                 except asyncio.TimeoutError:
-                    self._progress(name, "failed", "超时")
-                    result = f"[错误] Agent 超时 ({AGENT_TIMEOUT}s)"
+                    salvage = self._salvage_tool_trace(name, AGENT_TIMEOUT)
+                    if salvage:
+                        self._progress(name, "failed", "超时（已保留中断前取到的原始数据）")
+                        result = salvage
+                    else:
+                        self._progress(name, "failed", "超时")
+                        result = f"[错误] Agent 超时 ({AGENT_TIMEOUT}s)"
             # Strip DSML noise BEFORE persisting so partial reports are clean.
             clean = result if result.startswith("[错误]") else _strip_dsml(result)
             await self._save_artifact(name, clean)
@@ -748,20 +1063,58 @@ class AgentRunner:
         success_count = 0
         failed_count = 0
         failed_details: list[tuple[str, str]] = []
+        partial_reports = ""
+        partial_count = 0
         for name, result in results:
             if result.startswith("[错误]"):
                 failed_count += 1
                 failed_details.append((name, result))
+                continue
+            if result.startswith(PARTIAL_SALVAGE_MARK):
+                # 超时中断但有原始数据：不进 success_count（不喂给辩论/综合，
+                # 半成品绝不能冒充完整分析），单独成节放进报告，别让 Agent 白跑。
+                partial_count += 1
+                failed_details.append((name, "超时中断（已保留原始数据）"))
+                partial_reports += (
+                    f"\n\n---\n## {get_role_label(name)}（未完成·超时中断）\n\n{result}\n"
+                )
                 continue
             success_count += 1
             role_label = get_role_label(name)
             # Strip tool-call noise via the shared helper (same as artifact path)
             agent_reports += f"\n\n---\n## {role_label}\n\n{_strip_dsml(result)}\n"
 
+        # ── P5: 立场卡（防漂移）────────────────────────────────
+        # Phase 1 结论冻结：抽取每个成功 Agent 的初版立场，随辩论 checkpoint
+        # 落库；答辩时注入初版立场+证据硬约束，综合时以对照表替代原文措辞。
+        debate_stance = bool(getattr(spec, "debate_stance", False)) if spec is not None else False
+        stance_cards: dict[str, dict] = {}
+        if debate_stance:
+            for name, result in results:
+                if result.startswith("[错误]"):
+                    continue
+                st = _extract_stance(_strip_dsml(result), arguments)
+                if st:
+                    stance_cards[name] = st
+
         if success_count == 0:
             # E2: every research agent failed — flag a hard failure so harness
             # marks the task failed (the generic exception path still persists
             # a partial report built from the error artifacts).
+            if partial_reports:
+                # 全部超时但抢回了原始数据：把数据交出去（任务仍是 failed，
+                # 界面「继续任务」只补跑没跑完的 Agent），而不是甩一页空错误。
+                self.fatal_error = (
+                    f"所有 {failed_count + partial_count} 个 Agent 均未在 {AGENT_TIMEOUT}s 内跑完"
+                )
+                return (
+                    f"# AI Berkshire 投研报告（超时中断·仅原始数据）\n\n"
+                    f"**目标**：{arguments}\n\n"
+                    f"> ⚠️ {partial_count} 个 Agent 都没能在 {AGENT_TIMEOUT}s 上限内跑完，"
+                    "下面是它们中断前已经取到的原始数据（未经模型分析、未经交叉验证）。\n"
+                    "> 想要完整报告：回任务列表点「继续任务」，只会补跑这些没跑完的 Agent。\n"
+                    + partial_reports
+                )
             self.fatal_error = f"所有 {failed_count} 个 Agent 均执行失败"
             return f"# AI Berkshire 投研报告\n\n**目标**：{arguments}\n\n## 错误\n\n所有 {failed_count} 个 Agent 均执行失败，无法生成报告。\n\n请检查 LLM API 配置和网络连接。"
 
@@ -773,6 +1126,9 @@ class AgentRunner:
         if prefill_debate is not None:
             # 断点续跑：复用上次落库的交叉辩论结论，不再重新辩论
             debate_output = prefill_debate
+            # 立场卡随 checkpoint 一起落库，续跑时还原供综合对照表使用
+            if debate_stance and not stance_cards:
+                stance_cards = _parse_stance_cards(debate_output)
             self._progress("system", "completed", "复用上次交叉辩论结论（断点续跑）", 1.0)
         elif success_count >= 2:
             self._progress("system", "running", "Agent 交叉辩论中...")
@@ -862,10 +1218,26 @@ class AgentRunner:
                     rcfg = llm_config
                     if per_agent_enabled and spec is not None:
                         rcfg = spec.llm.to_agent_config_dict(target_name)
+                    # 立场卡（防漂移）：注入初版立场，改变结论须先工具取证，
+                    # 不得仅因对方措辞/语气让步 —— 让步成本显性化。
+                    stance_line = ""
+                    stance = stance_cards.get(target_name) if debate_stance else None
+                    if stance:
+                        stance_line = (
+                            f"\n## 你的初版立场（Phase 1 冻结，防漂移）\n"
+                            f"- 结论：{stance.get('conclusion') or '未抽取到'}\n"
+                            f"- 置信度：{stance.get('confidence') or '中'}\n"
+                            "改变初版结论前必须先用工具取证；不得仅因对方措辞或语气让步。\n"
+                        )
                     rebuttal_prompt = (
                         f"你是{target_role}。以下是{reviewer_role}对你报告的交叉质疑：\n\n"
-                        f"{review_text}\n\n"
-                        "请逐条回应：接受并修正，或反驳并给出依据。不要复述原报告，保持简洁。"
+                        f"{review_text}\n"
+                        f"{stance_line}\n"
+                        "请逐条回应：接受并修正，或反驳并给出依据。不要复述原报告，保持简洁。\n"
+                        "若修改结论，必须引用工具证据（工具名+关键数字）。按以下格式输出：\n"
+                        "原结论→新结论｜修改理由｜证据(工具名+关键数字)\n"
+                        "若维持原结论，写：维持结论｜理由｜证据\n"
+                        "若改变结论但拿不出工具证据，必须写：无工具证据，仅为判断调整"
                     )
                     try:
                         text = await asyncio.wait_for(
@@ -886,6 +1258,11 @@ class AgentRunner:
                         continue
                     pair, text = item
                     debate_output += f"\n\n### 答辩：{pair}\n{text}\n"
+
+            # 立场卡冻结：随辩论 checkpoint 落库（续跑 _parse_stance_cards 还原）
+            stance_block = _format_stance_cards(stance_cards) if debate_stance else ""
+            if stance_block:
+                debate_output = f"{stance_block}\n{debate_output}"
 
             self._progress("system", "completed", f"{len(success_results)} 位 Agent 交叉辩论完成", 1.0)
             # 断点续跑检查点：辩论结论落库（重启后 Team Lead 前的辩论不重跑）
@@ -932,7 +1309,26 @@ class AgentRunner:
         synthesis_prompt += f"\n\n以下是{agent_label}的独立研究报告：\n{agent_reports}"
         # P5: inject debate results
         if debate_output:
-            synthesis_prompt += f"\n\n## Agent 交叉辩论记录\n以下是各分析师交叉评审对方报告的结果，请在综合时重点考虑质疑和反对意见：{debate_output}"
+            if debate_stance:
+                # 法官分离：结构化证据表优先，辩词原文降级为附录，Team Lead
+                # 先读证据再读措辞，避免被语气/修辞带偏。
+                stance_table = _format_stance_table(stance_cards, debate_output)
+                dispute_table = _format_dispute_table(debate_output)
+                if stance_table or dispute_table:
+                    synthesis_prompt += (
+                        "\n\n## 争议与立场证据表（优先阅读）\n"
+                        "以下为结构化证据，请优先依据证据判断；措辞与语气不作为依据。"
+                    )
+                    if stance_table:
+                        synthesis_prompt += f"\n\n### 立场卡对照（初版 vs 修订版）\n{stance_table}"
+                    if dispute_table:
+                        synthesis_prompt += f"\n\n### 交叉质疑证据表（按置信度排序）\n{dispute_table}"
+                synthesis_prompt += (
+                    "\n\n## 附录：辩论原文（仅备查，语气措辞不构成证据）\n"
+                    f"{debate_output}"
+                )
+            else:
+                synthesis_prompt += f"\n\n## Agent 交叉辩论记录\n以下是各分析师交叉评审对方报告的结果，请在综合时重点考虑质疑和反对意见：{debate_output}"
         # HITL：modify 决议的人工批注注入综合 prompt（明确标注须纳入考量）
         if human_note:
             synthesis_prompt += (
@@ -991,6 +1387,8 @@ class AgentRunner:
 
         # Phase 3: post-synthesis agents (sequential, streamed)
         post_synthesis_output = ""
+        ps_success = 0
+        ps_failed = 0
         if post_synthesis_agents:
             # Truncate synthesis to avoid token overflow for post-synthesis agents
             _MAX_PS_INPUT = 12000  # chars for synthesis passed to editor/reviewer
@@ -1017,27 +1415,39 @@ class AgentRunner:
                     post_result = await asyncio.wait_for(_run_post(), timeout=AGENT_TIMEOUT)
                     post_synthesis_output += f"\n\n---\n## {agent_name}\n\n{post_result}\n"
                     self._progress(agent_name, "completed", "完成", 1.0)
+                    ps_success += 1
                 except asyncio.TimeoutError:
                     # Post-synthesis failure must never kill the completed synthesis
                     logger.error(f"Post-synthesis agent {agent_name} timed out after {AGENT_TIMEOUT}s")
                     post_result = f"[错误] 超时（超过 {AGENT_TIMEOUT}s）"
                     post_synthesis_output += f"\n\n---\n## {agent_name}\n\n{post_result}\n"
                     self._progress(agent_name, "failed", "超时")
+                    ps_failed += 1
                 except Exception as e:
                     logger.error(f"Post-synthesis agent {agent_name} failed: {e}", exc_info=True)
                     _err_msg = str(e)[:200]
                     post_result = f"[错误] {_err_msg}"
                     post_synthesis_output += f"\n\n---\n## {agent_name}\n\n{post_result}\n"
                     self._progress(agent_name, "failed", _err_msg)
+                    ps_failed += 1
                 await self._save_artifact(agent_name, post_result)
 
         all_agent_count = len(agent_names)
+        # 2026-09-18 修口径：原先分子只含 Phase 1 研究 Agent（success_count），
+        # 分母却是全部角色 —— 带后置环节的技能（earnings-team 的 editor/
+        # reader-reviewer）明明成功，也恒显示成「4/6 Agent 成功」，让人误以为
+        # 挂了 2 个（实测 2026-09-18 报告如此）。现按同一口径把后置环节计入。
+        total_success = success_count + ps_success
+        total_failed = failed_count + ps_failed
+        # 2026-09-13：大师知识库已按技能白名单注入（见 core/context.MASTER_KB_SKILLS），
+        # 报告头不能对非白名单技能继续声称用了大师知识库 —— 那会变成假陈述。
+        _data_source = data_source_label((skill or {}).get("name", ""))
         final_report = f"""# AI Berkshire 投研报告
 
 **目标**：{arguments}
 **框架**：{skill['display_name']}
-**执行模式**：{success_count}/{all_agent_count} Agent 成功{'（' + str(failed_count) + ' 个失败）' if failed_count else ''}{'，分阶段执行' if post_synthesis_agents else ''}
-**数据源**：实时市场数据 + 投资大师知识库
+**执行模式**：{total_success}/{all_agent_count} Agent 成功{'（' + str(total_failed) + ' 个失败）' if total_failed else ''}{'，分阶段执行' if post_synthesis_agents else ''}
+**数据源**：{_data_source}
 
 {synthesis}
 
@@ -1190,7 +1600,7 @@ class AgentRunner:
             f"# 深度系列长文：{arguments}\n",
             f"**框架**：{skill['display_name']}",
             f"**执行模式**：系列生成（{success_count}/{total} 篇成功{f'，{failed_count} 篇失败' if failed_count else ''}）",
-            "**数据源**：实时市场数据 + 投资大师知识库\n",
+            "**数据源**：" + data_source_label((skill or {}).get("name", "")) + "\n",
         ]
 
         for i, (topic, article) in enumerate(articles):

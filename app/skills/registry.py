@@ -9,6 +9,10 @@ SKILLS = [
         "category": "深度研究",
         "is_multi_agent": False,
         "agent_count": 1,
+        # 2026-09-13 批2/P1：单Agent技能开工具（第1批试点 2 个技能）。
+        # 该技能 17 份历史报告里 9 份含"需要核实"，prompt 中位数仅 4237 tokens
+        # （等于没有数据注入）→ 开闸让模型自己能核实。
+        "tools_enabled": True,
         "input_hint": "描述你的分析目标，可包含公司名/代码，如：分析腾讯的护城河与长期投资价值",
     },
     {
@@ -22,26 +26,10 @@ SKILLS = [
         "debate_tools": True,
         # P5：被评审者一轮答辩权，筛掉截断/误读产生的假分歧
         "debate_rebuttal": True,
+        # P5：立场卡（防漂移）+ 法官分离（结构化证据优先、辩词原文降级附录）
+        "debate_stance": True,
         "agents": ["business-analyst", "financial-analyst", "industry-researcher", "risk-assessor"],
         "input_hint": "描述你的分析目标，可包含公司名/代码，如：分析美团外卖业务的竞争壁垒",
-    },
-    {
-        "name": "dyp-ask",
-        "display_name": "段永平问答",
-        "description": "以段永平的思维方式思考商业和投资问题",
-        "category": "深度研究",
-        "is_multi_agent": False,
-        "agent_count": 1,
-        "input_hint": "投资/商业问题，如：拼多多的护城河到底在哪里？",
-    },
-    {
-        "name": "investment-checklist",
-        "display_name": "巴菲特Checklist",
-        "description": "六关快速筛选：能力圈→好生意→护城河→管理层→安全边际→决策纪律",
-        "category": "深度研究",
-        "is_multi_agent": False,
-        "agent_count": 1,
-        "input_hint": "描述筛选目标，可含多个公司，如：用巴菲特Checklist检验腾讯、茅台、英伟达",
     },
     {
         "name": "management-deep-dive",
@@ -50,6 +38,12 @@ SKILLS = [
         "category": "深度研究",
         "is_multi_agent": False,
         "agent_count": 1,
+        # 2026-09-13 批2/P1：单Agent技能开工具（第1批试点 2 个技能）。
+        # 实测依据：该技能原本 prompt 仅 3826 tokens（零数据注入），报告开篇写
+        # "2025年报、2026半年报应已披露，但具体数字与最新高管名单需核实"；
+        # 同一时刻同一标的的多Agent链路（557k tokens，带工具）给出精确数字。
+        # 机制早已存在（harness/runner.py skill_tools_enabled 分支），此处只是开闸。
+        "tools_enabled": True,
         "input_hint": "管理层名+公司名，如：深研王兴及美团管理层的资本配置能力",
     },
     {
@@ -102,8 +96,8 @@ SKILLS = [
         "category": "深度研究",
         "is_multi_agent": True,
         "agent_count": 3,
+        # P5：交叉辩论开放受限核对工具 + 被评审者一轮答辩权
         "debate_tools": True,
-        # P5：被评审者一轮答辩权，筛掉截断/误读产生的假分歧
         "debate_rebuttal": True,
         "agents": ["macro-institutional-economist", "macro-forecaster", "macro-strategist"],
         "input_hint": "描述你想分析的全球宏观问题，如：美联储2026年降息路径与全球资产影响",
@@ -115,25 +109,11 @@ SKILLS = [
         "category": "深度研究",
         "is_multi_agent": True,
         "agent_count": 4,
+        # P5：交叉辩论开放受限核对工具 + 被评审者一轮答辩权
         "debate_tools": True,
-        # P5：被评审者一轮答辩权，筛掉截断/误读产生的假分歧
         "debate_rebuttal": True,
         "agents": ["cn-policy-framework", "cn-data-cycle", "cn-fx-external", "cn-structure-trend"],
         "input_hint": "描述你想分析的中国宏观问题，如：2026年地产企稳对信用周期和A股的影响",
-    },
-    {
-        "name": "wechat-article",
-        "display_name": "公众号文章",
-        "description": "三Agent协作生成公众号文章：研究+编辑+评审",
-        "category": "深度研究",
-        "is_multi_agent": True,
-        "agent_count": 3,
-        "debate_tools": True,
-        # P5：被评审者一轮答辩权，筛掉截断/误读产生的假分歧
-        "debate_rebuttal": True,
-        "agents": ["researcher", "editor", "reader-reviewer"],
-        "post_synthesis_agents": ["editor", "reader-reviewer"],
-        "input_hint": "描述文章主题，如：写一篇解读大模型OPD技术的公众号文章",
     },
     {
         "name": "earnings-review",
@@ -151,8 +131,8 @@ SKILLS = [
         "category": "财报分析",
         "is_multi_agent": True,
         "agent_count": 6,
+        # P5：交叉辩论开放受限核对工具 + 被评审者一轮答辩权
         "debate_tools": True,
-        # P5：被评审者一轮答辩权，筛掉截断/误读产生的假分歧
         "debate_rebuttal": True,
         "agents": ["business-interpreter", "financial-auditor", "competition-analyst", "risk-hunter", "editor", "reader-reviewer"],
         # Phased execution: these agents run AFTER Team Lead synthesis
@@ -190,15 +170,6 @@ SKILLS = [
         "input_hint": "描述筛选方向，如：从机器人行业筛出3家最值得配置的公司",
     },
     {
-        "name": "quality-screen",
-        "display_name": "去劣筛选",
-        "description": "7条硬指标快速排除非一流公司：ROE/FCF/利息覆盖/毛利率/利润质量/净利率/稀释",
-        "category": "行业筛选",
-        "is_multi_agent": False,
-        "agent_count": 1,
-        "input_hint": "描述筛选对象，如：用硬指标排除恒生指数成分股中的非一流公司",
-    },
-    {
         "name": "bottleneck-hunter",
         "display_name": "瓶颈猎手",
         "description": "从超级趋势寻找产业链物理瓶颈和套利机会，Layer 0-4拆解",
@@ -232,8 +203,8 @@ SKILLS = [
         "category": "持仓管理",
         "is_multi_agent": True,
         "agent_count": 4,
+        # P5：交叉辩论开放受限核对工具 + 被评审者一轮答辩权
         "debate_tools": True,
-        # P5：被评审者一轮答辩权，筛掉截断/误读产生的假分歧
         "debate_rebuttal": True,
         "agents": ["company-event-scout", "regulatory-watcher", "industry-peer-analyst", "sentiment-tracker"],
         # 输出章节（multi 策略下结构门闸只校验顶层标题，此处登记以声明契约）

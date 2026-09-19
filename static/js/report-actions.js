@@ -197,15 +197,74 @@ function clearResult() {
 }
 
 // ==================== History ====================
+// 回退记忆（2026-09-19）：从历史列表点开报告后，「← 返回」要回到点开它的那一处，
+// 而不是把人丢回主页面。记的是列表 DOM 自己的状态：滚动位置 + 筛选/搜索/排序。
+// 注意 #history-area 自己是滚动容器（CSS overflow-y:auto），一旦 display:none
+// 再显示，scrollTop 会被浏览器清零，所以必须在隐藏前主动记账。
+var _historyView = null;    // {scrollTop, search, skill, sort, name}
+var _reportOrigin = '';     // '' | 'history' —— 当前结果页是从哪里打开的
+
+function _captureHistoryView(name) {
+  var area = document.getElementById('history-area');
+  var search = document.getElementById('historySearch');
+  var skillEl = document.getElementById('historySkillFilter');
+  var sortEl = document.getElementById('historySort');
+  return {
+    scrollTop: area ? area.scrollTop : 0,
+    search: search ? search.value : '',
+    skill: skillEl ? skillEl.value : '',
+    sort: sortEl ? sortEl.value : 'time_desc',
+    name: name || ''
+  };
+}
+
+// 还原列表视图：先恢复筛选状态（必要时重渲染），再落回滚动位置，最后高亮原条目
+function _restoreHistoryView(view) {
+  if (!view) { document.getElementById('history-area').style.display = 'block'; return; }
+  var area = document.getElementById('history-area');
+  var search = document.getElementById('historySearch');
+  var skillEl = document.getElementById('historySkillFilter');
+  var sortEl = document.getElementById('historySort');
+  var changed = false;
+  if (search && search.value !== view.search) { search.value = view.search; changed = true; }
+  if (skillEl && skillEl.value !== view.skill) { skillEl.value = view.skill; changed = true; }
+  if (sortEl && sortEl.value !== view.sort) { sortEl.value = view.sort; changed = true; }
+  if (changed) filterHistory();
+  // 只负责列表区：empty-state 让位，result-area 由调用方（backToHome）自己处理，
+  // 避免「研究结果还开着时进对比」被顺手关掉
+  document.getElementById('empty-state').style.display = 'none';
+  area.style.display = 'block';
+  area.scrollTop = view.scrollTop;
+  // display 切换 + 可能的列表重渲染会吃掉第一帧的滚动，下一帧再落一次位
+  requestAnimationFrame(function() { area.scrollTop = view.scrollTop; });
+  _highlightHistoryItem(view.name);
+}
+
+// 高亮「上一次点开的那条」，让人一眼确认回到了原处
+function _highlightHistoryItem(name) {
+  var items = document.querySelectorAll('#history-list .history-item');
+  for (var i = 0; i < items.length; i++) items[i].classList.remove('last-opened');
+  if (!name) return;
+  for (var j = 0; j < items.length; j++) {
+    if (items[j].dataset.name === name) { items[j].classList.add('last-opened'); break; }
+  }
+}
+
 function backToHome() {
   document.getElementById('result-area').style.display = 'none';
   var hint = document.getElementById('report-dblclick-hint');
   if (hint) hint.style.display = 'none';
   document.getElementById('progress-area').style.display = 'none';
-  document.getElementById('history-area').style.display = 'none';
   document.getElementById('compare-area').style.display = 'none';
   document.getElementById('costs-area').style.display = 'none';
   document.getElementById('decisions-area').style.display = 'none';
+  // 从历史列表打开的报告 → 回到列表原处（含滚动位置与筛选条件）
+  if (_reportOrigin === 'history' && _historyView) {
+    _reportOrigin = '';
+    _restoreHistoryView(_historyView);
+    return;
+  }
+  document.getElementById('history-area').style.display = 'none';
   document.getElementById('empty-state').style.display = 'block';
 }
 
@@ -343,7 +402,7 @@ function renderHistory(reports) {
     var summaryHtml = summary
       ? '<div class="report-summary" title="' + escHtml(summary) + '">' + escHtml(summary) + '</div>'
       : (missing ? '<div class="report-summary muted">旧报告：无摘要记录（可打开正文查看）</div>' : '');
-    return '<div class="history-item' + (r.partial ? ' partial' : '') + (missing ? ' plain' : '') + '" onclick="loadReport(\'' + safeName.replace(/'/g, "\\'") + '\')">' +
+    return '<div class="history-item' + (r.partial ? ' partial' : '') + (missing ? ' plain' : '') + '" data-name="' + safeName + '" onclick="loadReport(\'' + safeName.replace(/'/g, "\\'") + '\')">' +
       '<input type="checkbox" class="compare-check" data-name="' + safeName + '"' + checked +
       ' onclick="event.stopPropagation();toggleCompareSelect(this)" title="选择两份报告进行对比">' +
       '<div class="history-item-body">' +
@@ -464,6 +523,8 @@ async function compareSelected() {
       showToast('报告加载失败', 'error');
       return;
     }
+    // 进对比前记下列表原处（必须在隐藏之前记，隐藏后 scrollTop 已被浏览器清零）
+    _historyView = _captureHistoryView('');
     document.getElementById('history-area').style.display = 'none';
     document.getElementById('compare-area').style.display = 'flex';
     document.getElementById('compare-title').textContent = names[0] + ' ⇄ ' + names[1];
@@ -480,7 +541,7 @@ async function compareSelected() {
 
 function closeCompare() {
   document.getElementById('compare-area').style.display = 'none';
-  document.getElementById('history-area').style.display = 'block';
+  _restoreHistoryView(_historyView);   // 回到进入对比前的列表位置
 }
 
 async function loadReport(filename) {
@@ -494,6 +555,13 @@ async function loadReport(filename) {
     var res = await fetch('/api/reports/' + encodeURIComponent(filename), { headers: headers });
     var data = await res.json();
     if (data.content) {
+      // 来源记账：列表可见时点进来 → 记住列表原处，「← 返回」才能送回去
+      if (document.getElementById('history-area').style.display !== 'none') {
+        _reportOrigin = 'history';
+        _historyView = _captureHistoryView(filename);
+      } else {
+        _reportOrigin = '';
+      }
       currentReport = data.content;
       document.getElementById('history-area').style.display = 'none';
       document.getElementById('result-area').style.display = 'block';

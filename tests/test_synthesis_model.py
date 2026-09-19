@@ -16,7 +16,7 @@ import asyncio
 
 os.environ.setdefault("LLM_API_KEY", "test-key")
 os.environ.setdefault("LLM_BASE_URL", "http://localhost:9999")
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
@@ -64,13 +64,14 @@ def chat_calls(monkeypatch):
 def _split_calls(calls):
     """按 system_prompt 区分 Team Lead 综合调用与其余 Agent 调用。
 
-    P5 交叉辩论阶段会产生额外的 chat_complete 调用（system 为辩论 prompt），
-    它们既不是综合调用也不是研究 Agent 调用，先按辩论标记剔除再拆分。
+    P5 交叉辩论阶段会产生额外的 chat_complete 调用（system 为辩论 prompt /
+    答辩 prompt），它们既不是综合调用也不是研究 Agent 调用，先按辩论标记
+    剔除再拆分。
     """
     from app.harness.prompts import TEAM_LEAD_PROMPT
     lead_prefix = TEAM_LEAD_PROMPT[:40]
-    debate_marker = "请从你的专业角度审视这份报告"
-    non_debate = [c for c in calls if debate_marker not in c[1]]
+    debate_markers = ("请从你的专业角度审视这份报告", "对你报告的交叉质疑")
+    non_debate = [c for c in calls if not any(m in c[1] for m in debate_markers)]
     lead = [c for c in non_debate if c[1].startswith(lead_prefix)]
     others = [c for c in non_debate if not c[1].startswith(lead_prefix)]
     return lead, others

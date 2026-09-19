@@ -19,7 +19,7 @@ from datetime import datetime
 
 os.environ.setdefault("LLM_API_KEY", "test-key")
 os.environ.setdefault("LLM_BASE_URL", "http://localhost:9999")
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 from fastapi.testclient import TestClient
@@ -109,7 +109,7 @@ def test_prepare_resume_rejects(tmp_repo):
     conn = sqlite3.connect(str(tmp_repo.store.db_path), timeout=10)
     conn.execute(
         """INSERT INTO tasks (task_id, skill_name, status, arguments, created_at, updated_at)
-           VALUES ('t-single', 'dyp-ask', 'failed', 'X', ?, ?)""",
+           VALUES ('t-single', 'earnings-review', 'failed', 'X', ?, ?)""",
         (now, now),
     )
     conn.commit()

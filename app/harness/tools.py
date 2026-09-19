@@ -70,25 +70,43 @@ FINANCIAL_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "three_scenario",
-            "description": "三情景/敏感性估值。支持四种估值锚，按公司类型动态选择：anchor=PE(默认,传统重资产/制造/消费,用eps+multiples)、anchor=PB(银行/保险/周期股,用bvps+multiples)、anchor=PS(轻资产/互联网/软件,用revenue_per_share+multiples)，三者目标价=未来基准值(1+增长率)×倍数；anchor=DDM(反向戈登1959,适用银行/水电/高速/运营商等高股息且分红稳定的标的,用dps+discount_rates)，返回市场隐含的股息增长率与 r×g 敏感性矩阵(不给单点目标价)，不分红或象征性分红的标的会被直接拒绝，此时应改用 PE/PB/股息率锚",
+            "description": "三情景/敏感性估值。支持五种估值锚，按公司类型动态选择：anchor=PE(默认,传统重资产/制造/消费,用eps+multiples)、anchor=PB(银行/保险/周期股,用bvps+multiples)、anchor=PS(轻资产/互联网/软件,用revenue_per_share+multiples)，三者目标价=未来基准值(1+增长率)×倍数；anchor=DDM(反向戈登1959,适用银行/水电/高速/运营商等**高股息且分红稳定**的标的,用dps+discount_rates)，返回市场隐含的股息增长率与 r×g 敏感性矩阵(不给单点目标价)，不分红或象征性分红的标的会被直接拒绝；anchor=FCFE(反向 FCFE,权益口径股东自由现金流,适用**低分红/不分红但股东自由现金流为正**的标的,用 fcfe_per_share+discount_rates，fcfe_per_share 先用 fetch_fcfe_inputs 取数)，返回市场隐含的 FCFE 增长率与 r_e×g 敏感性矩阵，FCFE≤0(扩产期/周期底)会被直接拒绝，此时应改用 PE/PB/PS 锚",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "price": {"type": "number", "description": "当前股价"},
                     "shares_100m": {"type": "number", "description": "总股本（亿股）"},
-                    "growth_rates": {"type": "array", "items": {"type": "number"}, "description": "三个情景的增长率；anchor=DDM 时作为增长率网格(可省，默认=中档贴现率下的隐含增长率±1个百分点)"},
-                    "anchor": {"type": "string", "enum": ["PE", "PB", "PS", "DDM"], "description": "估值锚：PE(重资产/消费)、PB(银行/保险/周期)、PS(轻资产/互联网)、DDM(高股息稳定分红,反向戈登),默认PE"},
+                    "growth_rates": {"type": "array", "items": {"type": "number"}, "description": "三个情景的增长率。anchor=PE/PB/PS 必填；anchor=DDM/FCFE 可省(默认=中档折现率下的隐含增长率±1个百分点)"},
+                    "anchor": {"type": "string", "enum": ["PE", "PB", "PS", "DDM", "FCFE"], "description": "估值锚：PE(重资产/消费)、PB(银行/保险/周期)、PS(轻资产/互联网)、DDM(高股息稳定分红,反向戈登)、FCFE(低分红/不分红但现金流为正,反向 FCFE),默认PE"},
                     "eps": {"type": "number", "description": "当前每股收益(anchor=PE时必填)"},
                     "bvps": {"type": "number", "description": "当前每股净资产(anchor=PB时必填)"},
                     "revenue_per_share": {"type": "number", "description": "当前每股营收(anchor=PS时必填,=营收/股本)"},
                     "multiples": {"type": "array", "items": {"type": "number"}, "description": "三个情景的估值倍数(PE倍数/PB倍数/PS倍数,与anchor对应)"},
                     "pe_multiples": {"type": "array", "items": {"type": "number"}, "description": "兼容旧参数:三个情景的PE倍数,等价于anchor=PE时传multiples"},
                     "dps": {"type": "number", "description": "每股分红 D1(anchor=DDM时必填,口径=预期未来12个月,不是已派发历史)"},
-                    "discount_rates": {"type": "array", "items": {"type": "number"}, "description": "贴现率档(anchor=DDM时必填,建议三档,如[0.08,0.09,0.10])"},
-                    "risk_free_rate": {"type": "number", "description": "无风险利率(anchor=DDM可选,如10年国债1.8%=0.018,用于给出风险补偿与股息率利差)"},
+                    "fcfe_per_share": {"type": "number", "description": "每股股东自由现金流 FCFE1(anchor=FCFE时必填,口径=预期未来12个月;取数用 fetch_fcfe_inputs 的 fcfe_per_share 字段)"},
+                    "discount_rates": {"type": "array", "items": {"type": "number"}, "description": "折现率档(anchor=DDM 时为贴现率;anchor=FCFE 时为权益折现率 r_e。两者都必填,建议三档,如[0.09,0.10,0.11])"},
+                    "risk_free_rate": {"type": "number", "description": "无风险利率(anchor=DDM/FCFE 可选,如10年国债1.8%=0.018,用于给出风险补偿与收益率利差)"},
                     "currency": {"type": "string", "default": "CNY"},
                 },
-                "required": ["price", "shares_100m", "growth_rates"],
+                "required": ["price", "shares_100m"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "fetch_fcfe_inputs",
+            "description": "取 A 股 FCFE(股东自由现金流)输入集:归母净利润+折旧摊销-资本开支-营运资本增加+净借款,并给出每股 FCFE。用于估值时选 anchor=FCFE(低分红/不分红但现金流为正的标的);取数口径全部回传(期间组合/明细/股本来源/告警),分量缺失即如实报错不估算。默认 ttm(最近12个月),另有 annual/h1",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "A股6位代码,如 688008"},
+                    "basis": {"type": "string", "enum": ["ttm", "annual", "h1"], "description": "期间口径,默认 ttm(最近12个月:年报+半年报-上年同期半年报)"},
+                    "price": {"type": "number", "description": "当前股价(可选,给了就同时算 FCFE 收益率)"},
+                    "shares": {"type": "number", "description": "总股本(股,可选;默认用行情口径总市值/价格,取不到时退回资产负债表实收资本)"},
+                },
+                "required": ["symbol"],
             },
         },
     },
@@ -299,8 +317,83 @@ BROKER_TOOL_SCHEMAS = [
 ]
 
 
+
+
+# ==================== 公告/定期报告 + 慧博机构研报 Tool Schemas ====================
+# 2026-09-13 新增（批2/P1）：正面解决"应已披露却写需要核实"。
+# 实测依据：144 份报告里 68 份（47%）含"需要核实/待核实"措辞；同一天的
+# 澜起科技两份报告，不带工具的链路写"半年报应已披露但数字需要核实"，
+# 带工具的链路给出 33.36 亿/+26.66%/归母+72.33%。数据本来是通的。
+
+DISCLOSURE_TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "fetch_company_announcements",
+            "description": "获取A股公司的公告与定期报告数据：定期报告（年报/半年报/一季报/三季报，含披露日期与巨潮公告链接）、最新个股公告（东财，含 H 股公告/回购/减持/股权激励等）、高管持股变动明细（同花顺，含变动人/关系/数量/均价/剩余股数）。仅覆盖A股（6位代码）；港股/美股返回 covered=false，请改用 web_search。凡在报告里引用公告信息，必须标注来源（来源：巨潮资讯/东方财富/同花顺 + 日期）。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "A股6位代码，如 688008 或 688008.SH"},
+                    "company_name": {"type": "string", "description": "公司简称（可选，用于渲染标注）", "default": ""},
+                    "limit": {"type": "integer", "description": "每类返回条数上限，默认8", "default": 8},
+                },
+                "required": ["symbol"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "fetch_hibor_reports",
+            "description": "获取慧博投研资讯（hibor.com.cn）的机构研报列表：公司调研/行业分析/宏观研究/港美研究/投资策略/新股研究/晨会早刊/精选研报。**港美研究频道覆盖港股与美股的机构研报，这是东方财富研报中心没有的能力（东财仅A股）**。返回机构名/标题/日期/链接。注意：匿名只能拿到列表与摘要预览，研报全文需要慧博登录（用 fetch_hibor_report_detail 会如实返回 available=false）。报告中引用时必须标注来源（来源：慧博投研资讯 <机构名> <日期>）。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "股票代码（可选），如 688008.SH / 0700.HK / AAPL", "default": ""},
+                    "company_name": {"type": "string", "description": "公司简称（可选），如 澜起科技 / 腾讯", "default": ""},
+                    "keyword": {"type": "string", "description": "关键词（可选）：行业/主题词，如 半导体、商业航天", "default": ""},
+                    "channel": {"type": "string", "description": "指定频道（可选）：公司调研/行业分析/宏观研究/港美研究/投资策略/新股研究/晨会早刊/精选研报", "default": ""},
+                    "limit": {"type": "integer", "description": "返回条数上限，默认15", "default": 15},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "fetch_hibor_report_detail",
+            "description": "读取一篇慧博机构研报的详情页：标题/机构/日期/页数与摘要预览。若返回 available=false，说明全文需慧博登录（本机匿名抓取被登录墙拦截），此时 note 字段写明实测原因，切勿把摘要预览当成全文引用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "慧博报告链接（来自 fetch_hibor_reports 返回的 url 字段）"},
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "fetch_announcement_fulltext",
+            "description": "读取A股公司最近一期定期报告（年报优先，其次半年报）的原文摘录：默认取「董事和高级管理人员的情况」章节，含现任/离任董监高与核心技术人员的持股变动、年度薪酬、任期、报告期人员变动。**公告详情页是 JS 渲染的（网页读取只能拿到免责声明或模板占位符），这类治理细节必须走本工具读巨潮原文 PDF**。用于核实高管名单、持股、薪酬、离任/逝世等事项；返回 ok=false 时 note 写明原因（网络失败/未命中章节/非A股），不得据此编造内容。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "A股6位代码，如 688008 或 688008.SH"},
+                    "company_name": {"type": "string", "description": "公司简称（可选，用于标注）", "default": ""},
+                    "max_chars": {"type": "integer", "description": "摘录字符上限，默认3000", "default": 3000},
+                },
+                "required": ["symbol"],
+            },
+        },
+    },
+]
+
 # All tools available to agents
-ALL_TOOL_SCHEMAS = FINANCIAL_TOOL_SCHEMAS + DATA_TOOL_SCHEMAS + WEB_TOOL_SCHEMAS + INDUSTRY_TOOL_SCHEMAS + BROKER_TOOL_SCHEMAS
+ALL_TOOL_SCHEMAS = FINANCIAL_TOOL_SCHEMAS + DATA_TOOL_SCHEMAS + WEB_TOOL_SCHEMAS + INDUSTRY_TOOL_SCHEMAS + BROKER_TOOL_SCHEMAS + DISCLOSURE_TOOL_SCHEMAS
 
 
 # ── 交叉辩论：受限核对工具白名单 ──────────────────────────────
@@ -355,8 +448,101 @@ async def _execute_tool(tool_name: str, arguments: dict) -> str:
             return json.dumps({"error": str(e)}, ensure_ascii=False)
 
     # --- Market data tools (async) ---
+    from ..tools import announcements as _ann
+
+    # --- 公告/定期报告 + 慧博机构研报（2026-09-13 批2）---
+    # announcements.* 是同步 akshare 调用，用 to_thread 包一层避免阻塞事件循环；
+    # hibor_reports 自带 async 包装。
+    from ..tools import hibor_reports as _hibor
+
     # --- Broker research report tools (async) ---
     from ..tools.broker_reports import get_rating_summary, get_report_detail
+
+    async def _fetch_company_announcements(symbol: str, company_name: str = "", limit: int = 8):
+        def _sync():
+            code = _ann.normalize_symbol(symbol)
+            if not code:
+                return {
+                    "covered": False,
+                    "message": "公告数据仅覆盖A股（巨潮资讯/东方财富/同花顺），港股与美股请改用 web_search",
+                }
+            return {
+                "covered": True,
+                "symbol": code,
+                "disclosure_reports": _ann.get_disclosure_reports(code, limit=limit),
+                "notices": _ann.get_company_notices(code, limit=limit),
+                "management_changes": _ann.get_management_changes(code, limit=min(limit * 2, 20)),
+                "rendered_context": _ann.format_announcement_context(code, company_name or ""),
+                "_source": "cninfo/eastmoney/ths",
+            }
+        return await asyncio.to_thread(_sync)
+
+    async def _fetch_hibor_reports(symbol: str = "", company_name: str = "",
+                                   keyword: str = "", channel: str = "", limit: int = 15):
+        reports = []
+        if symbol or company_name:
+            reports = await _hibor.afetch_hibor_for_symbol(
+                symbol=symbol or "", company_name=company_name or "", limit=limit
+            )
+        if not reports and channel:
+            reports = await _hibor.afetch_hibor_reports(channel=channel, keyword=keyword or "", limit=limit)
+        if not reports and keyword:
+            # 未指定频道时按"公司调研→行业分析→港美研究→精选研报"顺序扫，
+            # 命中即停（实测"半导体设备"→3 条、"商业航天"→1 条；
+            # 只查单一频道会漏，例如商业航天只出现在公司调研页）。
+            for _ch in ("公司调研", "行业分析", "港美研究", "精选研报"):
+                reports = await _hibor.afetch_hibor_reports(
+                    channel=_ch, keyword=keyword, limit=limit
+                )
+                if reports:
+                    break
+        return {
+            "count": len(reports),
+            "reports": reports,
+            "note": "" if reports else "慧博当前无匹配研报（列表页快照内未命中）",
+            "_source": "hibor",
+        }
+
+    async def _fetch_announcement_fulltext(symbol: str, company_name: str = "", max_chars: int = 3000):
+        """定期报告原文摘录（董监高/持股/薪酬）—— 走巨潮 PDF，非网页。
+        首次需下载 3~4MB PDF（实测 4.4s~35s），命中 30 天缓存后 <0.01s。
+        """
+        from ..tools.announcement_docs import aget_management_excerpt
+        try:
+            mc = max(500, min(int(max_chars or 3000), 8000))
+        except (TypeError, ValueError):
+            mc = 3000
+        r = await aget_management_excerpt(symbol, company_name=company_name or "", max_chars=mc)
+        return {
+            "ok": bool(r.get("ok")),
+            "symbol": r.get("symbol"),
+            "title": r.get("title"),
+            "date": r.get("date"),
+            "section": r.get("anchor"),
+            "pdf_url": r.get("pdf_url"),
+            "excerpt": r.get("excerpt"),
+            "cached": r.get("cached"),
+            "note": r.get("note"),
+            "_source": "cninfo-pdf",
+        }
+
+    async def _fetch_fcfe_inputs(symbol: str, basis: str = "ttm", price=None, shares=None):
+        """FCFE（股东自由现金流）输入集 —— 供 three_scenario(anchor="FCFE") 使用。
+
+        分量口径全部回传（期间组合/明细/股本来源/告警）；分量缺失即如实返回 ok=False，
+        不做任何估算。取数见 app/tools/fcfe_inputs.py。
+        """
+        from ..tools.fcfe_inputs import aget_fcfe_inputs
+        try:
+            px = float(price) if price is not None else None
+        except (TypeError, ValueError):
+            px = None
+        try:
+            sh = float(shares) if shares is not None else None
+        except (TypeError, ValueError):
+            sh = None
+        r = await aget_fcfe_inputs(symbol, basis=(basis or "ttm"), price=px, shares=sh)
+        return {**r, "_source": "eastmoney-three-statements"}
 
     # --- Industry chain tools (async) ---
     from ..tools.industry_sources import list_industry_sources, search_industry_chain
@@ -383,6 +569,11 @@ async def _execute_tool(tool_name: str, arguments: dict) -> str:
         "list_industry_sources": lambda category="": list_industry_sources(category),
         "fetch_broker_reports": get_rating_summary,
         "fetch_broker_report_detail": get_report_detail,
+        "fetch_company_announcements": _fetch_company_announcements,
+        "fetch_announcement_fulltext": _fetch_announcement_fulltext,
+        "fetch_fcfe_inputs": _fetch_fcfe_inputs,
+        "fetch_hibor_reports": _fetch_hibor_reports,
+        "fetch_hibor_report_detail": _hibor.aget_report_detail,
     }
 
     if tool_name in async_tools:
@@ -401,7 +592,6 @@ TOOL_ENABLED_AGENTS = {
     "business-analyst", "financial-analyst", "industry-researcher", "risk-assessor",
     "company-event-scout", "industry-peer-analyst",
     "business-interpreter", "financial-auditor", "competition-analyst", "risk-hunter",
-    "researcher",
     "macro-institutional-economist", "macro-forecaster", "macro-strategist",
     "cn-policy-framework", "cn-data-cycle", "cn-fx-external", "cn-structure-trend",
 }
@@ -445,7 +635,13 @@ class ToolResult:
     error: str = ""
 
 
-_BUSINESS_ERROR_HINTS = ("不存在", "未找到", "not found", "no data", "无法识别")
+_BUSINESS_ERROR_HINTS = (
+    "不存在", "未找到", "not found", "no data", "无法识别",
+    # 页面解析失败不是"提供方故障"：搜索引擎跳转壳页/反爬页会稳定解析不出正文，
+    # 若计入失败会连开熔断器，把后续正常网页读取一起堵死（2026-09-13 实测：
+    # 2 次解析失败 → 第 3 次 read_webpage 直接 circuit open）。
+    "could not extract text content", "响应体超过", "url 被拒绝",
+)
 
 
 def _is_business_error(msg: str) -> bool:
@@ -527,6 +723,7 @@ TOOL_DEFS: dict[str, ToolDef] = {
     "verify_valuation": ToolDef("verify_valuation", timeout=5),
     "cross_validate": ToolDef("cross_validate", timeout=5),
     "three_scenario": ToolDef("three_scenario", timeout=5),
+    "fetch_fcfe_inputs": ToolDef("fetch_fcfe_inputs", timeout=60, retries=1),
     "calc": ToolDef("calc", timeout=5),
     "benford": ToolDef("benford", timeout=5),
     # market data — network-bound, cached, own internal fallback chains
@@ -543,6 +740,12 @@ TOOL_DEFS: dict[str, ToolDef] = {
     # broker research reports (东财研报中心) — 内部已有 SQLite 缓存
     "fetch_broker_reports": ToolDef("fetch_broker_reports", timeout=25, retries=1),
     "fetch_broker_report_detail": ToolDef("fetch_broker_report_detail", timeout=20, retries=1),
+    # 公告/定期报告（巨潮+东财+同花顺，akshare 同步接口，走 to_thread）+ 慧博机构研报
+    "fetch_company_announcements": ToolDef("fetch_company_announcements", timeout=45, retries=1),
+    # 定期报告原文摘录：首次要下 3~4MB PDF（实测最慢 35s），故超时给 120s、不重试
+    "fetch_announcement_fulltext": ToolDef("fetch_announcement_fulltext", timeout=120, retries=0),
+    "fetch_hibor_reports": ToolDef("fetch_hibor_reports", timeout=30, retries=1),
+    "fetch_hibor_report_detail": ToolDef("fetch_hibor_report_detail", timeout=25, retries=0),
 }
 
 

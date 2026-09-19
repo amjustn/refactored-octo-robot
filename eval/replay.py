@@ -259,6 +259,15 @@ async def main_async(args) -> int:
     persist_mod.REPORTS_DIR = scratch / "reports"
     (scratch / "reports").mkdir(exist_ok=True)
 
+    # Redirect the decision log as well (2026-09-19). Stub/replay runs go through
+    # the REAL runner, and runner saves each finished report's decision through
+    # decision_log.save_decision, which reads the module-global DECISION_LOG_PATH.
+    # Without this line every CI/replay run appended "（stub 分析段落）…" entries
+    # into the PRODUCTION data/decision-log.md — 6 polluted entries were found,
+    # and they made real reports show a bogus "⚠ 立场冲突" against fake history.
+    import app.harness.decision_log as decision_log_mod
+    decision_log_mod.DECISION_LOG_PATH = scratch / "decision-log.md"
+
     playback = _load_cassettes()
     if args.stub_llm and playback:
         print(f"[replay] verifying {len(playback)} cassette keys (offline playback) ...")

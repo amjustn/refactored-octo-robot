@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -33,6 +34,35 @@ from .decision_log import load_decisions as _load_decisions
 from .events import EventBus, EventType
 
 logger = logging.getLogger("ai_berkshire.harness.context")
+
+# ── 上下文留痕（P2 新鲜度门闸消费，2026-09-13）──────────────────
+# OutputGuard 在报告生成后运行，只拿得到 report 文本。要在"报告写需要核实、
+# 而本次上下文其实已注入对应数据"时告警，就必须知道当时注入了什么。
+# 这里按 task_id 留一份最近一次的上下文文本（有界 OrderedDict，避免常驻进程
+# 内存无界增长）。失败/异常一律吞掉，留痕绝不影响主链路。
+_LAST_CONTEXT: "OrderedDict[str, str]" = OrderedDict()
+_LAST_CONTEXT_MAX = 32
+
+
+def record_context(task_id: str, context: str) -> None:
+    """记录某任务的最终注入上下文（供新鲜度门闸比对）。"""
+    try:
+        if not task_id:
+            return
+        _LAST_CONTEXT[task_id] = context or ""
+        _LAST_CONTEXT.move_to_end(task_id)
+        while len(_LAST_CONTEXT) > _LAST_CONTEXT_MAX:
+            _LAST_CONTEXT.popitem(last=False)
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"record_context failed: {e}")
+
+
+def get_last_context(task_id: str) -> str:
+    """取回某任务最后的注入上下文；没有留痕返回 ''。"""
+    try:
+        return _LAST_CONTEXT.get(task_id or "", "") or ""
+    except Exception:  # noqa: BLE001
+        return ""
 
 # tokens 级预算（精确 token 计数，见 count_tokens）
 BUDGET = {
@@ -269,6 +299,9 @@ class ContextBuilder:
 
         bundle = await self._trim_and_grade(raw, llm_config)
         bundle.goal_hints = goal_hints
+        # P2（2026-09-13）：留痕最终注入上下文，供新鲜度门闸比对"报告说需要
+        # 核实、但数据其实已注入"的情形。
+        record_context(self.task_id, bundle.context)
 
         # Grade A: 信息充裕 → 提示对核心论点做反面检验
         if bundle.grade == "A":

@@ -50,8 +50,17 @@ async def mock_chat_complete(system, user, llm_config=None):
     captured_system_prompt["value"] = system
     return "Mock analysis report"
 
-with patch("app.harness.runner.chat_complete", new_callable=AsyncMock) as mock_cc:
+async def mock_chat_complete_with_tools(system, user, **kwargs):
+    # investment-research 在 registry 里声明了 tools_enabled（2026-09-13 批2/P1），
+    # 单Agent 走 function-calling 分支 → 只 mock chat_complete 会捕不到提示词（空串），
+    # 三条断言（当前时间/技能知识/大师知识）会一起假失败。两个入口都要打桩。
+    captured_system_prompt["value"] = system
+    return "Mock analysis report"
+
+with patch("app.harness.runner.chat_complete", new_callable=AsyncMock) as mock_cc, \
+     patch("app.harness.runner.chat_complete_with_tools", new_callable=AsyncMock) as mock_cc_tools:
     mock_cc.side_effect = mock_chat_complete
+    mock_cc_tools.side_effect = mock_chat_complete_with_tools
 
     try:
         report = asyncio.run(run_single_agent("investment-research", "腾讯"))

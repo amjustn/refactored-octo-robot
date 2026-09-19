@@ -4,8 +4,9 @@
 |-----------|-------------------------------------------------------------|---------|
 | structure | declared `output_sections` from the registry exist (single) | warning |
 | citation  | financial-looking numbers have a source marker in-block     | warning |
+| freshness | report says "需要核实" while context already has the data     | warning |
 | disclaimer| report ends with a no-investment-advice statement           | auto-fix|
-| length    | ≤ MAX_REPORT_LENGTH (50k; series 200k)                      | truncate|
+| length    | ≤ MAX_REPORT_LENGTH (70k; series 200k)                      | truncate|
 | tool_markers | leftover <tool_calls>/｜｜DSML｜｜/<invoke name= markers   | fatal   |
 
 tool_markers 为第3层闸门：报告残留工具调用标记说明模型对着未下发的
@@ -36,10 +37,14 @@ MAX_SERIES_REPORT_LENGTH = 200000
 
 DISCLAIMER = "\n\n---\n*以上分析由AI基于公开数据生成，仅供参考，不构成投资建议。投资有风险，决策需谨慎。*"
 
-# Words that count as a source attribution near a number
+# Words that count as a source attribution near a number.
+# 机构名本身就是出处（"交银国际给出1600元"/"中信证券指出"），旧的词表只认
+# "来源/公告/年报"这类字样，会把写明机构名的句子误判成无来源。
 _SOURCE_MARKERS = re.compile(
     r"(来源|数据来源|据|截至|报表|财报|公告|年报|季报|交易所|官网|"
+    r"[\u4e00-\u9fff]{2,4}(?:证券|建投|国际|投行|资管|研究院|研究所|基金)|"
     r"akshare|yfinance|yahoo|雅虎|腾讯|新浪|东财|东方财富|wind|同花顺|"
+    r"Morgan|Goldman|Citi|UBS|Macquarie|Nomura|CLSA|"
     r"20\d{2}[年/-]|Q[1-4])",
     re.I,
 )
@@ -60,8 +65,9 @@ _SOURCE_CAPTION = re.compile(r"^\s*[\*#>\-\s]*(?:数据|资料)?来源", re.I)
 # 命中即豁免来源标注要求——这些数字本就无外部来源可标。
 _DERIVED_MARKERS = re.compile(
     r"[=＝≈≒×÷]|情景|悲观|中性|乐观|假设|测算|推算|推导|计算|加权|期望|赔率|"
-    r"目标区间|估值区间|隐含|反推|倒推|相对现价|较现价|现价对比|"
+    r"目标区间|估值区间|隐含|反推|倒推|反向求解|相对现价|较现价|现价对比|"
     r"折价|溢价|上行空间|下行空间|占比|占总|仓位|持仓|权重|本报告|"
+    r"交叉验证|多源比对|偏差|校验|敏感性|为支撑现价所需|退出PE|支撑现价|"
     r"我们(?:预计|测算|估算|假设|认为)|对应(?:PE|PB|市值|估值)"
 )
 
@@ -154,9 +160,26 @@ class OutputGuard:
         self._gate_tool_markers(report)
         report = self._gate_structure(report, skill_name, strategy)
         self._gate_citation(report)
+        self._gate_freshness(report)
         report = self._gate_disclaimer(report)
         report = self._gate_length(report, strategy)
         return report, list(self.warnings)
+
+    def _gate_freshness(self, report: str):
+        """第4层闸门（P2，2026-09-13）：报告写"需要核实"，但上下文其实已有数据。
+
+        判据来自 harness.context 的上下文留痕（按 task_id）；没有留痕时不告警，
+        避免误报。只产 warning，不改报告正文。
+        """
+        try:
+            from .context import get_last_context
+            from .freshness_gate import check_freshness
+
+            ctx = get_last_context(self.task_id)
+            for w in check_freshness(report, ctx):
+                self._warn(w.get("gate", "freshness"), w.get("detail", ""))
+        except Exception as e:  # noqa: BLE001 - 门闸自身异常绝不阻断出报告
+            logger.debug(f"freshness gate skipped: {e}")
 
     def _gate_tool_markers(self, report: str):
         """第3层闸门：最终报告残留工具调用标记 → fatal。

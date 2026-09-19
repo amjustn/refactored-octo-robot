@@ -141,16 +141,17 @@ def cross_validate(field: str, values: dict, unit: str = "") -> dict:
     }
 
 
-def three_scenario(price: float, shares_100m: float, growth_rates: list,
+def three_scenario(price: float, shares_100m: float, growth_rates: Optional[list] = None,
                    multiples: Optional[list] = None, anchor: str = "PE",
                    eps: Optional[float] = None, bvps: Optional[float] = None,
                    revenue_per_share: Optional[float] = None, pe_multiples: Optional[list] = None,
                    currency: str = "CNY", dps: Optional[float] = None,
                    discount_rates: Optional[list] = None,
-                   risk_free_rate: Optional[float] = None) -> dict:
+                   risk_free_rate: Optional[float] = None,
+                   fcfe_per_share: Optional[float] = None) -> dict:
     """三情景估值: 乐观/中性/悲观, 返回目标价和上涨空间。
 
-    支持四种估值锚(按公司类型动态选择, 与 financial-analyst 的
+    支持五种估值锚(按公司类型动态选择, 与 financial-analyst 的
     "估值指标行业适配表"对应):
       anchor="PE" — 目标价 = 未来EPS × PE倍数(传统重资产/制造/消费)
       anchor="PB" — 目标价 = 未来每股净资产(BVPS) × PB倍数(银行/保险/周期股)
@@ -160,6 +161,17 @@ def three_scenario(price: float, shares_100m: float, growth_rates: list,
                      (可省, 默认=中档贴现率的隐含增长率 ±1 个百分点);
                      返回"隐含增长率 + 敏感性矩阵", 不返回单点目标价;
                      不分红/象征性分红的标的会被直接拒绝(DDM 对其无意义)
+      anchor="FCFE" — 反向 FCFE 敏感性(权益口径): 需 fcfe_per_share(预期未来12个月
+                     每股股东自由现金流 FCFE1) + discount_rates(权益折现率 r_e 档),
+                     输出结构与 DDM 相同(隐含增长率 + 敏感性矩阵);
+                     **适用于低分红/不分红但股东自由现金流为正的标的**
+                     (高股息稳定分红仍以 DDM 为主锚); FCFE1 <= 0 会被直接拒绝
+
+    growth_rates 的必填性是**按锚定**的: PE/PB/PS 必填(三个情景的增长率);
+    DDM/FCFE 可省。⚠️ 2026-09-13 实测踩坑: 原先写成位置必填参数, 模型按 schema
+    描述"可省"省略后被 TypeError 顶掉, 连续失败还把 three_scenario 熔断 ——
+    于是**三个锚一起失效**(FCFE/DDM/PE 全调不动)。故此处给默认值 None,
+    倍数锚缺 growth_rates 时返回可读错误。
 
     向后兼容: 旧调用(eps + pe_multiples 风格)自动识别为 PE 锚。
     """
@@ -178,6 +190,23 @@ def three_scenario(price: float, shares_100m: float, growth_rates: list,
                              shares_100m=shares_100m, currency=currency)
         out["function"] = "three-scenario"
         out["anchor"] = "DDM"
+        return out
+
+    # FCFE(权益现金流)分支: 同 DDM 的输出结构, 但分子换成股东自由现金流
+    if (anchor or "").upper() == "FCFE":
+        if fcfe_per_share is None:
+            return {"function": "three-scenario", "anchor": "FCFE",
+                    "error": "anchor=FCFE 需要提供 fcfe_per_share(预期未来 12 个月的每股股东自由现金流 FCFE1)"}
+        if not discount_rates:
+            return {"function": "three-scenario", "anchor": "FCFE",
+                    "error": "anchor=FCFE 需要提供 discount_rates(权益折现率 r_e 档, 建议三档)"}
+        out = reverse_fcfe(price=price, fcfe_per_share=fcfe_per_share,
+                           discount_rates=discount_rates,
+                           risk_free_rate=risk_free_rate,
+                           growth_grid=growth_rates if growth_rates else None,
+                           shares_100m=shares_100m, currency=currency)
+        out["function"] = "three-scenario"
+        out["anchor"] = "FCFE"
         return out
 
     # 兼容旧调用: 传了 pe_multiples 即按 PE 锚处理
@@ -204,7 +233,16 @@ def three_scenario(price: float, shares_100m: float, growth_rates: list,
         base_name, base = "revenue_per_share", Decimal(str(revenue_per_share))
         multiple_name = "ps_multiple"
     else:
-        return {"function": "three-scenario", "error": f"未知 anchor: {anchor}(可选 PE/PB/PS/DDM)"}
+        return {"function": "three-scenario",
+                "error": f"未知 anchor: {anchor}(可选 PE/PB/PS/DDM/FCFE)"}
+
+    # 倍数锚需要三情景增长率与倍数(DDM/FCFE 已在上面分支前置返回, 不吃这两项)
+    if not growth_rates:
+        return {"function": "three-scenario", "anchor": anchor,
+                "error": f"anchor={anchor} 需要提供 growth_rates(三个情景的增长率)"}
+    if not multiples:
+        return {"function": "three-scenario", "anchor": anchor,
+                "error": f"anchor={anchor} 需要提供 multiples(三个情景的估值倍数)"}
 
     p = Decimal(str(price))
     sh = Decimal(str(shares_100m))
@@ -357,6 +395,140 @@ def reverse_gordon(price: float, dividend_per_share: float, discount_rates: list
         "current_price": float(p),
         "dividend_per_share": float(dps),
         "dividend_yield_pct": round(float(div_yield), 2),
+        "shares_100m": float(shares_100m) if shares_100m is not None else None,
+        "currency": currency,
+        "discount_rates_pct": [round(float(x) * 100, 2) for x in rates],
+        "growth_grid_pct": [round(float(x) * 100, 2) for x in grid],
+        "risk_free_rate_pct": round(float(rf) * 100, 2) if rf is not None else None,
+        "implied": implied_out,
+        "sensitivity": rows,
+        "warnings": warnings,
+    }
+
+
+def reverse_fcfe(price: float, fcfe_per_share: float, discount_rates: list,
+                 risk_free_rate: Optional[float] = None,
+                 growth_grid: Optional[list] = None,
+                 shares_100m: Optional[float] = None,
+                 currency: str = "CNY",
+                 fcfe_basis: str = "TTM") -> dict:
+    """反向 FCFE 敏感性分析 — 股东自由现金流(FCFE，权益口径)折现模型。
+
+    模型: P = FCFE1 / (r_e - g)，等价 r_e = FCFE1 / P + g
+      * 正向: 给定 r_e、g 算目标价(sensitivity 部分)
+      * 反向: 给定市价 P 与每股股东自由现金流 FCFE1，解隐含增长率 g = r_e - FCFE1/P
+
+    与 DDM 的关系(为什么两个都要): DDM 的分子是每股分红 D1，对**低分红/不分红但现金流为正**
+    的公司直接失效(澜起这类股息率 0.2% 的标的就是)，FCFE 把分子换成"股东能拿到的现金流"
+    (净利润 + 折旧摊销 - 资本开支 - 营运资本增加 + 净借款)，覆盖面更大；反过来高股息稳定
+    分红的标的仍以 DDM 为主锚。
+
+    口径与铁律(与 reverse_gordon 对齐):
+      * fcfe_per_share 必须是**预期未来 12 个月**的每股 FCFE(FCFE1)。实务上常用 TTM
+        (最近四个季度) 作近似 —— 报告里必须写明用的是 TTM 还是分析师预测值(fcfe_basis 字段会回显)
+      * FCFE1 <= 0 → 直接拒绝：负 FCFE(扩产期/周期底/口径含一次性)下模型无意义，应改用
+        PB/PE/PS 锚，或先对 FCFE 做正常化处理
+      * 每格必须满足 r_e > g；g >= r_e 的格子标记 model_failed 且不给目标价(模型发散)
+      * 所有格子都失效 → 整体报错；r_e <= 0 / price <= 0 / rates 为空 → 报错
+      * FCFE 收益率 > 15% → warning(可能处周期高点、含一次性项目，或借还款扰动)
+      * 隐含 g 为负 → warning
+      * 默认网格 = 中档贴现率下的隐含增长率 ± 1 个百分点(三点)
+    """
+    p = Decimal(str(price))
+    if p <= 0:
+        return {"function": "reverse-fcfe", "error": "price 必须为正数"}
+
+    fcfe = Decimal(str(fcfe_per_share))
+    if fcfe <= 0:
+        return {"function": "reverse-fcfe",
+                "error": "每股 FCFE <= 0（扩产期/周期底/口径含一次性），FCFE 锚对其无意义"
+                         "（应先做正常化，或改用 PB/PE/PS 锚）"}
+
+    if not discount_rates:
+        return {"function": "reverse-fcfe", "error": "缺少 discount_rates(权益折现率 r_e 数组)"}
+
+    rates = [Decimal(str(x)) for x in discount_rates]
+    if any(x <= 0 for x in rates):
+        return {"function": "reverse-fcfe", "error": "权益折现率必须为正数"}
+
+    fcfe_yield = fcfe / p * 100
+    implied = [r - fcfe / p for r in rates]
+
+    if growth_grid is None:
+        center = implied[len(rates) // 2]
+        grid = [center - Decimal("0.01"), center, center + Decimal("0.01")]
+    else:
+        if not growth_grid:
+            return {"function": "reverse-fcfe", "error": "growth_grid 不能为空数组"}
+        grid = [Decimal(str(x)) for x in growth_grid]
+
+    warnings = []
+    if fcfe_yield > Decimal("15"):
+        warnings.append(
+            f"FCFE 收益率 {float(fcfe_yield):.2f}% 偏高：请核实是否处周期高点、含一次性项目，"
+            "或净借款/营运资本扰动导致单期失真（FCFE1 须为可持续口径）"
+        )
+    if any(g < 0 for g in implied):
+        warnings.append(
+            f"反解出现负的隐含增长率（最低 {float(min(implied)) * 100:.2f}%）："
+            "按该折现率市场已 price-in 股东自由现金流下滑，需与经营趋势对照"
+        )
+
+    rows = []
+    valid_cells = 0
+    for r in rates:
+        cells = []
+        for g in grid:
+            if g >= r:
+                cells.append({
+                    "growth_pct": round(float(g) * 100, 2),
+                    "model_failed": True,
+                    "reason": "g >= r_e，模型发散(估值趋于无穷)，该格不给目标价",
+                })
+                continue
+            target = fcfe / (r - g)
+            upside = (target - p) / p * 100
+            cell = {
+                "growth_pct": round(float(g) * 100, 2),
+                "target_price": round(float(target), 2),
+                "upside_pct": round(float(upside), 1),
+                "model_failed": False,
+            }
+            if shares_100m is not None:
+                cell["market_cap"] = round(float(target * Decimal(str(shares_100m))), 0)
+            cells.append(cell)
+            valid_cells += 1
+        rows.append({
+            "discount_rate_pct": round(float(r) * 100, 2),
+            "cells": cells,
+        })
+
+    if valid_cells == 0:
+        return {"function": "reverse-fcfe",
+                "error": "全部情景满足 g >= r_e，FCFE 模型失效（检查增长/折现率假设，或改用其它估值锚）"}
+
+    rf = Decimal(str(risk_free_rate)) if risk_free_rate is not None else None
+    implied_out = []
+    for r, g in zip(rates, implied):
+        item = {
+            "discount_rate_pct": round(float(r) * 100, 2),
+            "implied_growth_pct": round(float(g) * 100, 2),
+        }
+        if rf is not None:
+            item["risk_premium_pct"] = round(float(r - rf) * 100, 2)
+            item["fcfe_yield_spread_pct"] = round(float(fcfe_yield - rf * 100), 2)
+        implied_out.append(item)
+
+    if rf is not None and rf >= min(rates):
+        warnings.append("无风险利率 >= 最低折现率档，风险补偿为负，请检查输入")
+
+    return {
+        "function": "reverse-fcfe",
+        "model": "FCFE (权益口径): P = FCFE1/(r_e-g)；反向解 g_implied = r_e - FCFE1/P",
+        "current_price": float(p),
+        "fcfe_per_share": float(fcfe),
+        "fcfe_yield_pct": round(float(fcfe_yield), 2),
+        "fcfe_basis": fcfe_basis,
         "shares_100m": float(shares_100m) if shares_100m is not None else None,
         "currency": currency,
         "discount_rates_pct": [round(float(x) * 100, 2) for x in rates],

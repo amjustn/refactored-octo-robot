@@ -65,7 +65,11 @@ def captured_llm(monkeypatch):
         _rec("tools", system, user, llm_config, tools, tool_executor)
         if DEBATE_MARKER in (system or ""):
             return "评审输出"
-        return "HEAD_MARKER" + ("x" * 4000) + "TAIL_MARKER"
+        # 含可抽取的结论/置信度，供立场卡（debate_stance）抽取
+        return (
+            "HEAD_MARKER\n**结论**：维持持有，估值合理。\n**置信度**：高\n"
+            + ("x" * 4000) + "\nTAIL_MARKER"
+        )
 
     async def fake_complete(system, user, llm_config=None, **kw):
         _rec("complete", system, user, llm_config)
@@ -254,3 +258,62 @@ class TestDebateIntegration:
         synthesis = [c for c in captured_llm if c["kind"] == "stream"]
         assert synthesis and "### 答辩：" not in synthesis[-1]["system"]
         assert "### 交叉评审：" in synthesis[-1]["system"]
+
+
+# ==================== 立场卡（防漂移）+ 法官分离 ====================
+
+class TestStanceCardAndJudgeSplit:
+    def test_parse_disputes_confidence_sorted(self):
+        from app.harness.runner import _format_dispute_table
+        debate = (
+            "\n\n### 交叉评审：a→b\n"
+            "同意。\n- 财务｜低置信证据｜低\n- 行业｜高置信证据｜高\n独立判断：HOLD\n"
+        )
+        table = _format_dispute_table(debate)
+        assert table.index("高置信证据") < table.index("低置信证据")
+
+    def test_stance_cards_roundtrip(self):
+        from app.harness.runner import _format_stance_cards, _parse_stance_cards
+        cards = {"financial-analyst": {"conclusion": "维持买入", "confidence": "高"}}
+        parsed = _parse_stance_cards(_format_stance_cards(cards))
+        assert parsed["financial-analyst"]["conclusion"] == "维持买入"
+        assert parsed["financial-analyst"]["confidence"] == "高"
+
+    def test_stance_table_shows_revision_reason_evidence(self):
+        from app.harness.runner import _format_stance_table
+        cards = {"financial-analyst": {"conclusion": "买入", "confidence": "高"}}
+        debate = (
+            "\n\n### 答辩：industry-researcher→financial-analyst\n"
+            "买入→持有｜毛利率口径经复算被高估｜calc(2024毛利率=41%)\n"
+        )
+        table = _format_stance_table(cards, debate)
+        assert "持有" in table
+        assert "毛利率口径经复算被高估" in table
+        assert "calc(2024毛利率=41%)" in table
+
+    def test_rebuttal_prompt_injects_frozen_stance_and_evidence_rule(self, captured_llm, tmp_repo):
+        _run(_make_spec())
+        rebuttals = _rebuttal_calls(captured_llm)
+        assert rebuttals, "investment-team 默认应产生答辩调用"
+        for c in rebuttals:
+            assert "初版立场" in c["system"]
+            assert "工具证据" in c["system"]
+            assert "不得仅因对方措辞" in c["system"]
+
+    def test_synthesis_evidence_table_before_raw_appendix(self, captured_llm, tmp_repo):
+        _run(_make_spec())
+        synthesis = [c for c in captured_llm if c["kind"] == "stream"]
+        assert synthesis
+        prompt = synthesis[-1]["system"]
+        assert "争议与立场证据表" in prompt
+        assert "立场卡对照" in prompt
+        assert "附录：辩论原文" in prompt
+        assert prompt.index("争议与立场证据表") < prompt.index("附录：辩论原文")
+
+    def test_stance_flag_off_keeps_legacy_synthesis(self, captured_llm, tmp_repo):
+        _run(_make_spec(debate_stance=False))
+        synthesis = [c for c in captured_llm if c["kind"] == "stream"]
+        assert synthesis
+        prompt = synthesis[-1]["system"]
+        assert "争议与立场证据表" not in prompt
+        assert "Agent 交叉辩论记录" in prompt

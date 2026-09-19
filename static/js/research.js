@@ -57,9 +57,6 @@ var ARG_VALIDATORS = {
   'investment-team': function(a) {
     return a.trim().length >= 2 ? null : '请输入公司名或股票代码，如：腾讯 / 0700.HK / 600519';
   },
-  'investment-checklist': function(a) {
-    return a.trim().length >= 2 ? null : '请输入公司名或股票代码（支持多个逗号分隔），如：腾讯,茅台,美团';
-  },
   'financial-data': function(a) {
     return a.trim().length >= 2 ? null : '请输入公司名或股票代码，如：腾讯 / 600519';
   },
@@ -68,9 +65,6 @@ var ARG_VALIDATORS = {
   },
   'industry-funnel': function(a) {
     return a.trim().length >= 2 ? null : '请输入行业或方向，如：AI应用 / 光伏 / 创新药';
-  },
-  'quality-screen': function(a) {
-    return a.trim().length >= 2 ? null : '请输入行业/指数/主题，如：沪深300 / 半导体';
   },
   'bottleneck-hunter': function(a) {
     return a.trim().length >= 2 ? null : '请输入超级趋势方向，如：AI算力 / 固态电池';
@@ -120,7 +114,7 @@ var _uploadedFiles = [];  // extracted text from uploaded files
 var _uploadedFileItems = [];  // uploaded file metadata for cumulative display
 
 // Known multimodal models
-var _MULTIMODAL_MODELS = ['gpt-4o', 'gpt-4-turbo', 'gpt-4-vision', 'gpt-5.6', 'gpt-5.5', 'gpt-5.4', 'claude-sonnet-5', 'claude-opus-5', 'claude-sonnet-4', 'claude-opus-4', 'claude-3', 'gemini', 'glm-4v', 'qwen-vl', 'qwenvl', 'doubao-vision', 'doubao-1.5-vision', 'llava', 'pixtral', 'yi-vision', 'grok-vision', 'gemma3'];
+var _MULTIMODAL_MODELS = ['gpt-4o', 'gpt-4-turbo', 'gpt-4-vision', 'gpt-5.6', 'gpt-5.5', 'gpt-5.4', 'claude-sonnet-5', 'claude-opus-5', 'claude-sonnet-4', 'claude-opus-4', 'claude-3', 'gemini', 'glm-4v', 'qwen3.8-max', 'qwen3.7-plus', 'doubao-vision', 'doubao-1.5-vision', 'llava', 'pixtral', 'yi-vision', 'grok-vision', 'gemma3'];
 
 function updateUploadVisibility() {
   // Upload row is always visible — vision model only affects image OCR quality
@@ -297,6 +291,7 @@ async function startResearch() {
   // Hide other areas
   document.getElementById('empty-state').style.display = 'none';
   document.getElementById('history-area').style.display = 'none';
+  _reportOrigin = '';   // 新研究 → 「← 返回」回主页面，不再回历史列表原处
   document.getElementById('compare-area').style.display = 'none';
   document.getElementById('costs-area').style.display = 'none';
   document.getElementById('decisions-area').style.display = 'none';
@@ -449,6 +444,7 @@ function _streamResearchImpl(args, attachments, watchTaskId) {
           }
         } else {
           currentReport += data.content;
+          _reportOrigin = '';
           document.getElementById('progress-area').style.display = 'none';
           document.getElementById('result-area').style.display = 'block';
           scheduleRender();
@@ -649,6 +645,16 @@ async function batchResearch(args, attachments) {
       currentReport = data.report;
       updateAllAgents('completed');
       finishResearch(true, null, { duration: data.duration_seconds, tokens: data.tokens });
+    } else if (data.report) {
+      // 失败/全员超时，但后端抢救出了中断前取到的原始数据：直接渲染出来，
+      // 别让它只剩一页空错误（用户看不到数据等于白跑）。
+      currentReport = data.report;
+      document.getElementById('progress-area').style.display = 'none';
+      document.getElementById('result-area').style.display = 'block';
+      renderReport(data.report);
+      buildToc();
+      showToast('任务未跑完，但已保留中断前取到的原始数据（见报告正文）', 'warning');
+      finishResearch(false, data.error || '任务未跑完');
     } else {
       finishResearch(false, data.error || 'Unknown error');
     }
@@ -881,6 +887,7 @@ function finishResearch(success, errorMsg, meta) {
   }
 
   if (currentReport && currentReport.indexOf('# 错误') !== 0) {
+    _reportOrigin = '';   // 本次研究生成的报告 → 返回回主页面
     document.getElementById('progress-area').style.display = 'none';
     document.getElementById('result-area').style.display = 'block';
     renderReport(currentReport);

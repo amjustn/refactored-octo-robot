@@ -1,4 +1,3 @@
-// AI Berkshire Web - Application Logic
 let currentSkill = null;
 let allSkills = [];
 let currentReport = '';
@@ -367,7 +366,7 @@ var LLM_PROVIDER_PRESETS = {
   qwen: {
     label: '阿里（通义千问）',
     base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-    models: ['qwen3-max', 'qwen3-plus', 'qwen3-turbo', 'qwen-vl-max', 'qwen-vl-plus']
+    models: ['qwen3.8-max', 'qwen3.7-plus', 'qwen3.8-flash']
   },
   baidu: {
     label: '百度（文心）',
@@ -417,8 +416,7 @@ var AGENT_LABELS = {
   'competition-analyst': '竞争变化解读者',
   'risk-hunter': '风险信号猎手',
   'editor': '公众号财经编辑',
-  'reader-reviewer': '投资者评审',
-  'researcher': '深度研究员'
+  'reader-reviewer': '投资者评审'
 };
 
 function _getAgentLabel(name) {
@@ -1056,9 +1054,6 @@ var ARG_VALIDATORS = {
   'investment-team': function(a) {
     return a.trim().length >= 2 ? null : '请输入公司名或股票代码，如：腾讯 / 0700.HK / 600519';
   },
-  'investment-checklist': function(a) {
-    return a.trim().length >= 2 ? null : '请输入公司名或股票代码（支持多个逗号分隔），如：腾讯,茅台,美团';
-  },
   'financial-data': function(a) {
     return a.trim().length >= 2 ? null : '请输入公司名或股票代码，如：腾讯 / 600519';
   },
@@ -1067,9 +1062,6 @@ var ARG_VALIDATORS = {
   },
   'industry-funnel': function(a) {
     return a.trim().length >= 2 ? null : '请输入行业或方向，如：AI应用 / 光伏 / 创新药';
-  },
-  'quality-screen': function(a) {
-    return a.trim().length >= 2 ? null : '请输入行业/指数/主题，如：沪深300 / 半导体';
   },
   'bottleneck-hunter': function(a) {
     return a.trim().length >= 2 ? null : '请输入超级趋势方向，如：AI算力 / 固态电池';
@@ -1119,7 +1111,7 @@ var _uploadedFiles = [];  // extracted text from uploaded files
 var _uploadedFileItems = [];  // uploaded file metadata for cumulative display
 
 // Known multimodal models
-var _MULTIMODAL_MODELS = ['gpt-4o', 'gpt-4-turbo', 'gpt-4-vision', 'gpt-5.6', 'gpt-5.5', 'gpt-5.4', 'claude-sonnet-5', 'claude-opus-5', 'claude-sonnet-4', 'claude-opus-4', 'claude-3', 'gemini', 'glm-4v', 'qwen-vl', 'qwenvl', 'doubao-vision', 'doubao-1.5-vision', 'llava', 'pixtral', 'yi-vision', 'grok-vision', 'gemma3'];
+var _MULTIMODAL_MODELS = ['gpt-4o', 'gpt-4-turbo', 'gpt-4-vision', 'gpt-5.6', 'gpt-5.5', 'gpt-5.4', 'claude-sonnet-5', 'claude-opus-5', 'claude-sonnet-4', 'claude-opus-4', 'claude-3', 'gemini', 'glm-4v', 'qwen3.8-max', 'qwen3.7-plus', 'doubao-vision', 'doubao-1.5-vision', 'llava', 'pixtral', 'yi-vision', 'grok-vision', 'gemma3'];
 
 function updateUploadVisibility() {
   // Upload row is always visible — vision model only affects image OCR quality

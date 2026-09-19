@@ -43,8 +43,14 @@ LLM_SUPPORTED_MODELS = [
 
 # Agent settings
 MAX_PARALLEL_AGENTS = 4
-AGENT_TIMEOUT = 300  # seconds
-MAX_REPORT_LENGTH = 50000  # chars
+# 单个 Agent 的墙钟上限。2026-09-19 由 300 提到 600：investment-team 这类
+# 「4 个 Agent 各自全量取数 + 交叉验证」的任务，实测单 Agent 20+ 次工具调用、
+# 中间还夹 1.5-2.5 分钟空档，300 秒必被掐（task 9d717fe98c67 四个 Agent 全超时）。
+AGENT_TIMEOUT = int(os.getenv("AGENT_TIMEOUT", "600"))  # seconds
+# 单次 LLM 请求超时（与 Agent 总预算分开）：上游 hang 住时不该把整个 Agent 的
+# 预算耗在一次请求上，短超时 + 既有 3 次重试更划算。
+LLM_REQUEST_TIMEOUT = int(os.getenv("LLM_REQUEST_TIMEOUT", "120"))  # seconds
+MAX_REPORT_LENGTH = 70000  # chars（2026-09-19 由 5 万提到 7 万：工具上限放宽后报告变长，6.1 万字符的报告曾被砍尾）
 MAX_REPORT_AGE_DAYS = 90
 # Global cap on simultaneously running research tasks; extra runs get a
 # "busy" error immediately instead of queueing (protects the LLM budget).
@@ -61,6 +67,7 @@ GOAL_PARSE_CACHE_TTL = int(os.getenv("GOAL_PARSE_CACHE_TTL", "86400"))  # 24 hou
 # leave orphaned threads behind; a dedicated small pool caps that accumulation
 # and isolates it from the event loop's default executor.
 MARKET_SYNC_WORKERS = int(os.getenv("MARKET_SYNC_WORKERS", "6"))
+
 
 # Knowledge Base Configuration
 KNOWLEDGE_REFRESH_INTERVAL = int(os.getenv("KNOWLEDGE_REFRESH_INTERVAL", "604800"))  # 7 days

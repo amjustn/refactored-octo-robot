@@ -422,6 +422,20 @@ body {
   transition: all 0.15s;
 }
 .history-item:hover { border-color: var(--accent); box-shadow: var(--shadow); }
+/* 刚从列表点开、又用「← 返回」回来的那条：左侧留一道竖线做位置锚点 */
+.history-item.last-opened {
+  border-color: var(--accent);
+  box-shadow: var(--shadow);
+  position: relative;
+}
+.history-item.last-opened::before {
+  content: '';
+  position: absolute;
+  left: 0; top: 10px; bottom: 10px;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--accent);
+}
 .history-item .report-name { font-size: 0.85rem; color: var(--accent); letter-spacing: 0.03em; }
 .history-item .report-summary {
   font-size: 0.75rem;

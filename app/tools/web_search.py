@@ -21,6 +21,8 @@ from urllib.parse import urljoin, urlparse
 import httpx
 from bs4 import BeautifulSoup
 
+from . import text_relevance as _text_relevance
+
 logger = logging.getLogger("ai_berkshire.web_search")
 
 # 批次相关性阈值：批次中"含足够查询 token"的结果占比低于该值判为投毒批次
@@ -90,23 +92,13 @@ async def web_search(query: str, max_results: int = 10) -> list:
     # 或标题原样回声查询串。旧守卫"任意一条命中即放行"会被一条正常结果
     # 蒙混过关；升级为批次评分：命中结果占比 < _MIN_BATCH_RELEVANCE 判为
     # 投毒批次，继续回退；全部源都被投毒才返回 placeholder。
-    q_norm = re.sub(r"\s+", "", query)
-
     def _relevance_ratio(rs):
-        tokens = [t for t in re.findall(r"[一-鿿]{2,}|[A-Za-z0-9]{3,}", query)
-                  if t not in ("最新", "分析", "预测", "怎么样", "如何")]
-        if not tokens or not rs:
-            return 1.0 if not tokens else 0.0
-        need = min(2, len(tokens))  # 单 token 查询放宽到 1
-        hits = 0
-        for r in rs:
-            title = r.get("title", "") or ""
-            snippet = r.get("snippet", "") or ""
-            # 标题整串回声查询 → 只信摘要（头条/视频源常见投毒手法）
-            blob = snippet if (q_norm and q_norm in re.sub(r"\s+", "", title)) else title + snippet
-            if sum(1 for t in tokens if t in blob) >= need:
-                hits += 1
-        return hits / len(rs)
+        # token 化与占比判定统一走 app/tools/text_relevance.py（2026-09-13）。
+        # 原实现把连续中文整句当成【一个】token（中文没空格），门闸要求每条
+        # 结果命中 2 个 token，于是"澜起科技你给我一个深度报告 2026 最新"
+        # 这类查询在搜狗/360/百度/Bing/头条上全被判 0%，白白等 14.6 秒后
+        # 返回"无结果"。现在长中文串会拆 2-gram 并剔除泛化词。
+        return _text_relevance.relevance_ratio(rs, query)
 
     # 多源回退链（按 2026-08-16 本环境实测质量重排，3 个财务查询探针）：
     #   搜狗  — 财务查询质量最高（hits 8/8、3/3、8/8），摘要含真实数字，~1-2s
@@ -423,11 +415,73 @@ async def _fetch_html(client: httpx.AsyncClient, url: str) -> tuple:
     raise ValueError("重定向次数过多")
 
 
+# ── 页面正文提取 + 跳转壳页跟进（2026-09-13）───────────────────
+# 现场（端到端留痕 data/scratchpad/c1529979e891.jsonl）：模型对搜索引擎结果里
+# 的 so.com/link?m=... 调用 read_webpage，返回 200 但只有 JS 跳转壳页，
+# trafilatura 与 bs4 都取不到正文 → 3 次调用里 2 次报
+# "Could not extract text content from page"，第 3 次直接撞上熔断器（circuit
+# open），连巨潮/eastmoney 公告正文都读不了，报告里因此出现
+# "网页直读与进一步网络检索受工具限制未能完全展开"。
+# 处理：正文过短时解析跳转目标，再抓一跳（仍走 _fetch_html 的 SSRF 逐跳校验）。
+_MIN_USEFUL_TEXT = 80
+_META_REFRESH_RE = re.compile(
+    r"""<meta[^>]+http-equiv\s*=\s*["']?refresh["']?[^>]*content\s*=\s*["'][^"']*?url\s*=\s*([^"'\s>]+)""",
+    re.I,
+)
+_JS_REDIRECT_RE = re.compile(
+    r"""(?:window\.)?location(?:\.(?:replace|assign|href))?\s*(?:=|\()\s*["']([^"']{8,})["']""",
+    re.I,
+)
+_REDIRECT_HOSTS = ("so.com", "sogou.com", "baidu.com", "bing.com", "toutiao.com")
+
+
+def _extract_page_text(html: str) -> tuple:
+    """返回 (title, text)：trafilatura 优先，bs4 兜底。"""
+    soup = BeautifulSoup(html, "html.parser")
+    title = ""
+    if soup.title and soup.title.string:
+        title = soup.title.string.strip()
+    text = ""
+    try:
+        import trafilatura
+        text = trafilatura.extract(
+            html, include_comments=False, include_tables=True, favor_precision=True,
+        ) or ""
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"Trafilatura extraction failed: {e}")
+    if not text:
+        s = BeautifulSoup(html, "html.parser")
+        for tag in s.find_all(["script", "style", "nav", "footer", "header", "aside"]):
+            tag.decompose()
+        text = s.get_text(separator="\n", strip=True)
+    text = re.sub(r"\n{3,}", "\n\n", text or "")
+    text = re.sub(r" {2,}", " ", text)
+    return title, text
+
+
+def _extract_redirect_target(html: str, base_url: str) -> str:
+    """从 JS/meta 跳转壳页里取出跳转目标 URL；取不到返回 ''。"""
+    if not html:
+        return ""
+    for rx in (_META_REFRESH_RE, _JS_REDIRECT_RE):
+        m = rx.search(html[:20000])
+        if m:
+            target = (m.group(1) or "").strip().strip("'\"")
+            if target.startswith("//"):
+                target = "https:" + target
+            if not target.startswith(("http://", "https://")):
+                target = urljoin(base_url, target)
+            if target.startswith(("http://", "https://")) and target != base_url:
+                return target
+    return ""
+
+
 async def read_webpage(url: str, max_chars: int = 8000) -> dict:
     """Fetch a web page and extract clean, readable text content.
 
     Uses trafilatura for high-quality article extraction.
     Falls back to BeautifulSoup if trafilatura fails.
+    搜索引擎跳转壳页（so.com/link 等）会解析跳转目标再抓一跳。
 
     Returns:
     {
@@ -502,6 +556,28 @@ async def read_webpage(url: str, max_chars: int = 8000) -> dict:
             text = re.sub(r"\n{3,}", "\n\n", text)
             text = re.sub(r" {2,}", " ", text)
 
+        _host = urlparse(url).netloc.lower()
+        _is_search_redirect = any(h in _host for h in _REDIRECT_HOSTS)
+        if not text or len(text.strip()) < _MIN_USEFUL_TEXT or _is_search_redirect:
+            # 搜索引擎跳转页（so.com/link、sogou /link、baidu /link）实测返回
+            # 200 + JS/meta 跳转壳页，trafilatura 与 bs4 都取不到正文，模型
+            # 只能放弃（2026-09-13 端到端留痕：3 次 read_webpage 里 2 次这种）。
+            # 这里解析跳转目标再抓一跳（走 _fetch_html，仍是 SSRF 逐跳校验）。
+            target = _extract_redirect_target(html, url)
+            if target and target != url:
+                logger.info(f"read_webpage: 检测到跳转壳页，跟进 {target[:80]}")
+                try:
+                    status2, headers2, raw2 = await _fetch_html(client, target)
+                    if status2 == 200:
+                        html2 = raw2.decode("utf-8", errors="replace")
+                        title2, text2 = _extract_page_text(html2)
+                        if len(text2.strip()) > len((text or "").strip()):
+                            url = target
+                            html, title, text = html2, title2, text2
+                            content_type = headers2.get("content-type", "")
+                except Exception as e:  # noqa: BLE001 - 跟进失败按原结果返回
+                    logger.debug(f"read_webpage: 跳转跟进失败: {e}")
+
         if not text:
             return {
                 "url": url,
@@ -517,13 +593,35 @@ async def read_webpage(url: str, max_chars: int = 8000) -> dict:
 
         word_count = len(text)
 
+        # 内容质量标记（2026-09-13，静态审计第 1 条）：
+        # 只判「有没有返回内容」会把 JS 空壳页也算成功 —— 实测东财公告详情页返回
+        # 51 字符通用免责声明、巨潮公告详情页返回 264 字符 {{stockName}} 模板占位符，
+        # 两者都不是正文。这里显式标注，避免调用方把落地页当正文引用。
+        _t = text.strip()
+        if "{{" in _t and "}}" in _t:
+            quality = "shell"          # 模板占位符：JS 渲染页
+        elif len(_t) < 200:
+            quality = "shell"          # 过短：多半是跳转页/免责声明壳
+        elif len(_t) < 400:
+            quality = "thin"           # 可疑：可能是节选或落地页
+        else:
+            quality = "ok"
+
         result = {
             "url": url,
             "title": title,
             "content": text,
             "word_count": word_count,
             "content_type": content_type,
+            "quality": quality,
         }
+        if quality != "ok":
+            result["note"] = (
+                "正文质量标记为 "
+                + quality
+                + "：该页可能是 JS 渲染/跳转壳页，正文未取到。"
+                "公告正文请改用 fetch_announcement_fulltext（巨潮原文 PDF 摘录）。"
+            )
 
         logger.info(f"Read webpage: {title[:50]}... ({word_count} chars)")
         return result

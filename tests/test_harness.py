@@ -462,6 +462,38 @@ class TestDecisionLog:
         from app.harness.decision_log import _extract_decision
         assert _extract_decision("short", "test") is None
 
+    def test_extract_conclusion_own_line_bold(self):
+        """批D: `**最终结论：**` 标签独占一行、正文在下一行 —— 旧版抓成 `**`→空→丢弃。"""
+        from app.harness.decision_log import _extract_decision
+        r = "**最终结论：**\n半导体设备行业应长期持有龙头公司。\n" + "x" * 120
+        d = _extract_decision(r, "半导体设备")
+        assert d is not None
+        assert "长期持有龙头公司" in d["conclusion"]
+
+    def test_extract_conclusion_heading_next_line(self):
+        """批D: `### 一、一句话结论` 无冒号标题，正文在下一行。"""
+        from app.harness.decision_log import _extract_decision
+        r = ("### 一、一句话结论\n> **不建议当前追高投资。** 军工估值已隐含乐观预期。\n"
+             + "x" * 120)
+        d = _extract_decision(r, "石油能源与军工")
+        assert d is not None
+        assert d["conclusion"].startswith("不建议当前追高投资")
+
+    def test_extract_conclusion_stance_label(self):
+        """批D: `立场：` 标签（澜起 FCFE 报告用的写法）。"""
+        from app.harness.decision_log import _extract_decision
+        r = "## 最终结论\n\n### 立场：**❌ 不通过（现价191.96元）**\n" + "x" * 120
+        d = _extract_decision(r, "澜起科技")
+        assert d is not None
+        assert "不通过" in d["conclusion"]
+
+    def test_extract_rejects_query_echo(self):
+        """批D: 结论行只是复述用户提问 → 不算结论。"""
+        from app.harness.decision_log import _extract_decision
+        q = "用三句话说明为什么茅台是好生意"
+        r = f"## 核心结论：{q}\n\n后续正文。\n" + "x" * 120
+        assert _extract_decision(r, q) is None
+
     def test_save_creates_log(self, monkeypatch, tmp_path):
         from app.harness import decision_log
         monkeypatch.setattr(decision_log, "DECISION_LOG_PATH", tmp_path / "d.md")
@@ -473,6 +505,28 @@ class TestDecisionLog:
         from app.harness import decision_log
         monkeypatch.setattr(decision_log, "DECISION_LOG_PATH", tmp_path / "d.md")
         assert decision_log.load_decisions("UnknownCo") == ""
+
+    def test_load_injects_last_decision_detail(self, monkeypatch, tmp_path):
+        """批D: 注入最新一版的结论 + 关键假设 + 目标价，而非只有一句话。"""
+        from app.harness import decision_log
+        log = tmp_path / "d.md"
+        log.write_text(
+            "# 决策日志\n\n"
+            "## 澜起科技 — 2026-09-13 09:55 UTC\n\n"
+            "- **结论**: 估值时应以扣非为锚\n"
+            "- **关键假设**: 中性情景降至 ¥79 ~ ¥91\n"
+            "- **目标价/信号**: 中性 ¥116\n"
+            "- **置信度**: 中\n"
+            "- **记录价**: 191.96\n"
+            "- **任务ID**: T1\n\n"
+            "---\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(decision_log, "DECISION_LOG_PATH", log)
+        out = decision_log.load_decisions("澜起科技")
+        assert "上次决策详情（最新一版）" in out
+        assert "关键假设" in out and "¥79 ~ ¥91" in out
+        assert "目标价/信号" in out and "中性 ¥116" in out
 
 
 # ============================================================
@@ -551,6 +605,68 @@ class TestDecisionVerify:
         assert _classify_conclusion("持有观望") == "hold"
         assert _classify_conclusion("综合来看基本面稳健") == "unknown"
 
+    def test_classify_conclusion_negation_before_buy(self):
+        """批D: 否定口径必须先判 —— "不建议买入" 是 sell, 不是 buy。"""
+        from app.harness.decision_log import classify_stance
+        from app.harness.decision_verify import _classify_conclusion
+        assert _classify_conclusion("不建议在当前位置新买入") == "sell"
+        assert _classify_conclusion("不宜追高，建议回避") == "sell"
+        assert _classify_conclusion("建议买入并持有") == "buy"
+        assert classify_stance("不建议买入") == "bear"   # 唯一口径
+
+    def test_judge_threshold_before_age(self):
+        """批D: 第 91 天才涨过 +8% 的正确买点 → 已兑现, 不被年龄吞掉。"""
+        from datetime import datetime, timezone
+
+        from app.harness.decision_verify import judge_entry
+        now = datetime(2026, 9, 1, tzinfo=timezone.utc)
+        e = {"conclusion": "买入", "record_price": "100", "time": "2026-05-01 10:00 UTC", "target": "未指定"}
+        assert judge_entry(e, 109, now) == "已兑现"   # 123 天但先判阈值
+        assert judge_entry(e, 101, now) == "已过期"   # 未越阈 → 才判过期
+
+    def test_judge_sell_target_direction_aware(self):
+        """批D: sell 的下行目标价, 涨破目标是证伪, 不是兑现。"""
+        from datetime import datetime, timezone
+
+        from app.harness.decision_verify import judge_entry
+        now = datetime(2026, 9, 1, tzinfo=timezone.utc)
+        e = {"conclusion": "卖出回避", "record_price": "100", "time": "2026-08-10 10:00 UTC", "target": "目标价 80"}
+        assert judge_entry(e, 75, now) == "已兑现"    # 跌破空头目标
+        assert judge_entry(e, 110, now) == "已证伪"   # 涨破记录价+8% → 卖飞
+        assert judge_entry(e, 95, now) == "待验证"    # 未到目标未越阈
+
+    def test_judge_target_wrong_side_ignored(self):
+        """批D: 空头结论误抓到看多目标价(高于记录价) → 不作下行目标。"""
+        from datetime import datetime, timezone
+
+        from app.harness.decision_verify import judge_entry
+        now = datetime(2026, 9, 18, tzinfo=timezone.utc)
+        e = {"conclusion": "段永平大概率不会买", "record_price": "56.13",
+             "time": "2026-08-26 13:41 UTC", "target": "招银国际75.0元（+33.6%）"}
+        assert judge_entry(e, 53.37, now) == "待验证"   # -4.9%, 目标在错误一侧 → 忽略
+
+    def test_verify_fact_is_neutral(self):
+        """批D: 落盘是中性事实, 不含"已兑现/已证伪"这类强判断。"""
+        from datetime import datetime, timezone
+
+        from app.harness.decision_verify import _verify_fact
+        now = datetime(2026, 9, 1, tzinfo=timezone.utc)
+        e = {"record_price": "100", "time": "2026-08-10 10:00 UTC"}
+        fact = _verify_fact(e, "已证伪", 88.0, now)
+        assert "较记录价 -12.0%" in fact and "已证伪" not in fact
+        expired = _verify_fact(e, "已过期", 101.0, now)
+        assert "窗口已过" in expired and "已过期" not in expired
+
+    def test_verify_fact_reports_target_trigger(self):
+        """批D: 目标价触发的条目, 事实必须写"目标价"而不是"越过阈值"。"""
+        from datetime import datetime, timezone
+
+        from app.harness.decision_verify import _verify_fact
+        now = datetime(2026, 9, 1, tzinfo=timezone.utc)
+        e = {"record_price": "100", "time": "2026-08-10 10:00 UTC",
+             "conclusion": "卖出回避", "target": "目标价 80"}
+        assert "跌破目标价 80" in _verify_fact(e, "已兑现", 75.0, now)
+
     def test_tencent_symbol(self):
         from app.harness.decision_verify import _tencent_symbol
         assert _tencent_symbol("600519.SH") == "sh600519"
@@ -587,6 +703,40 @@ class TestDecisionVerify:
         log.write_text("# 决策日志\n\n", encoding="utf-8")
         monkeypatch.setattr(decision_log, "DECISION_LOG_PATH", log)
         assert decision_log.update_entry_fields("NOPE", {"验证": "x"}) is False
+
+    def test_update_entry_fields_task_id_past_line_12(self, monkeypatch, tmp_path):
+        """回归(2026-09-18): 任务ID 排在第13行时也必须能定位。
+
+        旧版只扫 lines[:12]，带「最新价」+ 多字段的条目任务ID 落到第13行，
+        写回永远找不到，验证结果静默丢失（81 条里 72 条）。
+        """
+        from pathlib import Path
+
+        from app.harness import decision_log
+        log = tmp_path / "d.md"
+        log.write_text(
+            "# 决策日志\n\n"
+            "## 英维克 — 2026-09-11 05:49 UTC\n"
+            "- **最新价**: 60.98\n\n"
+            "- **技能**: investment-team\n"
+            "- **代码**: 002837.SZ\n"
+            "- **记录价**: 68.49\n"
+            "- **结论**: 持有\n"
+            "- **置信度**: 中\n"
+            "- **关键假设**: 未指定\n"
+            "- **目标价/信号**: 未指定\n"
+            "- **状态**: pending\n"
+            "- **验证**: 待验证\n"
+            "- **任务ID**: T13\n\n"
+            "---\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(decision_log, "DECISION_LOG_PATH", log)
+        assert decision_log.update_entry_fields("T13", {"验证": "已证伪", "最新价": "60.55"})
+        content = log.read_text(encoding="utf-8")
+        assert "- **验证**: 已证伪" in content
+        assert "- **最新价**: 60.55" in content
+        assert "- **记录价**: 68.49" in content
 
 
 # ============================================================
@@ -680,14 +830,7 @@ class TestRunner:
                 raise RuntimeError("debate API down")
             return "complete output"
 
-        async def failing_debate_tools(system, user, tools=None, tool_executor=None, llm_config=None, **kw):
-            if "交叉评审" in (system or "") + (user or ""):
-                raise RuntimeError("debate API down")
-            return "complete output"
-
         monkeypatch.setattr(runner_mod, "chat_complete", failing_debate)
-        # investment-team 现默认 debate_tools=True：辩论走工具通道，同样注入失败
-        monkeypatch.setattr(runner_mod, "chat_complete_with_tools", failing_debate_tools)
         spec = _make_spec("investment-team")
         report = asyncio.run(AgentRunner(task_id=spec.task_id).run(spec))
         assert "评审失败" not in report

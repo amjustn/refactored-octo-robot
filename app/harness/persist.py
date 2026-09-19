@@ -78,14 +78,11 @@ MODEL_PRICING = {
     "gemini-2.5-flash": {"prompt": 1.0, "completion": 4.0},
     "gemini-2.0-flash": {"prompt": 1.0, "completion": 4.0},
     "gemini": {"prompt": 1.0, "completion": 4.0},
-    # 阿里通义 (dashscope.aliyuncs.com)
-    "qwen3-max": {"prompt": 4.0, "completion": 16.0},
-    "qwen3-plus": {"prompt": 2.0, "completion": 8.0},
-    "qwen3-turbo": {"prompt": 1.0, "completion": 4.0},
-    "qwen-vl-max": {"prompt": 2.0, "completion": 8.0},
-    "qwen-vl-plus": {"prompt": 1.0, "completion": 4.0},
-    "qwen-vl": {"prompt": 1.0, "completion": 4.0},
-    "qwen": {"prompt": 2.0, "completion": 8.0},
+    # 阿里通义千问 (dashscope.aliyuncs.com) — 2026-09 官方价，华北2(北京)，元/百万 Token
+    # 阶梯计费取第一档（常规请求落在最小 Token 区间）。
+    "qwen3.8-max": {"prompt": 12.0, "completion": 36.0},
+    "qwen3.7-plus": {"prompt": 2.0, "completion": 8.0},
+    "qwen3.8-flash": {"prompt": 0.8, "completion": 2.7},
     # 百度文心 (qianfan.baidubce.com)
     "ernie-speed": {"prompt": 0.5, "completion": 2.0},
     "ernie-lite": {"prompt": 0.5, "completion": 2.0},
@@ -680,6 +677,7 @@ class Repository:
         model: str = "",
         guard_warnings: Optional[list] = None,
         data_status: Optional[dict] = None,
+        tool_calls: Optional[dict] = None,
     ) -> Path:
         """Save report markdown + a metadata sidecar (.meta.json).
 
@@ -735,6 +733,19 @@ class Repository:
             if clean_warnings and not status.get("gates"):
                 status["gates"] = sorted({w["gate"] for w in clean_warnings if w["gate"]})
             meta["data_status"] = status
+        # ── 工具调用汇总（第3步，2026-09-13）────────────────────
+        # 让"这份报告调了多少次工具、有没有撞上限"在报告侧可观测
+        # （此前只在 data/scratchpad/<task>.jsonl 里，报告列表读不到）。
+        if isinstance(tool_calls, dict) and tool_calls.get("total"):
+            clean_tc = {
+                "total": int(tool_calls.get("total") or 0),
+                "by_tool": dict(list((tool_calls.get("by_tool") or {}).items())[:20]),
+                "by_agent": dict(list((tool_calls.get("by_agent") or {}).items())[:20]),
+                "agents_with_tools": int(tool_calls.get("agents_with_tools") or 0),
+            }
+            if tool_calls.get("limit_hits"):
+                clean_tc["limit_hits"] = dict(list(tool_calls["limit_hits"].items())[:20])
+            meta["tool_calls"] = clean_tc
         try:
             report_path.with_suffix(".meta.json").write_text(
                 json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"

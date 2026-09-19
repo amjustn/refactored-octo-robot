@@ -2,21 +2,20 @@ venv/
 __pycache__/
 *.pyc
 .env
-.env.*
-!.env.example
 logs/
-data/
-eval/runs/
+data/*.db
 .pytest_cache/
 .ruff_cache/
 _archive/
-*.db
-*.service
+eval/runs/
+data/scratchpad/
+data/reports/
+data/data_cache.db
+data/skin_settings.json
 *.bak_*
-*.dbf
-*.zip
-
-# 生成物：日报/周报等 HTML 报告不进公开仓库
-# （本目录同时被当作 AI 生成物落盘处，不忽略的话一次 `git add -A` 就会推上公开仓库）
-20??-??-??*.html
-*热门项目*.html
+data_cache.db
+# 运行时追加的失败留痕（每次 eval replay / 自检都会增长，入库后工作区会持续变脏）
+data/decision-skip-log.jsonl
+# 运行时追加的决策日志（每完成一次研究就 append，入库后工作区会持续变脏）
+# 文件仍在磁盘、应用照常读写；只是不再跟踪。历史内容可由 git 历史取回。
+data/decision-log.md
