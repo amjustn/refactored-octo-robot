@@ -104,6 +104,47 @@ def _read_excerpt(path: Path, limit: int = EXCERPT_CHARS) -> str:
 
 
 # ---------------------------------------------------------------------------
+# 标的归一（2026-09-20）
+# ---------------------------------------------------------------------------
+# 旧匹配只有"字符串双向包含"，同一只票换个写法就落到不同结果，实测：
+#   '中际旭创' -> 1 篇（arguments='300308 中际旭创'）
+#   '300308'   -> 3 篇（8 月那批 arguments 只写代码，打名字永远召不回）
+#   '中际旭创未来三年' -> 0 篇（带修饰词的整句，两边谁也不含谁 -> 静默 0 注入）
+# 现补一条：两边都用项目的统一入口 resolve_symbol 解析成规范代码，代码相同即同组。
+# 三条不可退让的约束：
+#   1) 只增不减 —— 旧规则命中一律保留，归一命中是 OR 上去的，绝不挤掉原有命中；
+#   2) 不抛异常 —— resolve_symbol 依赖 name_index（当日缓存过期时实测冷启动 22.6 秒），
+#      任何失败都退回旧规则，绝不让记忆检索把研究请求带崩或拖慢；
+#   3) 写法一致 —— 同一标的的各种写法必须落到同一组（由自检脚本逐条对账）。
+# 明确不做：arguments 为空的 56 篇（无标的信息，对任何写法都召不回，不是写法问题）；
+#          错别字（'中际讯创'）解析为 None，维持现状。
+_SYMBOL_MEMO: Dict[str, Optional[str]] = {}
+
+
+def symbol_group_key(text: str) -> Optional[str]:
+    """把一段文字解析成规范标的代码（进程内记忆化；解析不出返回 None，绝不抛异常）。"""
+    key = (text or "").strip()
+    if not key:
+        return None
+    if key not in _SYMBOL_MEMO:
+        sym: Optional[str] = None
+        try:
+            from .market_data import resolve_symbol
+
+            sym, _src = resolve_symbol(key)
+        except Exception as e:  # 解析器坏了也不能影响召回
+            logger.debug("symbol_group_key 解析失败 %r: %s", key, e)
+            sym = None
+        _SYMBOL_MEMO[key] = sym
+    return _SYMBOL_MEMO[key]
+
+
+def reset_symbol_memo() -> None:
+    """清空解析记忆（自检脚本用，也便于运行期强制重新解析）。"""
+    _SYMBOL_MEMO.clear()
+
+
+# ---------------------------------------------------------------------------
 # 对外接口
 # ---------------------------------------------------------------------------
 def list_recent_reports(limit: int = 30) -> List[dict]:
@@ -125,14 +166,17 @@ def find_stock_reports(query: str, limit: int = 5) -> List[dict]:
 
     返回 [{file, skill_name, created_at, arguments, excerpt}],
     excerpt 为报告正文前 600 字符。
+
+    匹配（2026-09-20 起）：旧字符串规则 OR 标的归一归组 —— 见 symbol_group_key。
     """
     query = (query or "").strip()
     if not query:
         return []
 
     is_code = len(query) == 6 and query.isdigit()
+    q_group = symbol_group_key(query)  # 名字/代码/带修饰词整句 -> 同一把钥匙
 
-    matched: List[dict] = []
+    matched: list[dict] = []
     for path in _iter_reports():
         info = _report_info(path)
         args = info["arguments"]
@@ -144,6 +188,11 @@ def find_stock_reports(query: str, limit: int = 5) -> List[dict]:
         else:
             # 双向包含; 空 arguments 直接跳过
             hit = bool(args) and (query in args or args in query)
+
+        # 归一归组：同一规范代码即同组（只增不减，见文件头说明）
+        if not hit and q_group and args:
+            hit = symbol_group_key(args) == q_group
+
         if not hit:
             continue
 
