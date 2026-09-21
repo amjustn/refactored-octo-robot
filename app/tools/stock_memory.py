@@ -204,9 +204,15 @@ def find_stock_reports(query: str, limit: int = 5) -> List[dict]:
 
 
 def build_memory_context(query: str, limit: int = 5) -> str:
-    """组装可注入 LLM prompt 的标的记忆片段; 无匹配报告时返回空字符串."""
+    """组装可注入 LLM prompt 的标的记忆片段; 无匹配报告时返回空字符串.
+
+    命中 0 篇时也留 INFO 日志（2026-09-20）：这条通道原先静默 —— 召回到 0 篇
+    与"注入被跳过"在报告与日志里都看不出来，事后无法追查（用户口径：数据管道
+    不能静默失败）。留痕后可对账"哪次研究带了几篇历史"。
+    """
     reports = find_stock_reports(query, limit=limit)
     if not reports:
+        logger.info("记忆注入: 标的=%r 命中 0 篇（无同标的历史报告，未注入）", query)
         return ""
 
     lines = [
@@ -223,7 +229,11 @@ def build_memory_context(query: str, limit: int = 5) -> str:
             indent = "   "
             lines.append(indent + excerpt.replace("\n", "\n" + indent))
     lines.append("=== 记忆结束 ===")
-    return "\n".join(lines)
+    text = "\n".join(lines)
+    logger.info(
+        "记忆注入: 标的=%r 命中 %d 篇 注入 %d 字符", query, len(reports), len(text)
+    )
+    return text
 
 
 def get_stock_memory_status() -> dict:
