@@ -123,7 +123,7 @@ async def test_injection():
 # ── E. token 预算归类 ─────────────────────────────────────────
 def test_budget():
     from app.harness.context import BUDGET, _categorize
-    check("E1 sector 预算已登记", BUDGET.get("sector") == 1600, f"实际 {BUDGET.get('sector')}")
+    check("E1 sector 预算已登记", BUDGET.get("sector") == 2200, f"实际 {BUDGET.get('sector')}")
     cat = _categorize("板块观察知识库（知名机构/人物方法论蒸馏）", "x")
     check("E2 板块块归类为 sector（不被 master 吞掉）", cat == "sector", f"实际 {cat}")
 
