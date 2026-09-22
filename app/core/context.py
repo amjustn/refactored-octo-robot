@@ -151,6 +151,28 @@ MASTER_KB_SKILLS = {
     "thesis-tracker",        # 持仓评估（技能文件内即段永平/李录语录）
 }
 
+# ── 板块知识库注入范围（2026-09-22）────────────────────────────
+# 板块知识（申万一级 31 板块 × 4 视角蒸馏，见 tools/sector_knowledge.py）
+# 按技能白名单 + 动态识别双重门控：白名单内技能才会触发板块识别
+# （tools/sector_router.py），识别命中才注入，未命中零注入零预算。
+# 排除：portfolio-review（多板块混合易串味）、daily-briefing（全市场）、
+# financial-data（数据规范）、macro 两个（宏观无单一板块）。
+SECTOR_KB_SKILLS = {
+    "industry-research",        # 产业链全景扫描
+    "industry-funnel",          # 行业漏斗筛选
+    "bottleneck-hunter",        # 瓶颈猎手
+    "investment-research",      # 四大师综合分析
+    "investment-team",          # 多Agent投研团队
+    "management-deep-dive",     # 管理层深研
+    "earnings-review",          # 财报精读
+    "earnings-team",            # 财报精读团队
+    "thesis-tracker",           # 持仓评估
+    "news-pulse",               # 股价异动归因
+    "broker-reports",           # 券商研报
+    "deep-company-series",      # 深度系列长文
+    "private-company-research", # 未上市公司研究
+}
+
 
 def build_knowledge_context(skill_name: str = "") -> str:
     """Build investment philosophy context from knowledge base.
@@ -601,10 +623,30 @@ async def build_full_context(arguments: str = "", skill_name: str = "", goal_hin
             logger.debug(f"HIBOR context failed: {e}")
             return ""
 
+    async def _fetch_sector_ctx():
+        # 板块知识库动态注入（2026-09-22）：白名单技能内，识别标的所属
+        # 板块（sector_router 双通道），命中才注入该板块 4 视角观察知识；
+        # 未命中/识别失败一律空串——零注入、零预算、不影响主链路。
+        if (skill_name or "") not in SECTOR_KB_SKILLS:
+            return ""
+        try:
+            from ..tools.sector_knowledge import get_sector_knowledge_for_prompt
+            from ..tools.sector_router import detect_sectors
+            det = await detect_sectors(
+                arguments=arguments or "",
+                symbol=symbol or "",
+                company_name=(goal_hints.get("company") or "") if goal_hints else "",
+            )
+            if det.get("sectors"):
+                return get_sector_knowledge_for_prompt(det["sectors"]) or ""
+        except Exception as e:
+            logger.debug(f"Sector knowledge context failed: {e}")
+        return ""
+
     import asyncio
-    idx_ctx, comp_ctx, web_ctx, broker_ctx, ann_ctx, hibor_ctx = await asyncio.gather(
+    idx_ctx, comp_ctx, web_ctx, broker_ctx, ann_ctx, hibor_ctx, sector_ctx = await asyncio.gather(
         _fetch_indices_ctx(), _fetch_company_ctx(), _fetch_web_ctx(), _fetch_broker_ctx(),
-        _fetch_announcement_ctx(), _fetch_hibor_ctx(),
+        _fetch_announcement_ctx(), _fetch_hibor_ctx(), _fetch_sector_ctx(),
     )
     # Assemble sections in the same order as the sequential implementation
     if idx_ctx is not None:
@@ -619,6 +661,8 @@ async def build_full_context(arguments: str = "", skill_name: str = "", goal_hin
         parts.append(hibor_ctx)
     if web_ctx:
         parts.append(web_ctx)
+    if sector_ctx:
+        parts.append(sector_ctx)
 
     # Add skill-specific domain knowledge (each of the 21 skills has its own)
     if skill_name:

@@ -64,6 +64,12 @@ async def lifespan(_app: FastAPI):
         _ensure_all_default_knowledge()
     except Exception as e:
         logger.warning(f"Could not initialize skill knowledge: {e}")
+    # Ensure all 31 sectors have default 4-perspective knowledge on first run
+    try:
+        from .tools.sector_knowledge import _ensure_all_default_sector_knowledge
+        _ensure_all_default_sector_knowledge()
+    except Exception as e:
+        logger.warning(f"Could not initialize sector knowledge: {e}")
     asyncio.create_task(_seed_circuit_breakers())
     asyncio.create_task(_verify_decision_log())
     asyncio.create_task(_cleanup_old_reports())
@@ -71,6 +77,7 @@ async def lifespan(_app: FastAPI):
     asyncio.create_task(_cleanup_expired_cache())
     asyncio.create_task(_auto_update_knowledge())
     asyncio.create_task(_auto_update_skill_knowledge())
+    asyncio.create_task(_auto_update_sector_knowledge())
     logger.info("AI Berkshire Web v3.0.0 started (market data + knowledge auto-update + 21-skill auto-update)")
     try:
         yield
@@ -429,6 +436,26 @@ async def _auto_update_skill_knowledge():
         except Exception as e:
             logger.error(f"Scheduled skill knowledge update failed: {e}")
         # Wait 7 days
+        await asyncio.sleep(7 * 86400)
+
+
+async def _auto_update_sector_knowledge():
+    """Periodically refresh all 31 sectors' 4-perspective knowledge (every 7 days).
+
+    板块知识（tools/sector_knowledge.py）蒸馏知名机构/人物风格对各板块的
+    观察方法，随市场方法论演进定期刷新；失败保留旧数据，绝不静默清空。
+    """
+    from .tools.sector_knowledge import update_all_sector_knowledge
+    # Initial delay: start after masters(60s)/skills(120s) to stagger LLM load
+    await asyncio.sleep(180)
+    while True:
+        try:
+            logger.info("Starting scheduled sector knowledge update (31 sectors)...")
+            results = await update_all_sector_knowledge()
+            success = sum(1 for r in results.values() if "error" not in r)
+            logger.info(f"Sector knowledge update complete: {success}/{len(results)} sectors updated")
+        except Exception as e:
+            logger.error(f"Scheduled sector knowledge update failed: {e}")
         await asyncio.sleep(7 * 86400)
 
 

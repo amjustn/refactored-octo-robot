@@ -69,3 +69,39 @@ async def api_update_skill_knowledge(skill_name: str = None):
     else:
         result = await update_all_skill_knowledge()
     return {"result": result}
+
+
+# ==================== Sector Knowledge API（板块知识库，2026-09-22） ====================
+
+@router.get("/api/sector-knowledge/status")
+async def api_sector_knowledge_status():
+    """Get status for all 31 sectors' knowledge bases."""
+    from ..tools.sector_knowledge import get_all_sector_knowledge_status
+    return {"sectors": get_all_sector_knowledge_status()}
+
+
+@router.get("/api/sector-knowledge/list")
+async def api_sector_knowledge_list():
+    """List registered sectors (申万一级 31 个) with routing aliases."""
+    from ..tools.sector_knowledge import list_sectors
+    return {"sectors": list_sectors()}
+
+
+@router.get("/api/sector-knowledge/{sector_key}")
+async def api_get_sector_knowledge(sector_key: str):
+    """Get one sector's 4-perspective knowledge."""
+    from ..tools.sector_knowledge import get_sector_knowledge
+    return get_sector_knowledge(sector_key)
+
+
+@router.post("/api/sector-knowledge/update")
+async def api_update_sector_knowledge(request: Request, sector_key: str = None):
+    """Trigger sector knowledge update. If sector_key is given, only that sector."""
+    if not _wc._check_rate_limit(request.client.host if request.client else "unknown"):
+        raise HTTPException(status_code=429, detail="请求过于频繁，请稍后再试")
+    from ..tools.sector_knowledge import update_all_sector_knowledge, update_sector_knowledge
+    if sector_key:
+        result = await update_sector_knowledge(sector_key)
+    else:
+        result = await update_all_sector_knowledge()
+    return {"result": result}

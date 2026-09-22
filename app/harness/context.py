@@ -71,6 +71,8 @@ BUDGET = {
     "news": 1200,
     "skill_knowledge": 800,
     "master": 600,
+    # 板块知识库（2026-09-22）：单板块约 700 字符，上限 2 板块
+    "sector": 1600,
     "web": 1500,
     "time": 400,
     # 历史决策复盘块单列预算（批C，2026-09-11）：块体积上界实测 ≈1974 token
@@ -229,6 +231,9 @@ def _categorize(title: str, body: str) -> str:
         return "web"
     if "能力领域" in title or "技能" in title or "框架" in title:
         return "skill_knowledge"
+    # 板块知识库须先于「知识库→master」规则命中（2026-09-22）
+    if "板块观察知识库" in title:
+        return "sector"
     if "大师" in title or "哲学" in title or "知识库" in title:
         return "master"
     return "web"
