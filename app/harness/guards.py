@@ -6,7 +6,7 @@
 | citation  | financial-looking numbers have a source marker in-block     | warning |
 | freshness | report says "需要核实" while context already has the data     | warning |
 | disclaimer| report ends with a no-investment-advice statement           | auto-fix|
-| length    | ≤ MAX_REPORT_LENGTH (50k; series 200k)                      | truncate|
+| length    | ≤ MAX_REPORT_LENGTH (70k; series 200k)                      | truncate|
 | tool_markers | leftover <tool_calls>/｜｜DSML｜｜/<invoke name= markers   | fatal   |
 
 tool_markers 为第3层闸门：报告残留工具调用标记说明模型对着未下发的

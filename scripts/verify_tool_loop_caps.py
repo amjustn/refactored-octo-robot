@@ -48,8 +48,9 @@ def part_a_constants() -> None:
     import app.harness.runner as R
 
     print("\n=== A. 常量与接线 ===")
-    check("A1 多Agent 每工具上限仍为 3（行为不变）", R.MAX_SAME_TOOL_CALLS == 3,
-          str(R.MAX_SAME_TOOL_CALLS))
+    # 2026-09-19 用户决定由 3 提到 5（财报团队实测 25 次撞上限，calc 占 19）
+    check("A1 多Agent 每工具上限为 5（2026-09-19 由 3 提到 5）",
+          R.MAX_SAME_TOOL_CALLS == 5, str(R.MAX_SAME_TOOL_CALLS))
     check("A2 单Agent 上限为 8", R.MAX_SAME_TOOL_CALLS_SINGLE == 8,
           str(R.MAX_SAME_TOOL_CALLS_SINGLE))
     check("A3 单Agent 上限严格大于多Agent（确实是放宽）",

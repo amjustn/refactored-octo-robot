@@ -181,6 +181,15 @@ class TaskSpec:
     # HITL：multi 策略辩论完成后暂停等待人工确认（默认关闭；
     # 前端 WS 启动消息 debate_confirm=true 时开启）。
     require_debate_confirm: bool = False
+    # P5 交叉辩论增强（默认关闭，行为与旧版完全一致）：
+    # debate_tools    — 评审者可用受限核对工具（复算/原始数据白名单）取证；
+    # debate_rebuttal — 被评审者获得一轮答辩权，筛掉截断造成的假分歧；
+    # debate_stance   — 立场卡（防漂移）+ 法官分离：冻结 Phase 1 初版立场并
+    #                   注入答辩/综合；综合时结构化证据表优先、辩词原文降级附录。
+    # 可由 skill 元数据（debate_tools / debate_rebuttal / debate_stance）或显式入参开启。
+    debate_tools: bool = False
+    debate_rebuttal: bool = False
+    debate_stance: bool = False
 
     @classmethod
     def build(
@@ -193,6 +202,9 @@ class TaskSpec:
         task_id: Optional[str] = None,
         attachments: str = "",
         debate_confirm: bool = False,
+        debate_tools: Optional[bool] = None,
+        debate_rebuttal: Optional[bool] = None,
+        debate_stance: Optional[bool] = None,
     ) -> "TaskSpec":
         """Derive strategy + agent roster from skill metadata."""
         is_multi = skill.get("is_multi_agent", False)
@@ -221,4 +233,8 @@ class TaskSpec:
             stream=stream,
             caller=caller,
             require_debate_confirm=bool(debate_confirm),
+            # None = 沿用 skill 元数据；显式布尔值优先（程序化调用/测试）
+            debate_tools=bool(skill.get("debate_tools", False)) if debate_tools is None else bool(debate_tools),
+            debate_rebuttal=bool(skill.get("debate_rebuttal", False)) if debate_rebuttal is None else bool(debate_rebuttal),
+            debate_stance=bool(skill.get("debate_stance", False)) if debate_stance is None else bool(debate_stance),
         )

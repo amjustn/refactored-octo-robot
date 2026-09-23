@@ -567,7 +567,10 @@ def _is_reusable_artifact(content: str) -> bool:
 
 
 async def prepare_resume(task_id: str, llm_override: Optional[dict] = None,
-                         debate_confirm: bool = False) -> tuple:
+                         debate_confirm: bool = False,
+                         debate_tools: Optional[bool] = None,
+                         debate_rebuttal: Optional[bool] = None,
+                         debate_stance: Optional[bool] = None) -> tuple:
     """Validate a task for resume and assemble the execution plan.
 
     Returns (plan, error). plan keys:
@@ -585,6 +588,8 @@ async def prepare_resume(task_id: str, llm_override: Optional[dict] = None,
 
     debate_confirm：续跑任务同样启用辩论后人工确认门（HITL）；默认关闭，
     与整局重跑的同名开关语义一致。
+    debate_tools / debate_rebuttal / debate_stance：P5 交叉辩论增强开关，
+    续跑沿用；默认关闭。
 
     检查点优先：multi 的辩论结论、series 的单篇正文、single 的上下文
     先读 task_checkpoints；multi 研究 Agent 成果仍复用 task_artifacts
@@ -647,6 +652,9 @@ async def prepare_resume(task_id: str, llm_override: Optional[dict] = None,
             skill, brief["arguments"], llm_override=llm_override,
             caller="http", stream=True, task_id=task_id,
             debate_confirm=debate_confirm,
+            debate_tools=debate_tools,
+            debate_rebuttal=debate_rebuttal,
+            debate_stance=debate_stance,
         )
 
     # ── series：从最后一个完成的 episode 之后继续，前文从 checkpoint 恢复 ──
@@ -746,7 +754,10 @@ async def prepare_resume(task_id: str, llm_override: Optional[dict] = None,
 
 async def resume(task_id: str, llm_override: Optional[dict] = None,
                  bus: Optional[EventBus] = None,
-                 debate_confirm: bool = False) -> RunResult:
+                 debate_confirm: bool = False,
+                 debate_tools: Optional[bool] = None,
+                 debate_rebuttal: Optional[bool] = None,
+                 debate_stance: Optional[bool] = None) -> RunResult:
     """Resume a terminal task: reuse checkpoints/artifacts, rerun the rest.
 
     multi 复用研究 Agent artifact + 辩论 checkpoint；series 从最后一篇
@@ -754,7 +765,11 @@ async def resume(task_id: str, llm_override: Optional[dict] = None,
     与 post-synthesis agents 始终重跑；billing 累加到既有任务行；成功
     后原位覆盖 partial 报告。
     """
-    plan, error = await prepare_resume(task_id, llm_override, debate_confirm=debate_confirm)
+    plan, error = await prepare_resume(
+        task_id, llm_override, debate_confirm=debate_confirm,
+        debate_tools=debate_tools, debate_rebuttal=debate_rebuttal,
+        debate_stance=debate_stance,
+    )
     if error:
         return RunResult(task_id=task_id, status="error", error=error)
     return await run(
