@@ -55,6 +55,20 @@ MAX_REPORT_AGE_DAYS = 90
 # Global cap on simultaneously running research tasks; extra runs get a
 # "busy" error immediately instead of queueing (protects the LLM budget).
 MAX_CONCURRENT_RUNS = int(os.getenv("BERKSHIRE_MAX_CONCURRENT_RUNS", "2"))
+# 知识库自动刷新开关（2026-09-26 用户定：三套全关）。
+# 三套知识库（大师库 / 技能库 / 板块库）原先每 7 天被大模型整段重写；实测该机制会
+# 静默丢掉硬数字与阈值（一轮刷新丢掉的清单见提交 9dacfd1），且任何人工润色都会被下
+# 一轮覆盖。取值：off（默认，不调度任何自动刷新）/ on（三套全开）/
+# 逗号组合 masters,skills,sectors（只开其中几套）。
+# 手动刷新端点（/api/knowledge/update、/api/skill-knowledge/update、
+# /api/sector-knowledge/update）不受本开关影响，随时可用。
+_KB_AUTO_UPDATE_RAW = os.getenv("BERKSHIRE_KB_AUTO_UPDATE", "off").strip().lower()
+if _KB_AUTO_UPDATE_RAW in ("", "off", "none", "0", "false"):
+    KB_AUTO_UPDATE = set()
+elif _KB_AUTO_UPDATE_RAW in ("on", "all", "1", "true"):
+    KB_AUTO_UPDATE = {"masters", "skills", "sectors"}
+else:
+    KB_AUTO_UPDATE = {p.strip() for p in _KB_AUTO_UPDATE_RAW.split(",") if p.strip()}
 
 # Market Data Configuration
 # Data libraries: akshare (A-shares), yfinance (US/HK stocks)

@@ -21,7 +21,14 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from .core.config import BASE_DIR, HOST, MAX_REPORT_AGE_DAYS, PORT, REPORTS_DIR
+from .core.config import (  # noqa: E402
+    BASE_DIR,
+    HOST,
+    KB_AUTO_UPDATE,
+    MAX_REPORT_AGE_DAYS,
+    PORT,
+    REPORTS_DIR,
+)
 from .web_common import data_cache, logger, static_dir, task_store
 
 
@@ -75,10 +82,19 @@ async def lifespan(_app: FastAPI):
     asyncio.create_task(_cleanup_old_reports())
     asyncio.create_task(_cleanup_old_tasks())
     asyncio.create_task(_cleanup_expired_cache())
-    asyncio.create_task(_auto_update_knowledge())
-    asyncio.create_task(_auto_update_skill_knowledge())
-    asyncio.create_task(_auto_update_sector_knowledge())
-    logger.info("AI Berkshire Web v3.0.0 started (market data + knowledge auto-update + 21-skill auto-update)")
+    # 知识库自动刷新：默认关闭（BERKSHIRE_KB_AUTO_UPDATE，见 core/config.py）。
+    # 关掉的是「调度」——手动刷新端点照旧可用；默认知识补种（上面的 _ensure_*）不在开关内。
+    if "masters" in KB_AUTO_UPDATE:
+        asyncio.create_task(_auto_update_knowledge())
+    if "skills" in KB_AUTO_UPDATE:
+        asyncio.create_task(_auto_update_skill_knowledge())
+    if "sectors" in KB_AUTO_UPDATE:
+        asyncio.create_task(_auto_update_sector_knowledge())
+    logger.info(
+        "AI Berkshire Web v3.0.0 started (market data; 知识库自动刷新=%s；三套=%s)",
+        ",".join(sorted(KB_AUTO_UPDATE)) or "关闭",
+        "masters,skills,sectors",
+    )
     try:
         yield
     finally:
