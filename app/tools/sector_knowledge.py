@@ -553,24 +553,252 @@ DEFAULT_SECTOR_KNOWLEDGE = {
 }
 
 
+# ==================== 人工把关代表字段（唯一真相源，刷新不得改写） ====================
+# representative 字段是人工把关项：它是该字段的唯一真相源，读取链路与蒸馏
+# 落盘都会以此覆盖，LLM 刷新不得改写。内容只标注「机构或人物（公开的……
+# 框架/方法论）」这类公开可核验的方法论标签，不写持仓、不构成推荐、不虚构语录。
+# key 为 SECTORS 的板块 key，值长度 4 且顺序严格等于 PERSPECTIVE_STANCES。
+SECTOR_REPS = {
+    "nonglin": [
+        "东方港湾但斌（公开的消费与农业龙头长持框架）",
+        "中庚基金丘栋荣（公开的低估值＋PB-ROE 框架）",
+        "中信证券农林牧渔研究组（公开的猪周期产能与出栏跟踪框架）",
+        "高毅资产冯柳（公开的弱者体系与逆向框架）",
+    ],
+    "huagong": [
+        "广发基金刘格菘（公开的景气赛道＋供需错配框架）",
+        "中欧基金曹名长（公开的低估值价值框架）",
+        "中金公司化工研究组（公开的价差－开工率－库存跟踪框架）",
+        "半夏投资李蓓（公开的产能过剩与尾部风险观点）",
+    ],
+    "gangtie": [
+        "睿郡资产董承非（公开的周期与供给侧框架）",
+        "中欧基金曹名长（公开的低估值＋股息率框架）",
+        "长江证券钢铁研究组（公开的吨钢毛利与炉料价差框架）",
+        "半夏投资李蓓（公开的地产链需求证伪视角）",
+    ],
+    "youse": [
+        "高毅资产邓晓峰（公开的周期成长与资源品框架）",
+        "中庚基金丘栋荣（公开的低估值＋PB-ROE 框架）",
+        "中信证券有色金属研究组（公开的金属供需平衡表与成本曲线框架）",
+        "高毅资产冯柳（公开的弱者体系与拥挤交易回避）",
+    ],
+    "dianzi": [
+        "广发基金刘格菘（公开的科技成长与国产替代框架）",
+        "睿远基金赵枫（公开的现金流与估值纪律框架）",
+        "中信证券电子研究组（公开的半导体周期与稼动率跟踪框架）",
+        "高毅资产冯柳（公开的弱者体系与拥挤度回避）",
+    ],
+    "jiadian": [
+        "易方达张坤（公开的消费现金流与格局稳定框架）",
+        "中庚基金丘栋荣（公开的低估值＋分红框架）",
+        "中信证券家电研究组（公开的出货－零售－库存三端口径跟踪）",
+        "半夏投资李蓓（公开的地产后周期需求证伪视角）",
+    ],
+    "shipin": [
+        "东方港湾但斌（公开的白酒龙头长持框架）",
+        "中庚基金丘栋荣（公开的股息率与自由现金流框架）",
+        "招商证券食品饮料研究组（公开的批价－回款－渠道库存跟踪框架）",
+        "高毅资产冯柳（公开的弱者体系与渠道证伪视角）",
+    ],
+    "fangzhi": [
+        "景林资产（公开的消费与制造出海价值框架）",
+        "中欧基金曹名长（公开的低估值价值框架）",
+        "申万宏源纺织服饰研究组（公开的出口订单与产能转移跟踪框架）",
+        "高毅资产冯柳（公开的弱者体系与需求证伪视角）",
+    ],
+    "qinggong": [
+        "景林资产（公开的消费与制造价值框架）",
+        "中欧基金曹名长（公开的低估值价值框架）",
+        "中信证券轻工制造研究组（公开的地产链与出口订单跟踪框架）",
+        "半夏投资李蓓（公开的地产链需求证伪视角）",
+    ],
+    "yiyao": [
+        "中欧基金葛兰（公开的创新药与医疗服务成长框架）",
+        "睿远基金赵枫（公开的现金流与估值纪律框架）",
+        "中信证券医药研究组（公开的临床管线与集采影响跟踪框架）",
+        "半夏投资李蓓（公开的医药政策与估值透支风控观点）",
+    ],
+    "gongyong": [
+        "保险资金配置框架（公开的红利低波与类债资产品种选择）",
+        "睿远基金赵枫（公开的现金流折现与股息率框架）",
+        "长江证券电力公用研究组（公开的利用小时与电价机制跟踪框架）",
+        "半夏投资李蓓（公开的利率与政策定价风控视角）",
+    ],
+    "jiaotong": [
+        "高毅资产邓晓峰（公开的供需错配与周期成长框架）",
+        "中庚基金丘栋荣（公开的低估值＋自由现金流框架）",
+        "华泰证券交通运输研究组（公开的运价－周转量－成本跟踪框架）",
+        "半夏投资李蓓（公开的全球贸易与运力过剩证伪视角）",
+    ],
+    "fangdichan": [
+        "景林资产（公开的资产重估与周期价值框架）",
+        "中欧基金曹名长（公开的 NAV 折价与低估值框架）",
+        "中信证券房地产研究组（公开的销售－库存－拿地跟踪框架）",
+        "半夏投资李蓓（公开的地产信用与流动性风控观点）",
+    ],
+    "shangmao": [
+        "易方达张坤（公开的消费现金流与终端格局框架）",
+        "中庚基金丘栋荣（公开的低估值＋现金流框架）",
+        "招商证券商贸零售研究组（公开的同店与客流跟踪框架）",
+        "高毅资产冯柳（公开的弱者体系与竞争证伪视角）",
+    ],
+    "shehui": [
+        "景林资产（公开的消费服务成长框架）",
+        "睿远基金赵枫（公开的现金流与估值纪律框架）",
+        "国泰君安社会服务研究组（公开的客流－客单－开店跟踪框架）",
+        "高毅资产冯柳（公开的弱者体系与需求证伪视角）",
+    ],
+    "zonghe": [
+        "高毅资产邓晓峰（公开的产业趋势与资产重估框架）",
+        "中欧基金曹名长（公开的低估值价值框架）",
+        "中信证券综合研究组（公开的多元资产拆分与分部估值框架）",
+        "半夏投资李蓓（公开的治理与流动性风控视角）",
+    ],
+    "jiancai": [
+        "睿郡资产董承非（公开的周期与成本曲线框架）",
+        "中欧基金曹名长（公开的低估值＋股息率框架）",
+        "长江证券建材研究组（公开的水泥价差与出货率跟踪框架）",
+        "半夏投资李蓓（公开的地产链需求证伪视角）",
+    ],
+    "jianzhu": [
+        "睿郡资产董承非（公开的订单与现金流框架）",
+        "中庚基金丘栋荣（公开的低估值＋应收质量框架）",
+        "中信证券建筑装饰研究组（公开的新签订单与专项债跟踪框架）",
+        "半夏投资李蓓（公开的应收账款与地方财政风控视角）",
+    ],
+    "dianlishebei": [
+        "高毅资产邓晓峰（公开的新能源产业趋势与产业链验证框架）",
+        "中庚基金丘栋荣（公开的产能出清与现金成本框架）",
+        "中金公司电力设备新能源研究组（公开的排产－价格－供需平衡表框架）",
+        "半夏投资李蓓（公开的产能过剩与技术替代风控观点）",
+    ],
+    "guofang": [
+        "广发基金刘格菘（公开的订单驱动成长框架）",
+        "睿远基金赵枫（公开的现金流与估值纪律框架）",
+        "中信证券国防军工研究组（公开的订单与批产节奏跟踪框架）",
+        "半夏投资李蓓（公开的主题拥挤与订单证伪视角）",
+    ],
+    "jisuanji": [
+        "广发基金刘格菘（公开的科技成长与景气赛道框架）",
+        "睿远基金赵枫（公开的现金流与估值纪律框架）",
+        "国盛证券计算机研究组（公开的订单与订阅收入跟踪框架）",
+        "高毅资产冯柳（公开的弱者体系与主题泡沫回避）",
+    ],
+    "chuanmei": [
+        "景林资产（公开的互联网与内容成长框架）",
+        "中欧基金曹名长（公开的低估值价值框架）",
+        "招商证券传媒研究组（公开的票房－流水－ARPU 跟踪框架）",
+        "高毅资产冯柳（公开的弱者体系与政策证伪视角）",
+    ],
+    "tongxin": [
+        "广发基金刘格菘（公开的算力成长与资本开支框架）",
+        "睿远基金赵枫（公开的现金流与估值纪律框架）",
+        "天风证券通信研究组（公开的光模块出货与海外资本开支跟踪框架）",
+        "半夏投资李蓓（公开的资本开支透支证伪视角）",
+    ],
+    "yinhang": [
+        "保险资金配置框架（公开的红利低波与股息率品种选择）",
+        "中庚基金丘栋荣（公开的 PB-ROE 与资产质量框架）",
+        "国信证券银行研究组（公开的净息差与不良生成跟踪框架）",
+        "半夏投资李蓓（公开的信用与资产质量尾部风控视角）",
+    ],
+    "feiyin": [
+        "保险资金配置框架（公开的负债成本与权益弹性框架）",
+        "中庚基金丘栋荣（公开的低估值＋内含价值框架）",
+        "中信证券非银行金融研究组（公开的保费－新业务价值－权益弹性跟踪框架）",
+        "半夏投资李蓓（公开的利率与信用风险风控视角）",
+    ],
+    "qiche": [
+        "高毅资产邓晓峰（公开的制造业出海与电动化框架）",
+        "中庚基金丘栋荣（公开的低估值＋现金流框架）",
+        "中信证券汽车研究组（公开的批发－零售－库存与出口跟踪框架）",
+        "半夏投资李蓓（公开的价格战与产能过剩证伪视角）",
+    ],
+    "jixie": [
+        "高毅资产邓晓峰（公开的制造业产业趋势与产业链验证框架）",
+        "睿远基金赵枫（公开的现金流与资本配置框架）",
+        "长江证券机械研究组（公开的开工小时与订单跟踪框架）",
+        "半夏投资李蓓（公开的资本开支周期证伪视角）",
+    ],
+    "meitan": [
+        "高毅资产邓晓峰（公开的供给约束与高分红框架）",
+        "中庚基金丘栋荣（公开的股息率＋现金流框架）",
+        "长江证券煤炭研究组（公开的日耗－库存－长协价跟踪框架）",
+        "半夏投资李蓓（公开的能源价格与需求证伪视角）",
+    ],
+    "shiyou": [
+        "高毅资产邓晓峰（公开的油价周期与资本纪律框架）",
+        "中欧基金曹名长（公开的股息率＋重置成本框架）",
+        "中金公司石油石化研究组（公开的炼化价差与原油平衡表框架）",
+        "半夏投资李蓓（公开的地缘与需求证伪视角）",
+    ],
+    "huanbao": [
+        "睿郡资产董承非（公开的现金流与政策驱动框架）",
+        "中庚基金丘栋荣（公开的低估值＋运营资产框架）",
+        "长江证券环保研究组（公开的运营资产与应收账款跟踪框架）",
+        "半夏投资李蓓（公开的应收账款与地方财政风控视角）",
+    ],
+    "meirong": [
+        "景林资产（公开的消费品牌成长框架）",
+        "中欧基金曹名长（公开的低估值价值框架）",
+        "招商证券美容护理研究组（公开的线上 GMV 与新品跟踪框架）",
+        "高毅资产冯柳（公开的弱者体系与竞争格局证伪视角）",
+    ],
+}
+
+
+def sector_reps(sector_key: str) -> dict:
+    """Return {stance: representative} for a sector from the curated SECTOR_REPS.
+
+    纯函数：无副作用、无网络。key 不存在时返回 {}。
+    """
+    reps = SECTOR_REPS.get(sector_key)
+    if not reps:
+        return {}
+    return dict(zip(PERSPECTIVE_STANCES, reps))
+
+
 # ==================== 存储 ====================
 
 def _get_sector_path(sector_key: str) -> Path:
     return SECTOR_KNOWLEDGE_DIR / f"{sector_key}.json"
 
 
+def _apply_sector_reps(sector_key: str, data: dict) -> dict:
+    """防线一：以人工把关的 SECTOR_REPS 覆盖 representative。
+
+    只覆盖 stance 能对上清单的 perspective；缺清单的板块保持原样。
+    纯同步、无网络、不抛异常。
+    """
+    reps = sector_reps(sector_key)
+    if not reps or not isinstance(data, dict):
+        return data
+    perspectives = data.get("perspectives")
+    if not isinstance(perspectives, list):
+        return data
+    for p in perspectives:
+        if isinstance(p, dict) and p.get("stance") in reps:
+            p["representative"] = reps[p["stance"]]
+    return data
+
+
 def _load_sector_knowledge(sector_key: str) -> dict:
-    """Load cached sector knowledge; fall back to bootstrap defaults."""
+    """Load cached sector knowledge; fall back to bootstrap defaults.
+
+    无论来自落盘 JSON 还是默认知识，返回前都以 SECTOR_REPS 强制覆盖
+    representative（人工把关字段，刷新不得改写）。
+    """
     path = _get_sector_path(sector_key)
     if path.exists():
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
+            return _apply_sector_reps(sector_key, json.loads(path.read_text(encoding="utf-8")))
         except Exception:
             pass
     meta = SECTORS.get(sector_key)
     default_perspectives = DEFAULT_SECTOR_KNOWLEDGE.get(sector_key)
     if meta and default_perspectives:
-        return {
+        return _apply_sector_reps(sector_key, {
             "sector_key": sector_key,
             "sector_name": meta["name"],
             "sw_level1": meta["sw"],
@@ -578,7 +806,7 @@ def _load_sector_knowledge(sector_key: str) -> dict:
                 {"stance": s, **p} for s, p in zip(PERSPECTIVE_STANCES, default_perspectives)
             ],
             "last_updated": "default_bootstrap",
-        }
+        })
     return {}
 
 
@@ -697,6 +925,11 @@ async def update_sector_knowledge(sector_key: str) -> dict:
 不得只围绕单个子行业展开；此时 method 可写 100-140 字，signals 可列 6-9 个。
 """
 
+    reps_map = sector_reps(sector_key)
+    reps_clause = "\n".join(
+        f"  {stance}：{reps_map.get(stance, '')}" for stance in PERSPECTIVE_STANCES
+    )
+
     system_prompt = f"""你是一位 A 股行业研究方法论专家，负责蒸馏板块观察知识。
 
 你正在更新板块：「{sector_name}」（申万一级：{meta['sw']}）
@@ -714,7 +947,7 @@ async def update_sector_knowledge(sector_key: str) -> dict:
     "sector_name": "{sector_name}",
     "sw_level1": "{meta['sw']}",
     "perspectives": [
-        {{"stance": "买方趋势派", "representative": "方法论风格标注（30字内，不得虚构真实语录）",
+        {{"stance": "买方趋势派", "representative": "必须逐字照抄下方给定原文",
           "method": "观察该板块的核心观点与研究方法（80-120字）",
           "signals": "关键跟踪信号（4-6个，顿号分隔）"}},
         {{"stance": "深度价值派", ...}},
@@ -724,8 +957,10 @@ async def update_sector_knowledge(sector_key: str) -> dict:
     "last_updated": "{now.isoformat()}"
 }}
 {subs_clause}
+representative 必须与下面 4 条给定原文完全一致（逐字照抄，不得改写、
+不得替换成没有出处的泛化风格词）：
+{reps_clause}
 要求：方法要具体到可执行的跟踪动作与指标，信号要可观测、可获取；
-representative 只写公开已知的方法论风格（如「消费长持型私募风格」），
 不得编造具体人物言论或持仓数据。"""
 
     try:
@@ -744,6 +979,9 @@ representative 只写公开已知的方法论风格（如「消费长持型私�
                     raise ValueError("perspectives 结构不完整")
                 for i, stance in enumerate(PERSPECTIVE_STANCES):
                     persp[i]["stance"] = stance
+                    # 防线二/三：落盘前再以人工把关清单强制覆盖，即使模型未照抄
+                    if reps_map.get(stance):
+                        persp[i]["representative"] = reps_map[stance]
                 data["sector_key"] = sector_key
                 data["sector_name"] = sector_name
                 data["sw_level1"] = meta["sw"]

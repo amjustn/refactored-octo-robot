@@ -15,15 +15,23 @@
 """
 import argparse
 import asyncio
+import json
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.tools.sector_knowledge import (  # noqa: E402
-    DEFAULT_SECTOR_KNOWLEDGE, PERSPECTIVE_STANCES, SECTORS,
-    _ensure_all_default_sector_knowledge, _load_sector_knowledge,
-    get_sector_knowledge_for_prompt, list_sectors,
+    DEFAULT_SECTOR_KNOWLEDGE,
+    PERSPECTIVE_STANCES,
+    SECTOR_REPS,
+    SECTORS,
+    _ensure_all_default_sector_knowledge,
+    _get_sector_path,
+    _load_sector_knowledge,
+    get_sector_knowledge,
+    get_sector_knowledge_for_prompt,
+    list_sectors,
 )
 from app.tools.sector_router import _alias_match, _industry_of_symbol, detect_sectors  # noqa: E402
 
@@ -128,10 +136,52 @@ def test_budget():
     check("E2 板块块归类为 sector（不被 master 吞掉）", cat == "sector", f"实际 {cat}")
 
 
+# ── G. 人工把关代表字段（离线） ─────────────────────────────────
+def test_manual_reps():
+    mismatch, generic = [], []
+    for key in SECTORS:
+        reps = SECTOR_REPS.get(key)
+        if not reps or len(reps) != 4:
+            mismatch.append(f"{key}(清单缺失)")
+            continue
+        d = get_sector_knowledge(key)
+        persp = d.get("perspectives", [])
+        if len(persp) != 4:
+            mismatch.append(f"{key}(视角数{len(persp)})")
+            continue
+        for i, stance in enumerate(PERSPECTIVE_STANCES):
+            got = persp[i].get("representative", "")
+            if persp[i].get("stance") != stance or got != reps[i]:
+                mismatch.append(f"{key}/{stance}")
+            if "机构风格" in got or "基金经理风格" in got:
+                generic.append(f"{key}/{stance}(泛化风格词)")
+            elif "（" not in got:
+                generic.append(f"{key}/{stance}(缺框架括号)")
+    check("G1 31×4 representative 与 SECTOR_REPS 逐字一致（走读取链路）",
+          not mismatch, f"不一致 {len(mismatch)}: {mismatch[:5]}")
+    check("G2 representative 均非泛化风格词且含「（」框架描述",
+          not generic, f"问题 {len(generic)}: {generic[:5]}")
+
+    # 防线一：把落盘 JSON 的 representative 手工改成泛化词，读取仍应是清单原文
+    key = "shipin"
+    path = _get_sector_path(key)
+    original = path.read_text(encoding="utf-8")
+    try:
+        data = json.loads(original)
+        data["perspectives"][0]["representative"] = "保守价值机构风格"
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        got = get_sector_knowledge(key)["perspectives"][0].get("representative")
+        check("G3 防线一：落盘被改成泛化词，读取仍返回清单原文",
+              got == SECTOR_REPS[key][0], f"读出 {got!r}")
+    finally:
+        path.write_text(original, encoding="utf-8")
+
+
 # ── F. API（可选） ─────────────────────────────────────────
 def test_api(base: str):
     import json
     import urllib.request
+
     from app.core.config import BERKSHIRE_API_TOKEN
     from app.core.jwt_utils import create_token
     tok = create_token(BERKSHIRE_API_TOKEN) if BERKSHIRE_API_TOKEN else ""
@@ -164,6 +214,7 @@ def main():
         asyncio.run(test_router_online())
         asyncio.run(test_injection())
     test_budget()
+    test_manual_reps()
     if args.base:
         test_api(args.base)
 
