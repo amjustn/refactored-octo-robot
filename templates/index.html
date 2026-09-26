@@ -220,7 +220,7 @@
 </div>
 <div id="llm-modal" class="modal-mask" style="display:none" onclick="if(event.target===this)closeLlmModal()">
   <div class="modal-card">
-    <h3>模型设置</h3>
+    <h3>模型设置 <button type="button" class="modal-close" onclick="closeLlmModal()" title="关闭（Esc 也可）" aria-label="关闭">×</button></h3>
     <p class="modal-tip">凭据保存策略：默认只存当前会话（关闭标签页即失效）；勾选「在本机记住」才写入浏览器持久存储。
       服务器不落盘任何访客 Key，请求只带当前配置。随时可点「清除已保存凭据」删除本机副本（不做导出）。</p>
 
@@ -288,7 +288,7 @@
 <script src="/static/js/purify.min.js?v=20260911"></script>
 <script src="/static/js/core.js?v=20260911"></script>
 <script src="/static/js/skills-nav.js?v=20260911"></script>
-<script src="/static/js/llm-config.js?v=20260919c"></script>
+<script src="/static/js/llm-config.js?v=20260923a"></script>
 <script src="/static/js/research.js?v=20260919c"></script>
 <script src="/static/js/render.js?v=20260903"></script>
 <script src="/static/js/report-actions.js?v=20260919a"></script>

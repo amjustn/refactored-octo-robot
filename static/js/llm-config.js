@@ -341,10 +341,25 @@ function openLlmModal() {
 
   document.getElementById('llm-test-result').textContent = '';
   document.getElementById('llm-modal').style.display = 'flex';
+  // 注册 Esc 关闭（2026-09-23 加：原先只靠底部「关闭」按钮和遮罩空白区，窗口矮时两者都够不着）
+  if (!_llmEscHandler) {
+    _llmEscHandler = function (e) {
+      if (e.key === 'Escape' || e.keyCode === 27) closeLlmModal();
+    };
+    document.addEventListener('keydown', _llmEscHandler);
+  }
 }
+
+// Esc 关闭监听句柄（2026-09-23 加）
+var _llmEscHandler = null;
 
 function closeLlmModal() {
   document.getElementById('llm-modal').style.display = 'none';
+  // 注销 Esc 监听，避免关闭后残留在页面上（2026-09-23 加）
+  if (_llmEscHandler) {
+    document.removeEventListener('keydown', _llmEscHandler);
+    _llmEscHandler = null;
+  }
 }
 
 // When provider dropdown changes, rebuild the model dropdown and show/hide fields.

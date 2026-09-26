@@ -938,7 +938,31 @@ body {
   width: 400px;
   max-width: calc(100vw - 48px);
   box-shadow: 0 4px 24px rgba(61,61,61,0.15);
+  /* 窗口矮时卡片内部滚动——原先无高度约束，卡片被裁后连遮罩空白区都点不到，只能刷新页面（2026-09-23 加） */
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+  position: relative;
 }
+/* 右上角关闭叉：原先只有底部「关闭」按钮，窗口矮时被裁掉就关不掉（2026-09-23 加） */
+.modal-close {
+  position: absolute;
+  top: 12px;
+  right: 14px;
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 1.15rem;
+  line-height: 1;
+  cursor: pointer;
+  border-radius: var(--radius);
+  transition: color 0.15s, background 0.15s;
+}
+.modal-close:hover { color: var(--ink); background: rgba(61,61,61,0.08); }
 .modal-card h3 {
   font-weight: 400;
   font-size: 1rem;
