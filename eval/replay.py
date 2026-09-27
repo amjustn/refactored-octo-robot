@@ -267,6 +267,10 @@ async def main_async(args) -> int:
     # and they made real reports show a bogus "⚠ 立场冲突" against fake history.
     import app.harness.decision_log as decision_log_mod
     decision_log_mod.DECISION_LOG_PATH = scratch / "decision-log.md"
+    # Skip-log 同理（2026-09-27）：_log_skip() 用的是模块级 DECISION_SKIP_PATH，
+    # 不重定向的话每次 CI/回放都会把 5-6 条 stub 用例的「没找到结论标记」写进
+    # 生产 data/decision-skip-log.jsonl，把真实漏记淹没掉（曾据此误判"5 条漏记"）。
+    decision_log_mod.DECISION_SKIP_PATH = scratch / "decision-skip-log.jsonl"
 
     playback = _load_cassettes()
     if args.stub_llm and playback:

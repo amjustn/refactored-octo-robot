@@ -3,7 +3,7 @@
   "display_name": "金融日报",
   "latest_frameworks": "当前主流日报框架已从『信息罗列』升级为『定价增量』导向的三层驱动模型：宏观流动性层（央行政策路径、实际利率、美元指数、汇率与跨境资金）→中观景气层（行业盈利预期修正、资金流向、拥挤度与估值分位）→微观事件层（财报超预期、管理层变动、订单与监管事件）。核心方法论是『预期差（Surprise vs Consensus）』：只报道能改变市场一致预期的信息，并标注影响方向、幅度与置信度。配合『叙事追踪法』识别市场主线（如AI资本开支、降息周期、去美元化）的形成、强化与瓦解阶段。流程采用『隔夜外盘—晨间要闻—当日事件日历—异动归因—组合影响—风险提示』六段式，用LLM做多源摘要、交叉验证与事实核查，人工复核关键数字。强调信息—价格映射，区分已price-in与未定价信息，输出可执行观察指标而非结论。",
   "key_criteria": "筛选四原则：①定价相关性——是否影响利率、汇率、盈利或风险偏好；②时效性——是否为本交易日新增信息；③可靠性——优先官方与一级信源，交叉验证≥2个来源；④非重复性——剔除已被price-in或已报道内容。优先级排序：央行/财政政策 > 重磅宏观数据（CPI、非农、PMI）> 行业政策与供需 > 龙头个股事件。每条信息须回答五问：影响谁、影响多大、持续多久、是否已定价、下一步看什么。设置『噪音过滤器』：无定价含义的舆情、重复转载、情绪化标题一律降权或剔除。",
-  "data_sources": "行情与资金：Wind/iFinD、Bloomberg、Refinitiv、Tushare、AKShare、yfinance；宏观官方：美联储FRED、各国央行、统计局、财政部、BLS、SEC EDGAR；新闻：路透、彭博、财新、华尔街日报、新华社；另类数据：EPFR资金流、期权隐含波动率、CDS、Google Trends、卫星与信用卡消费数据；舆情：X/Twitter、雪球、Reddit。建议API定时抓取+LLM摘要+人工复核。",
+  "data_sources": "行情与资金via get_stock_price、fetch_a_share_price_sina/tencent、fetch_us_hk_price_tencent/yahoo、Tushare、AKShare、yfinance；宏观官方：美联储FRED、各国央行、统计局、财政部、BLS、SEC EDGARvia web_search/read_webpage；新闻via fetch_company_news、fetch_news_eastmoney/fetch_news_sina及新华社、财新、华尔街日报等公开报道via web_search/read_webpage；另类数据：EPFR资金流、期权隐含波动率、CDS、Google Trends、卫星与信用卡消费数据via web_search/read_webpage；舆情：X/Twitter、雪球、Redditvia web_search/read_webpage。建议API定时抓取+LLM摘要+人工复核。（Wind/Bloomberg/Choice/iFinD/FactSet 等终端本机未授权，不得声称使用；引用外部数据必须给可点击来源或直说拿不到）",
   "update_notes": "本次更新要点：①强调『预期差』而非绝对值，共识数据须标注来源与统计口径；②新增叙事追踪与拥挤度指标，防范主线反转风险；③AI摘要必须事实核查，关键数字双源验证，严禁编造数据与来源；④加密资产与美股联动增强，需纳入隔夜跟踪清单；⑤地缘政治与关税风险溢价常态化，单列风险提示；⑥明确合规边界，日报仅供研究参考、不构成投资建议；⑦注意时区与数据发布口径差异，避免误读。",
   "last_updated": "2026-09-26T21:43:05.572292"
 }

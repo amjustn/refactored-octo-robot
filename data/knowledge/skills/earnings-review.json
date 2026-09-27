@@ -3,7 +3,7 @@
   "display_name": "财报精读",
   "latest_frameworks": "当前财报精读已从『读三张表』升级为『四层穿透』。①数据层：GAAP净利润→调整后自由现金流，重点拆解SBC、资本化研发、应收/存货变动，计算现金转换率与应计比率；②分部层：按ASC 280/IFRS 8核对分部利润率与增量资本回报，识别『公司级高增长、分部级亏损』的结构性错配；③语气层：用LLM对业绩会逐字稿做三组对比——准备稿vs Q&A、CEO vs CFO、本期vs上期，量化『回避度』（问答长度比、模糊词密度、泛指公司频率）；④承诺层：建立管理层承诺台账，把业绩指引、利润率目标、资本开支与回购承诺逐条记录并回测兑现率。2027年起IFRS 18将强制披露管理层业绩指标(MPM)，需提前搭建MPM与GAAP桥接表。另类数据第三方交叉验证已成标配。",
   "key_criteria": "硬性筛选规则：①经营现金流/净利润<0.8且连续两季下滑→黄灯；②应收账款增速>收入增速1.5倍、DSO同比延长超10天→收入质量存疑；③非GAAP与GAAP差额占净利润>25%且主要来自SBC与常态化的『一次性』项目→下调盈利质量评级；④Q&A语气相对准备稿负面偏离超1个标准差，或管理层拒答具体量化问题≥3次→治理/风险信号；⑤承诺兑现率<60%→管理层可信度降级；⑥现金流与净利润背离且存货/合同资产异常增长→触发Beneish M-Score复核。",
-  "data_sources": "一手源：SEC EDGAR（10-K/Q、8-K、DEF 14A、XBRL Frames API全文检索）、港交所披露易、巨潮资讯网及交易所问询函/监管函；业绩会逐字稿（AlphaSense、FactSet、Bloomberg、公司IR回放）；审计报告关键审计事项(KAM)与内控审计意见。交叉验证：Similarweb/Sensor Tower、卡消费与招聘数据、渠道与供应链调研。工具：Wind/Choice、Python+XBRL解析、LLM语气分析。",
+  "data_sources": "一手源：SEC EDGAR（10-K/Q、8-K、DEF 14A、XBRL Frames API全文检索）、港交所披露易、巨潮资讯网及交易所问询函/监管函via fetch_company_announcements；业绩会逐字稿via web_search/read_webpage与公司IR回放；审计报告关键审计事项(KAM)与内控审计意见via fetch_company_announcements/web_search。交叉验证：App下载与流量、卡消费与招聘数据、渠道与供应链调研via web_search/read_webpage。工具：get_financial_data、fetch_broker_reports(东财)、Python+XBRL解析、LLM语气分析。（Wind/Bloomberg/Choice/iFinD/FactSet 等终端本机未授权，不得声称使用；引用外部数据必须给可点击来源或直说拿不到）",
   "update_notes": "更新要点：①ASC 2023-09（所得税披露，2025财年起生效）与ASC 2024-03（费用按性质拆分，2027财年强制、可提前采用）将显著改变附注颗粒度，附注挖掘模板需重设；IFRS 18（2027年生效）应提前布局MPM桥接表。②AI语气分析须防『反向读心』：管理层情绪与后续股价的相关性弱于现金转化与承诺兑现，语气仅作辅助信号。③非GAAP调整常态化削弱可比性，务必自建调整表而非沿用公司口径。④承诺追踪要剔除行业与宏观外因，区分能力问题与环境问题。⑤警惕会前预沟通与范式化提问导致Q&A信息含量下降。",
   "last_updated": "2026-09-24T12:30:16.478777"
 }

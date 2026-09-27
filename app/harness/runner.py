@@ -29,8 +29,12 @@ from typing import Optional
 from ..core.config import AGENT_TIMEOUT, MAX_PARALLEL_AGENTS
 from ..core.context import data_source_label  # 定义在 core/context.py，非 harness/context.py
 from ..core.llm import (
-    chat_complete, chat_complete_with_tools, chat_stream,
-    custom_base_without_key, get_usage, pop_tool_fallback,
+    chat_complete,
+    chat_complete_with_tools,
+    chat_stream,
+    custom_base_without_key,
+    get_usage,
+    pop_tool_fallback,
 )
 from ..models.schemas import AgentProgress
 from ..skills import build_user_prompt, get_skill

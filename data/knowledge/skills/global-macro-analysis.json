@@ -3,7 +3,7 @@
   "display_name": "全球宏观分析",
   "latest_frameworks": "以「制度—政策—流动性—资产」四层映射为主干：用马尔可夫区制转换/隐马尔可夫模型把增长、通胀、流动性、政策立场切成可交易的régime（复苏/过热/滞胀/衰退，叠加财政主导vs货币主导维度），以状态转移概率而非点位预测决定仓位久期。预测端采用「先验—数据—模型」贝叶斯更新：以央行反应函数（泰勒规则变体+金融条件指数）为锚，用高频nowcasting（刷卡、运力、用电、招聘、卫星）替代滞后官方统计，输出情景树与概率分布而非单点。传导端建立「利率→美元→金融条件→信用→盈利→商品」再定价阶梯，量化跨资产弹性与拥挤度。2026年新增重点：财政主导下的期限溢价与国债供给冲击、地缘/产业政策引致的供给端非线性、AI资本开支对中性利率与生产率的再重估。Team Lead负责把制度、数据、资产三路结论对齐为一张情景—仓位矩阵。",
   "key_criteria": "1) 区制判定：增长/通胀surprise连续2-3个月同向偏离共识且被流动性指标确认，才升级为régime切换，否则视为噪声；2) 央行反应函数偏离度需>1个标准差才定价政策转向；3) 跨资产一致性：股/债/汇/商品至少3类同向定价同一叙事，否则判定为局部流动性事件；4) 拥挤度：CFTC、EPFR头寸处于历史90分位时反向加权；5) 数据质量：nowcast样本外RMSE与官方初值偏差、修订方向须检验；6) 单情景风险敞口不超过组合VaR预算上限。",
-  "data_sources": "FRED/ALFRED（vintage数据，防前视偏差）、BIS、IMF、OECD、央行声明与会议纪要、Bloomberg/Refinitiv、EPFR资金流、CFTC持仓、OFR/CLS/DTCC美元融资与回购、IMF PortWatch运力、GDELT地缘事件、高频替代数据（刷卡、招聘、卫星、用电）。优先API化抓取并版本化留痕，保证可复现。",
+  "data_sources": "官方公开：FRED/ALFRED（vintage数据，防前视偏差）、BIS、IMF、OECD、央行声明与会议纪要via web_search/read_webpage；资金流与持仓：EPFR、CFTC、OFR/CLS/DTCC、IMF PortWatch、GDELT等公开摘要via web_search/read_webpage；高频替代数据（刷卡、招聘、卫星、用电）via web_search/read_webpage；市场行情via fetch_indices_tencent/global、fetch_indices_yahoo、get_stock_price。优先API化抓取并版本化留痕，保证可复现。（Wind/Bloomberg/Choice/iFinD/FactSet 等终端本机未授权，不得声称使用；引用外部数据必须给可点击来源或直说拿不到）",
   "update_notes": "关键更新：①官方数据修订与口径变更（如CPI权重调整）会污染回测，必须使用vintage数据；②财政主导环境下「央行看跌期权」部分失效，期限溢价需单独建模，不可再单用曲线倒挂作衰退信号；③替代数据存在覆盖偏差与过拟合风险，须预注册假设并做样本外验证；④地缘政治事件用情景概率而非方向预测；⑤三路Agent结论冲突时，Team Lead应先统一时点、口径与时间窗，再争论方向，避免伪分歧。",
   "last_updated": "2026-09-24T12:30:16.476427"
 }

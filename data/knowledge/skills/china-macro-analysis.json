@@ -3,7 +3,7 @@
   "display_name": "中国宏观分析",
   "latest_frameworks": "采用“四Agent并行+Team Lead综合”框架：①政策反应函数：跟踪政治局会议、中央经济工作会议、两会目标、央行货政报告、财政赤字/专项债/特别国债/化债、地产收储与限购、产业监管，构建增长-就业-汇率-防风险多目标约束下的政策阈值；②高频数据周期：以PMI、社融信贷、M1-M2、CPI/PPI、工业增加值、投资消费出口、地产销售投资为核心，叠加发电耗煤、高炉开工、PTA/半钢胎、30城销售、地铁拥堵、集装箱吞吐、SCFI/BDI、票据利率、DR007/存单、国债曲线等Nowcasting；③汇率国际收支：人民币中间价/逆周期因子、CNH、中美利差、结售汇、代客涉外收付、北向资金、外储、掉期点，判断资本流动与货币政策约束；④中长期结构：人口地产长周期、地方债务、资产负债表、产业升级/新质生产力、安全与碳达峰、财政货币协同。Team Lead综合至增长-通胀-信用-汇率四象限，映射A股/港股/中债/人民币/商品/黄金。",
   "key_criteria": "关键信号：政策转向看政治局会议措辞、降准降息、财政增量、地产政策、汇率中间价；周期拐点看社融脉冲、M1-M2剪刀差、PMI连续3月、PPI-CPI、票据利率、地产销售同比。筛选规则：四象限定仓位，复苏加权益/周期，衰退加利率债/黄金，滞胀加商品/防御，再通胀加顺周期；关注政策底-信用底-经济底-市场底时滞，避免单月数据线性外推。",
-  "data_sources": "Wind、Bloomberg、CEIC、Choice、iFinD；统计局、央行、财政部、海关、外汇局、中采咨询；高频用钢联、隆众、乘联会、30城、上海航交所、发电耗煤、高炉、PTA、半钢胎；文本用新华社、货政报告、政治局会议；海外用美联储、BIS、IMF、FRED、TIC；Python可接akshare/tushare/FRED API。",
+  "data_sources": "官方公开：统计局、央行、财政部、海关、外汇局、中采咨询via web_search/read_webpage；高频：钢联、隆众、乘联会、30城、上海航交所、发电耗煤、高炉、PTA、半钢胎via web_search/read_webpage；文本：新华社、货政报告、政治局会议via web_search/read_webpage；海外：美联储、BIS、IMF、FRED、TICvia web_search/read_webpage；行情via fetch_indices_tencent/global、get_stock_price；Python可接akshare/tushare/FRED API。（Wind/Bloomberg/Choice/iFinD/FactSet 等终端本机未授权，不得声称使用；引用外部数据必须给可点击来源或直说拿不到）",
   "update_notes": "更新要点：从总量预测转向政策反应函数+高频Nowcasting+国际收支+中长期结构四线程；2025-2026关注关税2.0、美联储降息尾程、美元周期、地缘、化债、地产止跌回稳、财政货币协同、新质生产力、反内卷、全国统一大市场、黄金再货币化；警惕数据真空、基数、口径调整和预期博弈；用AI/NLP政策文本、混频模型、高频大数据增强实时性，并重视汇率约束与跨境资金。",
   "last_updated": "2026-09-24T12:30:16.477780"
 }

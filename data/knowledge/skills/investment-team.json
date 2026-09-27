@@ -3,7 +3,7 @@
   "display_name": "多Agent投研团队",
   "latest_frameworks": "2026年主流范式是「编排者—工作者」架构：Team Lead先将投研问题拆解为假设树（Hypothesis Tree），派发4个专精Agent并行作业——商业模式Agent做单位经济（LTV/CAC、NRR、Cohort留存）与ROIC-WACC利差拆解；财务估值Agent用DCF/反向DCF/EV-EBITDA/剩余收益三法交叉验证并做敏感性分析；行业竞争Agent用升级版五力+平台网络效应+生态位与替代品分析；风险Agent做pre-mortem、基准率参考与尾部情景压力测试。核心升级是引入对抗验证：设独立红队/反方Agent对主论点证伪，就分歧点进行2-3轮结构化辩论，Team Lead按证据权重收敛，输出置信度加权的目标价区间与论点破坏触发器（kill criteria）。全程结构化输出Schema+引用溯源，并设置人工决策闸口。",
   "key_criteria": "①每条结论须锚定一手证据（财报页码、电话会原文、数据源链接），无引用即驳回；②估值需≥2种方法且结果差异<20%方可下结论，超出须归因；③关键假设需3条以上独立证据链，且至少包含1条反证；④4个Agent结论分歧超阈值时强制启动辩论轮，禁止简单多数决；⑤风险Agent必须给出基准率、最坏情景与论点破坏触发器；⑥置信度需校准，仅证据高度一致时给高置信；⑦合规闸口：MNPI隔离、无内幕信息、全流程留痕可审计。",
-  "data_sources": "监管一手：SEC EDGAR、巨潮资讯、港交所披露易、交易所问询函；财务估值：Wind、Bloomberg、FactSet、S&P Capital IQ及公司电话会/投资者日材料；行业：Gartner/IDC/Statista/行业协会年报；替代数据：信用卡消费、招聘岗位、卫星与地理定位、App下载（Sensor Tower）、SimilarWeb流量；另加专利商标库、政策原文、arXiv作为反证来源。全部经RAG入库并做时间戳与版本管理。",
+  "data_sources": "监管一手：SEC EDGAR、巨潮资讯、港交所披露易、交易所问询函via fetch_company_announcements(巨潮)；财务估值：get_financial_data、fetch_broker_reports(东财)、fetch_hibor_reports(慧博，含港美)及公司电话会/投资者日材料via web_search/read_webpage；行情via get_stock_price、fetch_us_hk_price_tencent/yahoo；行业：行业协会年报、公开行业资料via web_search/read_webpage；替代数据：信用卡消费、招聘岗位、卫星与地理定位、App下载、流量数据via web_search/read_webpage；另加专利商标库、政策原文、arXiv作为反证来源via web_search/read_webpage。全部经RAG入库并做时间戳与版本管理。（Wind/Bloomberg/Choice/iFinD/FactSet 等终端本机未授权，不得声称使用；引用外部数据必须给可点击来源或直说拿不到）",
   "update_notes": "本次更新要点：①由「并行生成」升级为「并行+对抗辩论+收敛」，缓解多Agent同源偏差（相关性错误）与谄媚倾向；②强制结构化Schema与逐句引用，抑制幻觉；③引入可复现性要求，提示词、模型版本、数据快照全部版本化，便于回溯与评估；④成本与延迟预算管理，简单任务不启用全队；⑤新增提示注入与网页污染防护，外部抓取内容一律视为不可信输入；⑥合规升级：MNPI隔离墙、审计留痕，人类对最终结论负全责；⑦定期用历史案例回测校准Agent置信度，警惕模型漂移与「共识即正确」的错觉。",
   "last_updated": "2026-09-24T12:30:16.471323"
 }
