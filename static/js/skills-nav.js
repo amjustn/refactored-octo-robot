@@ -259,15 +259,19 @@ function quickStart(skillName, args) {
 }
 
 // ── 搜索框防「浏览器自动填充」 ────────────────────────────────
-// 症状：点一下侧栏搜索框，浏览器（实测 Edge）把模型设置里填过的 Base URL
-// （如 https://api.deepseek.com）自动填进来。根因在浏览器自动填充：搜索框
-// 与 Base URL 框都是无 name 的 type=text，浏览器把它们当成同一类"可填字段"，
-// 共享记住的值。autocomplete="off" 对自动填充不生效。
-// 应用侧兜底：不是用户自己敲/粘进来的网址，一律清掉（并留痕），用户输入不受影响。
+// 症状：浏览器（实测 Edge）把模型设置里填过的 Base URL（如 https://api.deepseek.com）
+// 自动填进侧栏搜索框；实测触发点不止「点搜索框」，**点技能也会**——selectSkill() 里的
+// renderSkillNav() 会重建侧栏 DOM，浏览器重新解析表单就把记住的值填回来。
+// 根因在浏览器自动填充：搜索框与 Base URL 框都是无 name 的 type=text，浏览器把它们
+// 当成同一类"可填字段"共享记住的值；autocomplete="off" 对自动填充不生效。
+// 应用侧兜底原则：**不是用户自己敲/粘产生的值，且长得像网址，一律清掉**。
+// 因此判定不看"谁触发"，改成比对"用户自己产生的值"（_userValue），
+// 并叠加定时巡检 + 侧栏重渲染监听 —— 浏览器什么时候塞进来都能清掉。
 (function () {
   var el = document.getElementById('skill-search');
   if (!el) return;
-  var _userTyped = false;
+  var _userValue = '';      // 用户自己敲/粘产生的值（浏览器填充不会触发 input 事件）
+  var _lastLog = 0;
 
   function _looksInjected(v) {
     v = (v || '').trim();
@@ -276,10 +280,16 @@ function quickStart(skillName, args) {
   }
 
   function _purge(why) {
-    if (_userTyped || !_looksInjected(el.value)) return;
-    var bad = el.value;
+    var v = el.value;
+    if (!v || v === _userValue) return;      // 空值 / 用户自己产生的值 → 不动
+    if (!_looksInjected(v)) return;          // 用户查技能的中文/英文关键词 → 不动
     el.value = '';
-    console.info('[skill-search] 已清除浏览器自动填充写入的值：' + bad + '（触发：' + why + '）');
+    _userValue = '';
+    var now = Date.now();
+    if (now - _lastLog > 2000) {
+      _lastLog = now;
+      console.info('[skill-search] 已清除浏览器自动填充写入的值：' + v + '（触发：' + why + '）');
+    }
     if (typeof filterSkills === 'function') filterSkills();
   }
 
@@ -290,8 +300,21 @@ function quickStart(skillName, args) {
     });
   }
 
-  el.addEventListener('keydown', function () { _userTyped = true; }, true);
-  el.addEventListener('paste', function () { _userTyped = true; }, true);
+  // ① 用户自己产生的值：只有真实输入/粘贴才更新（浏览器自动填充不发 input 事件）
+  el.addEventListener('input', function () { _userValue = el.value; });
+  el.addEventListener('paste', function () { _userValue = el.value; }, true);
+
+  // ② 定时巡检：不依赖任何触发时机（覆盖"没碰它、自己冒出来"）
+  setInterval(function () { _purge('巡检'); }, 400);
+
+  // ③ 侧栏重渲染（点技能 → renderSkillNav）后立即补一次
+  var nav = document.getElementById('nav-categories');
+  if (nav && typeof MutationObserver === 'function') {
+    new MutationObserver(function () { _schedule('侧栏重渲染'); })
+      .observe(nav, { childList: true, subtree: true });
+  }
+
+  // ④ 交互触发点（保留，反应比巡检快）
   el.addEventListener('mousedown', function () { _schedule('mousedown'); }, true);
   el.addEventListener('focus', function () { _schedule('focus'); }, true);
   window.addEventListener('load', function () { setTimeout(function () { _purge('load'); }, 250); });
