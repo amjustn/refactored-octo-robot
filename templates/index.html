@@ -16,7 +16,7 @@
       <h1>价值投资研究工作站</h1>
     </div>
     <div class="skill-search-box">
-      <input type="text" id="skill-search" placeholder="搜索技能..." oninput="filterSkills()" autocomplete="off">
+      <input type="text" id="skill-search" name="berkshire-skill-search" placeholder="搜索技能..." oninput="filterSkills()" autocomplete="off">
     </div>
     <nav id="skill-nav">
       <div id="nav-loading">
@@ -246,11 +246,11 @@
     <select id="llm-model-select" onchange="onModelSelectChange()" style="display:none">
       <option value="">请选择模型</option>
     </select>
-    <input type="text" id="llm-model" placeholder="deepseek-v4-flash" autocomplete="off">
+    <input type="text" id="llm-model" name="berkshire-llm-model" placeholder="deepseek-v4-flash" autocomplete="off">
 
     <div id="llm-custom-fields" style="display:none">
       <label>Base URL</label>
-      <input type="text" id="llm-base-url" placeholder="https://api.deepseek.com" autocomplete="off">
+      <input type="text" id="llm-base-url" name="berkshire-llm-base-url" placeholder="https://api.deepseek.com" autocomplete="off">
       <label>API Key</label>
       <input type="password" id="llm-api-key" placeholder="sk-..." autocomplete="off">
     </div>
@@ -287,7 +287,7 @@
 <script src="/static/js/echarts.min.js"></script>
 <script src="/static/js/purify.min.js?v=20260911"></script>
 <script src="/static/js/core.js?v=20260911"></script>
-<script src="/static/js/skills-nav.js?v=20260911"></script>
+<script src="/static/js/skills-nav.js?v=20260930a"></script>
 <script src="/static/js/llm-config.js?v=20260923a"></script>
 <script src="/static/js/research.js?v=20260919c"></script>
 <script src="/static/js/render.js?v=20260903"></script>

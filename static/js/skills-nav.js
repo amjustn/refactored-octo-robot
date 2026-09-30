@@ -257,3 +257,42 @@ function quickStart(skillName, args) {
   document.getElementById('arg-field').value = args;
   startResearch();
 }
+
+// ── 搜索框防「浏览器自动填充」 ────────────────────────────────
+// 症状：点一下侧栏搜索框，浏览器（实测 Edge）把模型设置里填过的 Base URL
+// （如 https://api.deepseek.com）自动填进来。根因在浏览器自动填充：搜索框
+// 与 Base URL 框都是无 name 的 type=text，浏览器把它们当成同一类"可填字段"，
+// 共享记住的值。autocomplete="off" 对自动填充不生效。
+// 应用侧兜底：不是用户自己敲/粘进来的网址，一律清掉（并留痕），用户输入不受影响。
+(function () {
+  var el = document.getElementById('skill-search');
+  if (!el) return;
+  var _userTyped = false;
+
+  function _looksInjected(v) {
+    v = (v || '').trim();
+    if (!v) return false;
+    return v.indexOf('://') >= 0 || /^https?\./i.test(v) || v.indexOf('api.deepseek.com') >= 0;
+  }
+
+  function _purge(why) {
+    if (_userTyped || !_looksInjected(el.value)) return;
+    var bad = el.value;
+    el.value = '';
+    console.info('[skill-search] 已清除浏览器自动填充写入的值：' + bad + '（触发：' + why + '）');
+    if (typeof filterSkills === 'function') filterSkills();
+  }
+
+  function _schedule(why) {
+    // 浏览器填充发生在 focus/mousedown 前后，多打几个时间点，避免时序漏网
+    [0, 120, 400].forEach(function (d) {
+      setTimeout(function () { _purge(why + '+' + d + 'ms'); }, d);
+    });
+  }
+
+  el.addEventListener('keydown', function () { _userTyped = true; }, true);
+  el.addEventListener('paste', function () { _userTyped = true; }, true);
+  el.addEventListener('mousedown', function () { _schedule('mousedown'); }, true);
+  el.addEventListener('focus', function () { _schedule('focus'); }, true);
+  window.addEventListener('load', function () { setTimeout(function () { _purge('load'); }, 250); });
+})();
