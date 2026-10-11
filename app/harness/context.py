@@ -76,6 +76,11 @@ BUDGET = {
     # 文本约 1300 字符 / ~1900 token，预算上调至 2200，避免 L1 截断
     # 砍掉尾部「风险逆向派」视角。
     "sector": 2200,
+    # 通用财务与估值信号（2026-10-11）：实测单份约 713 字符 / ~1000 token
+    # （澜起 688008.SH）。整块只在能解析到 A 股代码时才生成，且内部已是
+    # 紧凑一行一指标，故给 1200 保证不触发 L1 截断（截断会把「口径说明」
+    # 那行砍掉，正是禁止编造的那条硬约束）。
+    "signals": 1200,
     "web": 1500,
     "time": 400,
     # 历史决策复盘块单列预算（批C，2026-09-11）：块体积上界实测 ≈1974 token
@@ -219,6 +224,11 @@ def _split_sections(context: str) -> list:
 
 def _categorize(title: str, body: str) -> str:
     t = title.lower()
+    # 通用财务与估值信号块（2026-10-11）：必须最先判 —— 块内正文含 "PE(TTM)"，
+    # 会被下面的 financials 规则（`"PE" in body[:200]`）误吞，导致按财报预算
+    # 归类、与真财报块混算 token。
+    if "估值与现金流信号" in title:
+        return "signals"
     # 批C：历史决策复盘块单列一类（不与 web 共预算，避免尾部最新结论被截）
     if "历史决策复盘" in title:
         return "decision_history"

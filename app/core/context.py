@@ -643,10 +643,28 @@ async def build_full_context(arguments: str = "", skill_name: str = "", goal_hin
             logger.debug(f"Sector knowledge context failed: {e}")
         return ""
 
+    async def _fetch_signal_ctx():
+        # 通用财务与估值信号（2026-10-11）：板块知识库给的是「该盯哪些信号」的
+        # 观察清单，本机大多没有清单上的数据源 —— 实测电子板块 4 视角里只有
+        # 风险逆向派落地。本分支把清单里「本机能核算」的通用指标（估值分位、
+        # 股息与国债利差、现金流质量、资本开支强度、周转天数、净现金占市值）
+        # 算成真实数值补进上下文；白名单与板块库一致，无 A 股代码时零注入。
+        if (skill_name or "") not in SECTOR_KB_SKILLS:
+            return ""
+        try:
+            from ..tools.generic_signals import build_signal_context
+            return await build_signal_context(symbol or arguments or "")
+        except Exception as e:
+            logger.debug(f"Generic signals context failed: {e}")
+            return ""
+
     import asyncio
-    idx_ctx, comp_ctx, web_ctx, broker_ctx, ann_ctx, hibor_ctx, sector_ctx = await asyncio.gather(
+    (
+        idx_ctx, comp_ctx, web_ctx, broker_ctx, ann_ctx,
+        hibor_ctx, sector_ctx, signal_ctx,
+    ) = await asyncio.gather(
         _fetch_indices_ctx(), _fetch_company_ctx(), _fetch_web_ctx(), _fetch_broker_ctx(),
-        _fetch_announcement_ctx(), _fetch_hibor_ctx(), _fetch_sector_ctx(),
+        _fetch_announcement_ctx(), _fetch_hibor_ctx(), _fetch_sector_ctx(), _fetch_signal_ctx(),
     )
     # Assemble sections in the same order as the sequential implementation
     if idx_ctx is not None:
@@ -663,6 +681,8 @@ async def build_full_context(arguments: str = "", skill_name: str = "", goal_hin
         parts.append(web_ctx)
     if sector_ctx:
         parts.append(sector_ctx)
+    if signal_ctx:
+        parts.append(signal_ctx)
 
     # Add skill-specific domain knowledge (each of the 21 skills has its own)
     if skill_name:
