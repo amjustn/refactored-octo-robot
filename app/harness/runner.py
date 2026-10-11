@@ -451,6 +451,34 @@ class AllAgentsFailedError(RuntimeError):
         self.report = report or ""
 
 
+EMPTY_SYNTHESIS_TEXT = (
+    "[错误] 综合环节返回空内容（模型这一次没有输出正文），本报告为无综合降级版本，"
+    "请直接参考附录中的各 Agent 独立研究报告。"
+)
+
+
+def degrade_empty_synthesis(synthesis: Optional[str]) -> tuple[str, Optional[dict]]:
+    """综合结果为空白 → 返回降级文案与告警；否则原样返回。
+
+    为什么需要这一条（2026-10-11 实测）：默认模型 deepseek-v4-flash 是混合思考模型，
+    它会把内容写进 `reasoning_content`（同一句提问实测三次：思考 1354 / 5341 / 17822
+    字符，而正文 content 只有 88 / 4271 / 1542），而 `core.llm.chat_stream` 只读
+    `delta.content` —— 一旦某次输出整段落在思考字段里，综合结果就是空串。
+    此前 run_multi 对 synthesis 只有「超时」「异常后重试」「重试再失败」两条半兜底，
+    **没有空值判据** ⇒ 空串被原样拼进 final_report，任务仍标 completed、报告头照写
+    N/N Agent 成功（实测多份：2026-09-03 / 09-06 / 09-19 / 10-11 16:09）。
+    本函数把这种静默失败变成显式降级：报告里出现明确文案、meta 里留下告警。
+
+    返回 (synthesis, warning)：warning 为 None 表示无需降级。
+    """
+    if synthesis is not None and synthesis.strip():
+        return synthesis, None
+    return EMPTY_SYNTHESIS_TEXT, {
+        "gate": "synthesis_empty",
+        "detail": "综合环节返回空内容（模型未输出正文），报告降级为各 Agent 原始报告附录",
+    }
+
+
 class AgentRunner:
     """Unified agent execution. All observable progress goes to the bus."""
 
@@ -1379,6 +1407,15 @@ class AgentRunner:
                     "detail": f"综合环节失败，报告降级为各 Agent 原始报告附录：{str(e)[:200]}"[:300],
                 })
                 self._progress("team-lead", "failed", "综合失败，已降级")
+
+        # 空值兜底（2026-10-11）：混合思考模型可能把整段输出落在 reasoning 字段，
+        # 而 chat_stream 只读 content ⇒ 综合结果为空串。没有这条判据时，空串会被
+        # 原样拼进报告、任务照样标成功（实测多份历史报告），属于静默失败。
+        synthesis, _empty_warn = degrade_empty_synthesis(synthesis)
+        if _empty_warn is not None:
+            logger.error("Team Lead synthesis returned empty content — 报告降级为仅附录")
+            self.extra_warnings.append(_empty_warn)
+            self._progress("team-lead", "failed", "综合返回空，已降级")
 
         # 断点续跑检查点：Team Lead 综合结果落库。综合完成即任务主体
         # 完成；崩溃后留作审计，后续 post_synthesis 仍各自存 artifact。
