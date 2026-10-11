@@ -236,28 +236,206 @@ def format_electronics_block(sia: dict, dram: dict) -> str:
     else:
         lines.append("- DRAM 现货价（TrendForce）：数据不可得（抓取或解析失败，不得凭空填数）")
     lines.append(
-        "覆盖说明：本块只覆盖电子板块两条可稳定抓取的公开信号；SEMI 设备出货、晶圆厂产能利用率、"
-        "渠道库存与交期等本机无源，不得凭空填数；其余 30 个板块暂不注入行业景气数据。"
+        "覆盖说明：本块覆盖电子板块两条可稳定抓取的公开信号（SIA 月度销售额、DRAM 现货价）；"
+        "SEMI 设备出货、晶圆厂产能利用率、渠道库存与交期等本机无源，不得凭空填数。"
     )
     return "\n".join(lines) + "\n"
 
 
 ELECTRONICS_SECTOR_KEY = "dianzi"
 
+# ── 商品价格（现货价口径，覆盖资源/农业/新能源板块，2026-10-11）──────────
+# 用户口径：网上公开、能稳定抓到的都接上；抓不到的不硬凑。
+# 实测：akshare futures_spot_price 一次返回 54 个品种的现货价（含基差），覆盖
+# 有色/钢铁/化工/建材/农林牧渔/新能源/纺织/轻工。两个缺口：动力煤（ZC 不在现货
+# 列表、ZC0 主力连续返回空）⇒ **动力煤明确无源，煤炭只给焦煤**；原油（SC 不在
+# 现货列表）⇒ 用主力连续收盘价补，输出时标注口径不同。
+COMMODITY_MAP: dict = {
+    "youse": [("CU", "铜"), ("AL", "铝"), ("ZN", "锌"), ("AU", "黄金"), ("AG", "白银")],
+    "gangtie": [("RB", "螺纹钢"), ("I", "铁矿石"), ("J", "焦炭"), ("JM", "焦煤")],
+    "meitan": [("JM", "焦煤")],
+    "shiyou": [("FU", "燃料油"), ("BU", "沥青")],
+    "huagong": [("TA", "PTA"), ("MA", "甲醇"), ("SA", "纯碱"), ("UR", "尿素"), ("PP", "聚丙烯")],
+    "jiancai": [("FG", "玻璃")],
+    "nonglin": [("LH", "生猪"), ("C", "玉米"), ("M", "豆粕"), ("SR", "白糖"), ("CF", "棉花")],
+    "dianlishebei": [("LC", "碳酸锂"), ("SI", "工业硅"), ("PS", "多晶硅")],
+    "fangzhi": [("CF", "棉花")],
+    "qinggong": [("SP", "纸浆")],
+}
+COMMODITY_EXTRA: dict = {"shiyou": [("SC0", "原油")]}
+COMMODITY_UNITS = {"AU": "元/克", "AG": "元/千克"}
+COMMODITY_TITLE = "行业景气信号（商品价格·公开源）"
+
+
+def _fetch_spot_two_days() -> dict:
+    """抓最近两个交易日的现货价快照；futures_spot_price 对非交易日返回空表。"""
+    import akshare as ak
+
+    snaps: list = []
+    day = dt.date.today()
+    for _ in range(8):
+        df = None
+        try:
+            df = ak.futures_spot_price(date=day.strftime("%Y%m%d"))
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"现货价 {day} 抓取失败: {type(e).__name__}")
+        if df is not None and len(df):
+            snaps.append((day.strftime("%Y-%m-%d"), {str(k): float(v) for k, v in
+                                                    zip(df["symbol"], df["spot_price"])}))
+            if len(snaps) == 2:
+                break
+        day -= dt.timedelta(days=1)
+    if not snaps:
+        return {}
+    out = {"date": snaps[0][0], "prices": snaps[0][1]}
+    if len(snaps) > 1:
+        out["prev_date"] = snaps[1][0]
+        out["prev_prices"] = snaps[1][1]
+    return out
+
+
+def fetch_commodity_snapshot() -> dict:
+    return _cached("commodity_spot", _fetch_spot_two_days)
+
+
+def _fetch_commodity_extra() -> dict:
+    """现货列表缺失的品种（原油）用主力连续收盘价补。"""
+    import akshare as ak
+
+    out: dict = {}
+    start = (dt.date.today() - dt.timedelta(days=25)).strftime("%Y%m%d")
+    end = dt.date.today().strftime("%Y%m%d")
+    for sym, label in [x for lst in COMMODITY_EXTRA.values() for x in lst]:
+        try:
+            df = ak.futures_main_sina(symbol=sym, start_date=start, end_date=end)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"主力连续 {sym} 抓取失败: {type(e).__name__}")
+            continue
+        if df is None or len(df) == 0:
+            logger.warning(f"主力连续 {sym} 无数据（品种可能已退市/停牌）")
+            continue
+        last, prev = df.iloc[-1], (df.iloc[-2] if len(df) > 1 else df.iloc[-1])
+        try:
+            px, pv = float(last["收盘价"]), float(prev["收盘价"])
+        except Exception:  # noqa: BLE001
+            continue
+        out[sym] = {
+            "label": label, "price": px, "prev": pv,
+            "chg_pct": round((px / pv - 1) * 100, 2) if pv else None,
+            "date": str(last["日期"])[:10],
+        }
+    return out
+
+
+def fetch_commodity_extra() -> dict:
+    return _cached("commodity_extra", _fetch_commodity_extra)
+
+
+def _sector_cn_name(key: str) -> str:
+    try:
+        from .sector_knowledge import SECTORS
+        return (SECTORS.get(key) or {}).get("name", key)
+    except Exception:  # noqa: BLE001
+        return key
+
+
+def format_commodity_block(sector_keys: list, snap: dict, extra: dict) -> str:
+    """按识别到的板块列出对应商品价格；同一品种只出现一次。"""
+    prices = (snap or {}).get("prices") or {}
+    prevs = (snap or {}).get("prev_prices") or {}
+    if not prices and not extra:
+        return ""
+    used: set = set()
+    rows: list = []
+    for key in sector_keys:
+        seg: list = []
+        for sym, label in COMMODITY_MAP.get(key, []):
+            if sym in used:
+                continue
+            px = prices.get(sym)
+            if px is None:
+                continue
+            used.add(sym)
+            unit = COMMODITY_UNITS.get(sym, "元/吨")
+            item = f"{label} {px:,.2f} {unit}"
+            pv = prevs.get(sym)
+            if pv:
+                chg = (px / pv - 1) * 100
+                item += "（持平）" if abs(chg) < 0.005 else f"（{chg:+.2f}%）"
+            seg.append(item)
+        for sym, label in COMMODITY_EXTRA.get(key, []):
+            info = (extra or {}).get(sym)
+            if not info:
+                continue
+            item = f"{label} {info['price']:,.2f} 元/桶（主力合约收盘价）"
+            if info.get("chg_pct") is not None:
+                item += f"（{info['chg_pct']:+.2f}%）"
+            seg.append(item)
+        if seg:
+            rows.append(f"- {_sector_cn_name(key)}：" + "、".join(seg))
+    if not rows:
+        return ""
+    lines = [f"## {COMMODITY_TITLE}", ""]
+    head = f"数据日期 {snap.get('date', '?')}"
+    if snap.get("prev_date"):
+        head += f"（涨跌对比 {snap['prev_date']}）"
+    head += "；来源：akshare 现货价格接口"
+    lines.append(head)
+    lines.extend(rows)
+    lines.append(
+        "覆盖说明：以上是**商品价格代理指标**（现货价口径，原油为主力合约价）；行业景气还包括"
+        "开工率、库存、订单、渠道等本机无源数据。动力煤、水泥、多数制造与消费行业本机无稳定源，"
+        "不得凭空填数。"
+    )
+    return "\n".join(lines) + "\n"
+
+
+async def _gather_commodity() -> tuple[dict, dict]:
+    import asyncio
+
+    async def _wrap(fn) -> dict:
+        try:
+            return await asyncio.wait_for(asyncio.to_thread(fn), timeout=OVERALL_TIMEOUT)
+        except asyncio.TimeoutError:
+            logger.warning(f"商品价格: {fn.__name__} 超时（>{OVERALL_TIMEOUT}s）")
+            return {}
+
+    snap, extra = await asyncio.gather(_wrap(fetch_commodity_snapshot), _wrap(fetch_commodity_extra))
+    return snap or {}, extra or {}
+
 
 async def build_industry_signal_context(sector_keys: list) -> str:
-    """仅当识别到电子板块时返回块；异常/超时返回空串，不影响主链路。"""
+    """按识别到的板块拼注入块：电子走专用源（SIA/DRAM），资源与农业类走商品价格。
+
+    任一源失败只影响它自己那一段；全失败返回空串（零注入），不影响主链路。
+    """
     try:
         keys = list(sector_keys or [])
-        if ELECTRONICS_SECTOR_KEY not in keys:
+        if not keys:
             return ""
-        sia, dram = await _gather_signals()
-        block = format_electronics_block(sia, dram)
-        if block:
-            logger.info(
-                f"行业景气信号注入: 电子试点 SIA={'有' if sia.get('amount_100m') else '无'} "
-                f"DRAM={'有' if dram.get('session_avg') is not None else '无'} 注入 {len(block)} 字符"
-            )
+        blocks: list = []
+        if ELECTRONICS_SECTOR_KEY in keys:
+            sia, dram = await _gather_signals()
+            b = format_electronics_block(sia, dram)
+            if b:
+                blocks.append(b)
+                logger.info(
+                    f"行业景气信号: 电子 SIA={'有' if sia.get('amount_100m') else '无'} "
+                    f"DRAM={'有' if dram.get('session_avg') is not None else '无'}"
+                )
+        if any(k in COMMODITY_MAP or k in COMMODITY_EXTRA for k in keys):
+            snap, extra = await _gather_commodity()
+            b = format_commodity_block(keys, snap, extra)
+            if b:
+                blocks.append(b)
+                logger.info(
+                    f"行业景气信号: 商品价格 日期={snap.get('date')} "
+                    f"板块={[k for k in keys if k in COMMODITY_MAP or k in COMMODITY_EXTRA]}"
+                )
+        if not blocks:
+            return ""
+        block = "\n".join(blocks)
+        logger.info(f"行业景气信号注入: 共 {len(block)} 字符")
         return block
     except Exception as e:  # noqa: BLE001
         logger.warning(f"行业景气信号注入失败，本轮不注入: {type(e).__name__}: {str(e)[:120]}")

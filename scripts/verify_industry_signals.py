@@ -99,8 +99,52 @@ def section_wiring() -> None:
     check("块内含覆盖说明（不得凭空填数）", "不得凭空填数" in fallback)
 
 
+def section_commodity() -> None:
+    """商品价格（现货价）段：离线夹具断言，不联网。"""
+    import json as _json
+
+    from app.tools.industry_signals import (
+        COMMODITY_EXTRA, COMMODITY_MAP, COMMODITY_UNITS, format_commodity_block,
+    )
+
+    print("\n[2b] 商品价格（离线夹具）")
+    fix = _json.loads((FIX / "commodity_spot_fixture.json").read_text(encoding="utf-8"))
+    check("现货价夹具含两个交易日", fix["date"] == "2026-10-09" and fix["prev_date"] == "2026-10-08")
+    check("映射覆盖板块数 ≥ 10", len(COMMODITY_MAP) >= 10, f"{len(COMMODITY_MAP)} 个板块")
+    check("黄金/白银单位单独标注（元/克、元/千克）",
+          COMMODITY_UNITS.get("AU") == "元/克" and COMMODITY_UNITS.get("AG") == "元/千克")
+
+    blk = format_commodity_block(["youse"], fix, {})
+    check("单板块只输出该板块", "有色金属" in blk and "农林牧渔" not in blk and "钢铁" not in blk)
+    check("数字带单位（元/吨）", "元/吨" in blk)
+    cu_now, cu_prev = fix["prices"]["CU"], fix["prev_prices"]["CU"]
+    exp_chg = f"{(cu_now / cu_prev - 1) * 100:+.2f}%"
+    check("涨跌按两日现货价实算", exp_chg in blk, f"期望 {exp_chg}")
+    check("块内含数据日期与来源", fix["date"] in blk and "akshare 现货价格接口" in blk)
+    check("块内含覆盖说明（不得凭空填数）", "不得凭空填数" in blk)
+
+    blk2 = format_commodity_block(["nonglin", "fangzhi"], fix, {})
+    check("同一品种不重复（棉花在农业与纺织各映射一次，只出现一次）", blk2.count("棉花") == 1)
+
+    blk3 = format_commodity_block(["shiyou"], fix, {"SC0": {"label": "原油", "price": 734.1, "prev": 758.5,
+                                                          "chg_pct": -3.22, "date": "2026-10-09"}})
+    check("原油走主力连续分支并标注口径不同", "原油" in blk3 and "主力合约收盘价" in blk3)
+    check("原油涨跌标注", "-3.22%" in blk3)
+
+    check("无匹配品种的板块 → 空串", format_commodity_block(["yinhang"], fix, {}) == "")
+    check("夹具为空但原油可得 → 仍输出原油行", format_commodity_block(
+        ["shiyou"], {}, {"SC0": {"label": "原油", "price": 734.1, "prev": 758.5, "chg_pct": -3.22, "date": "x"}}
+    ) != "")
+    check("期货品种不在映射内不会被带出（如 A 豆一、JD 鸡蛋）",
+          "豆一" not in blk and "鸡蛋" not in blk)
+    check("板块中文名取自注册表（非英文 key）",
+          "钢铁" in format_commodity_block(["gangtie"], fix, {})
+          and "gangtie" not in format_commodity_block(["gangtie"], fix, {}))
+    check("商品映射不与电子重复（dianzi 不走商品分支）", "dianzi" not in COMMODITY_MAP and "dianzi" not in COMMODITY_EXTRA)
+
+
 async def section_live() -> None:
-    from app.harness.context import count_tokens
+    from app.harness.context import BUDGET, count_tokens
     from app.tools import industry_signals as I
 
     print("\n[3] 真实抓取层（联网）")
@@ -128,9 +172,30 @@ async def section_live() -> None:
     block = await I.build_industry_signal_context(["dianzi"])
     check("电子板块 → 注入块非空", len(block) > 300, f"{len(block)} 字符")
     check("块内含 SIA 与 DRAM 两行", "全球半导体销售额" in block and "DRAM 现货价" in block)
-    check("块 token 在预算内（<1200）", count_tokens(block) < 1200, f"{count_tokens(block)} token")
-    check("非电子板块 → 零注入", await I.build_industry_signal_context(["youse"]) == "")
+    check("块 token 在预算内（industry 档）", count_tokens(block) < BUDGET.get("industry", 0),
+          f"{count_tokens(block)} < {BUDGET.get('industry')}")
+    check("无商品映射的板块 → 零注入（银行）", await I.build_industry_signal_context(["yinhang"]) == "")
     check("空板块列表 → 零注入", await I.build_industry_signal_context([]) == "")
+
+    # ── 商品价格（现货价）真实抓取 ──
+    snap, extra = await I._gather_commodity()
+    prices = snap.get("prices") or {}
+    check("现货价快照品种数 ≥ 40", len(prices) >= 40, f"{len(prices)} 个品种")
+    ok_date = False
+    try:
+        ok_date = (dt.date.today() - dt.date.fromisoformat(str(snap.get("date")))).days <= 7
+    except ValueError:
+        ok_date = False
+    check("现货价日期在近 7 天内", ok_date, str(snap.get("date")))
+    check("原油（主力连续）可得", bool(extra.get("SC0")), str((extra.get("SC0") or {}).get("price")))
+    blk_c = await I.build_industry_signal_context(["youse"])
+    check("有色板块 → 商品块含金属价", "有色金属" in blk_c and "元/吨" in blk_c, f"{len(blk_c)} 字符")
+    check("非商品板块（计算机）不产出商品块", "商品价格" not in await I.build_industry_signal_context(["jisuanji"]))
+    both = await I.build_industry_signal_context(["dianzi", "youse"])
+    check("电子 + 有色 → 两块同现", "SIA/WSTS" in both and "有色金属" in both, f"{len(both)} 字符")
+    check("最大组合 token 在预算内", count_tokens(both) < BUDGET.get("industry", 0),
+          f"{count_tokens(both)} < {BUDGET.get('industry')}")
+    check("映射里每个板块都能取到中文名", all(I._sector_cn_name(k) != k for k in I.COMMODITY_MAP))
 
 
 def section_api(base: str) -> None:
@@ -168,6 +233,7 @@ def main() -> int:
     args = ap.parse_args()
     section_parse()
     section_wiring()
+    section_commodity()
     asyncio.run(section_live())
     if args.base:
         section_api(args.base.rstrip("/"))
