@@ -631,17 +631,41 @@ async def build_full_context(arguments: str = "", skill_name: str = "", goal_hin
             return ""
         try:
             from ..tools.sector_knowledge import get_sector_knowledge_for_prompt
+            if sector_det.get("sectors"):
+                return get_sector_knowledge_for_prompt(sector_det["sectors"]) or ""
+        except Exception as e:
+            logger.debug(f"Sector knowledge context failed: {e}")
+        return ""
+
+    async def _fetch_industry_signal_ctx():
+        # 行业景气信号（2026-10-11，试点仅电子）：板块知识库给的信号清单里，
+        # 行业景气类数据本机大多没有源（实测电子 4 视角只有风险逆向派落地）。
+        # 本分支先给电子接两条可稳定抓取的公开信号（SIA 全球半导体销售额月度、
+        # TrendForce DRAM 现货价），只在识别到电子板块时注入；其余 30 个板块
+        # 暂不注入 —— 用户口径：只做有代表性的试点，不硬凑。
+        if (skill_name or "") not in SECTOR_KB_SKILLS:
+            return ""
+        try:
+            from ..tools.industry_signals import build_industry_signal_context
+            return await build_industry_signal_context(sector_det.get("sectors") or [])
+        except Exception as e:
+            logger.debug(f"Industry signal context failed: {e}")
+            return ""
+
+    # 板块识别提前到 gather 之前（一次识别，板块知识与行业景气两个分支共用；
+    # 它本来就在 gather 的关键路径上，总延迟不变）。
+    sector_det: dict = {}
+    if (skill_name or "") in SECTOR_KB_SKILLS:
+        try:
             from ..tools.sector_router import detect_sectors
-            det = await detect_sectors(
+            sector_det = await detect_sectors(
                 arguments=arguments or "",
                 symbol=symbol or "",
                 company_name=(goal_hints.get("company") or "") if goal_hints else "",
             )
-            if det.get("sectors"):
-                return get_sector_knowledge_for_prompt(det["sectors"]) or ""
         except Exception as e:
-            logger.debug(f"Sector knowledge context failed: {e}")
-        return ""
+            logger.debug(f"Sector detection failed: {e}")
+            sector_det = {}
 
     async def _fetch_signal_ctx():
         # 通用财务与估值信号（2026-10-11）：板块知识库给的是「该盯哪些信号」的
@@ -661,10 +685,11 @@ async def build_full_context(arguments: str = "", skill_name: str = "", goal_hin
     import asyncio
     (
         idx_ctx, comp_ctx, web_ctx, broker_ctx, ann_ctx,
-        hibor_ctx, sector_ctx, signal_ctx,
+        hibor_ctx, sector_ctx, industry_ctx, signal_ctx,
     ) = await asyncio.gather(
         _fetch_indices_ctx(), _fetch_company_ctx(), _fetch_web_ctx(), _fetch_broker_ctx(),
-        _fetch_announcement_ctx(), _fetch_hibor_ctx(), _fetch_sector_ctx(), _fetch_signal_ctx(),
+        _fetch_announcement_ctx(), _fetch_hibor_ctx(), _fetch_sector_ctx(),
+        _fetch_industry_signal_ctx(), _fetch_signal_ctx(),
     )
     # Assemble sections in the same order as the sequential implementation
     if idx_ctx is not None:
@@ -681,6 +706,8 @@ async def build_full_context(arguments: str = "", skill_name: str = "", goal_hin
         parts.append(web_ctx)
     if sector_ctx:
         parts.append(sector_ctx)
+    if industry_ctx:
+        parts.append(industry_ctx)
     if signal_ctx:
         parts.append(signal_ctx)
 
