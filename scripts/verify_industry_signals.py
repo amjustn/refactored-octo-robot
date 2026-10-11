@@ -141,6 +141,11 @@ def section_commodity() -> None:
           "钢铁" in format_commodity_block(["gangtie"], fix, {})
           and "gangtie" not in format_commodity_block(["gangtie"], fix, {}))
     check("商品映射不与电子重复（dianzi 不走商品分支）", "dianzi" not in COMMODITY_MAP and "dianzi" not in COMMODITY_EXTRA)
+    check("碳酸锂已并入有色金属映射（紫金/赣锋等有锂业务）",
+          any(s == "LC" for s, _ in COMMODITY_MAP.get("youse", [])))
+    check("有色块含碳酸锂，且与电力设备同现时只出现一次",
+          "碳酸锂" in format_commodity_block(["youse"], fix, {})
+          and format_commodity_block(["youse", "dianlishebei"], fix, {}).count("碳酸锂") == 1)
 
 
 async def section_live() -> None:
