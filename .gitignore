@@ -9,6 +9,7 @@ data/*.db
 _archive/
 eval/runs/
 data/scratchpad/
+data/tool_ledger/
 data/reports/
 data/data_cache.db
 data/skin_settings.json

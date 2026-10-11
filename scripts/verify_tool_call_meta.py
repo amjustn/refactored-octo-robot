@@ -79,7 +79,8 @@ def part_b_persist() -> None:
         try:
             tc = {"total": 7, "by_tool": {"web_search": 4, "calc": 3},
                   "by_agent": {"researcher": 7}, "agents_with_tools": 1,
-                  "limit_hits": {"web_search": 1}}
+                  "limit_hits": {"web_search": 1},
+                  "ledger_count": 7, "ledger": "data/tool_ledger/__verify_tc_meta__.jsonl"}
             path = P.get_repository().save_report(
                 "management-deep-dive", "测试查询", "# 报告", 12.5, {"total_tokens": 100},
                 task_id="__verify_tc_meta__", tool_calls=tc,
@@ -89,22 +90,35 @@ def part_b_persist() -> None:
             check("B2 tool_calls.total 落盘", meta["tool_calls"]["total"] == 7)
             check("B3 by_tool 落盘且可读", meta["tool_calls"]["by_tool"]["web_search"] == 4)
             check("B4 limit_hits 落盘（观测撞上限）", meta["tool_calls"]["limit_hits"] == {"web_search": 1})
+            check("B4b 明细账本路径与条数落盘",
+                  meta["tool_calls"].get("ledger") == "data/tool_ledger/__verify_tc_meta__.jsonl"
+                  and meta["tool_calls"].get("ledger_count") == 7,
+                  str(meta["tool_calls"]))
 
-            # 无工具任务不应出现该字段（避免给所有报告塞空壳）
+            # 2026-10-08 第2层留痕：无工具任务也显式写 total=0 + ledger="none"，
+            # 让「零次调用」与「根本没有这个字段」在产物上可区分（旧断言要求不写）。
             path2 = P.get_repository().save_report(
                 "industry-research", "行业查询", "# 报告2", 3.0, {"total_tokens": 10},
                 task_id="__verify_tc_none__",
             )
             meta2 = json.loads(path2.with_suffix(".meta.json").read_text(encoding="utf-8"))
-            check("B5 无工具任务不写 tool_calls 字段", "tool_calls" not in meta2, str(meta2.keys()))
+            check("B5 无工具任务也写 tool_calls（total=0 + ledger=none）",
+                  isinstance(meta2.get("tool_calls"), dict)
+                  and meta2["tool_calls"].get("total") == 0
+                  and meta2["tool_calls"].get("ledger") == "none",
+                  str(meta2.get("tool_calls")))
 
-            # total=0 的汇总同样不写
+            # total=0 的汇总同样写，且带显式账本标记
             path3 = P.get_repository().save_report(
                 "industry-research", "行业查询2", "# 报告3", 3.0, {"total_tokens": 10},
                 task_id="__verify_tc_zero__", tool_calls={"total": 0, "by_tool": {}},
             )
             meta3 = json.loads(path3.with_suffix(".meta.json").read_text(encoding="utf-8"))
-            check("B6 total=0 时不写字段", "tool_calls" not in meta3)
+            check("B6 total=0 时写字段且标记 ledger=none",
+                  isinstance(meta3.get("tool_calls"), dict)
+                  and meta3["tool_calls"].get("total") == 0
+                  and meta3["tool_calls"].get("ledger") == "none",
+                  str(meta3.get("tool_calls")))
         finally:
             P.REPORTS_DIR = orig_dir
 

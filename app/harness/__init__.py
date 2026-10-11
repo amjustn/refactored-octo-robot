@@ -329,9 +329,13 @@ async def _save_partial_report(spec: TaskSpec, repo: Repository, reason: str,
     for name, content in artifacts:
         parts.append(f"\n---\n## {name}\n\n{content}\n")
     try:
+        from .runner import get_tool_counts as _get_tool_counts
         path = await repo.asave_report(
             spec.skill_name, spec.arguments, "\n".join(parts), partial=True,
             task_id=spec.task_id, overwrite_name=overwrite_name,
+            # 第2层留痕：取消/失败任务的 partial 报告同样带上账本汇总
+            # （get_tool_counts 会按明细账本兜底重建），不让已发生的调用归零。
+            tool_calls=_get_tool_counts(spec.task_id),
         )
         logger.info(f"partial report saved for {spec.task_id}: {path}")
     except Exception as e:
@@ -429,12 +433,14 @@ async def run(
                 # AllAgentsFailedError 路径走通用异常分支：任务标 failed、
                 # 发 error 事件，历史列表出现「⟳ 继续任务」入口。
                 from .runner import AllAgentsFailedError
+                from .runner import get_tool_counts as _get_tool_counts
                 fatal_detail = "；".join(f["detail"] for f in guard.fatals)
                 logger.error(f"fatal guard hit for {spec.task_id}: {fatal_detail}")
                 try:
                     await repo.asave_report(
                         spec.skill_name, spec.arguments, report, partial=True,
                         task_id=spec.task_id, overwrite_name=report_overwrite,
+                        tool_calls=_get_tool_counts(spec.task_id),
                     )
                 except Exception as pe:
                     logger.warning(f"fatal-gate partial save failed for {spec.task_id}: {pe}")

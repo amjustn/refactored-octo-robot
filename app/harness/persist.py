@@ -733,19 +733,36 @@ class Repository:
             if clean_warnings and not status.get("gates"):
                 status["gates"] = sorted({w["gate"] for w in clean_warnings if w["gate"]})
             meta["data_status"] = status
-        # ── 工具调用汇总（第3步，2026-09-13）────────────────────
-        # 让"这份报告调了多少次工具、有没有撞上限"在报告侧可观测
-        # （此前只在 data/scratchpad/<task>.jsonl 里，报告列表读不到）。
-        if isinstance(tool_calls, dict) and tool_calls.get("total"):
-            clean_tc = {
-                "total": int(tool_calls.get("total") or 0),
-                "by_tool": dict(list((tool_calls.get("by_tool") or {}).items())[:20]),
-                "by_agent": dict(list((tool_calls.get("by_agent") or {}).items())[:20]),
-                "agents_with_tools": int(tool_calls.get("agents_with_tools") or 0),
-            }
-            if tool_calls.get("limit_hits"):
-                clean_tc["limit_hits"] = dict(list(tool_calls["limit_hits"].items())[:20])
-            meta["tool_calls"] = clean_tc
+        # ── 工具调用汇总（第3步，2026-09-13；第2层对账 2026-10-08）────
+        # 让"这份报告调了多少次工具、有没有撞上限"在报告侧可观测。
+        # 2026-10-08 起**所有**新报告都显式写 tool_calls（含 total=0），
+        # 并附明细账本路径与条数：这样「零次工具调用」与「根本没有这个字段」
+        # 在产物上可区分，且 total 可与 ledger_count（账本行数）机械对账。
+        tc_in = tool_calls if isinstance(tool_calls, dict) else {}
+        try:
+            tc_total = int(tc_in.get("total") or 0)
+        except (TypeError, ValueError):
+            tc_total = 0
+        try:
+            tc_ledger_count = int(tc_in.get("ledger_count") or 0)
+        except (TypeError, ValueError):
+            tc_ledger_count = 0
+        tc_ledger = _one_line_str(tc_in.get("ledger"))
+        if not tc_ledger:
+            # 没给账本信息：零调用是明确的 "none"；历史/直连调用方标 "unknown"
+            # （不会被 verify_tool_ledger 当作可对账的新式记录）。
+            tc_ledger = "none" if tc_total == 0 else "unknown"
+        clean_tc = {
+            "total": tc_total,
+            "ledger_count": tc_ledger_count,
+            "ledger": tc_ledger,
+            "by_tool": dict(list((tc_in.get("by_tool") or {}).items())[:20]),
+            "by_agent": dict(list((tc_in.get("by_agent") or {}).items())[:20]),
+            "agents_with_tools": int(tc_in.get("agents_with_tools") or 0),
+        }
+        if tc_in.get("limit_hits"):
+            clean_tc["limit_hits"] = dict(list(tc_in["limit_hits"].items())[:20])
+        meta["tool_calls"] = clean_tc
         try:
             report_path.with_suffix(".meta.json").write_text(
                 json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"

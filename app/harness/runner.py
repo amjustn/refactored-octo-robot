@@ -86,6 +86,14 @@ _DEBATE_ELLIPSIS = "\n\n...[中间内容省略]...\n\n"
 
 # ── P2: audit trail / scratchpad ─────────────────────────────────
 SCRATCHPAD_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "scratchpad"
+# ── 明细账本（第二层留痕，2026-10-08）────────────────────────────
+# scratchpad 与 reports 都可能被清理/忽略，且前者只存过原始调用、没有汇总对账。
+# 这里把每次工具调用写一条可对账的明细到 data/tool_ledger/<task_id>.jsonl
+# （不在日常清理路径内），报告落盘时把「明细条数」与「汇总计数」一并写进 meta，
+# 让「调用了几次」在报告侧可被机械核对。零调用任务的 ledger 记为 "none"。
+TOOL_LEDGER_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "tool_ledger"
+LEDGER_PREVIEW_CHARS = 500      # 结果短摘要截断长度
+LEDGER_ARGS_CHARS = 300         # 参数摘要截断长度
 # 超时中断的 Agent 会把「中断前已取到的工具原始数据」交出来，用这个前缀标记。
 # ⚠️ resume 的复用判定必须把这类 artifact 当成「要重跑」（它只有数据、没有分析）。
 PARTIAL_SALVAGE_MARK = "[部分成果·超时中断]"
@@ -380,6 +388,92 @@ def _format_dispute_table(debate_output: str) -> str:
 _TOOL_COUNTS: "OrderedDict[str, dict]" = OrderedDict()
 _TOOL_COUNTS_MAX = 64
 
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+
+
+def _summarize_args(args, limit: int = LEDGER_ARGS_CHARS) -> str:
+    """把工具入参压成单行、可读、有上限的摘要（写入明细账本用）。"""
+    try:
+        text = json.dumps(args or {}, ensure_ascii=False, default=str)
+    except Exception:  # noqa: BLE001
+        text = str(args)
+    text = " ".join(text.split())
+    return text[:limit]
+
+
+def ledger_path_for(task_id: str) -> Optional[Path]:
+    """某任务的明细账本路径；task_id 为空返回 None。"""
+    tid = (task_id or "").strip()
+    if not tid:
+        return None
+    return TOOL_LEDGER_DIR / f"{tid}.jsonl"
+
+
+def count_tool_ledger(task_id: str) -> int:
+    """明细账本里的调用条数（无文件/读失败返回 0）。"""
+    path = ledger_path_for(task_id)
+    if path is None or not path.exists():
+        return 0
+    try:
+        with open(path, encoding="utf-8") as f:
+            return sum(1 for line in f if line.strip())
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def ledger_relpath(task_id: str) -> str:
+    """账本相对项目根的路径；无账本返回 "none"（供 meta 落盘）。"""
+    path = ledger_path_for(task_id)
+    if path is None or not path.exists():
+        return "none"
+    try:
+        return str(path.relative_to(_PROJECT_ROOT))
+    except Exception:  # noqa: BLE001
+        return str(path)
+
+
+def summarize_ledger(task_id: str) -> dict:
+    """从明细账本反推汇总（供取消/部分任务的 get_tool_counts 兜底）。
+
+    无账本返回 {}；解析失败的行跳过。字段与 summarize_tool_calls 对齐，
+    额外带 ledger / ledger_count，保证「无汇总但已有明细」时也不会丢观测。
+    """
+    path = ledger_path_for(task_id)
+    if path is None or not path.exists():
+        return {}
+    by_tool: dict = {}
+    by_agent: dict = {}
+    total = 0
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except Exception:  # noqa: BLE001
+                    continue
+                tool = str(row.get("tool") or "")
+                agent = str(row.get("agent") or "")
+                if not tool:
+                    continue
+                total += 1
+                by_tool[tool] = by_tool.get(tool, 0) + 1
+                by_agent[agent] = by_agent.get(agent, 0) + 1
+    except Exception:  # noqa: BLE001
+        return {}
+    if total == 0:
+        return {}
+    return {
+        "total": total,
+        "by_tool": dict(sorted(by_tool.items(), key=lambda kv: (-kv[1], kv[0]))),
+        "by_agent": dict(sorted(by_agent.items(), key=lambda kv: (-kv[1], kv[0]))),
+        "agents_with_tools": len([k for k, v in by_agent.items() if v]),
+        "ledger_count": total,
+        "ledger": ledger_relpath(task_id),
+    }
+
 
 def summarize_tool_calls(counts: dict, limit_hits: dict = None) -> dict:
     """把 {agent: {tool: n}} + {tool: 撞上限次数} 汇总成 meta 友好的结构。"""
@@ -417,8 +511,14 @@ def summarize_tool_calls(counts: dict, limit_hits: dict = None) -> dict:
 
 
 def record_tool_counts(task_id: str, counts: dict, limit_hits: dict = None) -> dict:
-    """记录某任务的工具调用汇总（有界字典，失败一律吞掉）。"""
+    """记录某任务的工具调用汇总（有界字典，失败一律吞掉）。
+
+    汇总里附上明细账本的条数与路径（ledger / ledger_count），供报告落盘时
+    与 meta["tool_calls"]["total"] 对账。
+    """
     summary = summarize_tool_calls(counts, limit_hits)
+    summary["ledger_count"] = count_tool_ledger(task_id)
+    summary["ledger"] = ledger_relpath(task_id)
     try:
         if task_id:
             _TOOL_COUNTS[task_id] = summary
@@ -431,9 +531,17 @@ def record_tool_counts(task_id: str, counts: dict, limit_hits: dict = None) -> d
 
 
 def get_tool_counts(task_id: str) -> dict:
-    """取回某任务的工具调用汇总；没有留痕返回 {}。"""
+    """取回某任务的工具调用汇总；没有留痕则退回从明细账本重建。
+
+    - 正常完成的任务：内存留痕（record_tool_counts）优先；
+    - 取消/部分任务：run() 末尾的留痕未执行，这里按账本明细重建，
+      避免 partial 报告把已发生的调用记成 0。
+    """
     try:
-        return _TOOL_COUNTS.get(task_id or "", {}) or {}
+        summary = _TOOL_COUNTS.get(task_id or "", {}) or {}
+        if summary:
+            return summary
+        return summarize_ledger(task_id)
     except Exception:  # noqa: BLE001
         return {}
 
@@ -466,7 +574,7 @@ def degrade_empty_synthesis(synthesis: Optional[str]) -> tuple[str, Optional[dic
     `delta.content` —— 一旦某次输出整段落在思考字段里，综合结果就是空串。
     此前 run_multi 对 synthesis 只有「超时」「异常后重试」「重试再失败」两条半兜底，
     **没有空值判据** ⇒ 空串被原样拼进 final_report，任务仍标 completed、报告头照写
-    N/N Agent 成功（实测多份：2026-09-03 / 09-06 / 09-19 / 10-11 16:09）。
+    N/N Agent 成功（实测 4 份：2026-09-03 / 09-06 / 09-19 / 10-11 16:09）。
     本函数把这种静默失败变成显式降级：报告里出现明确文案、meta 里留下告警。
 
     返回 (synthesis, warning)：warning 为 None 表示无需降级。
@@ -490,6 +598,8 @@ class AgentRunner:
         # 撞上每工具循环上限的次数（按工具名）——被拒的调用不计入 _tool_call_counts，
         # 但"撞上限"本身是要观测的信号（第3步）
         self._tool_limit_hits: dict[str, int] = {}
+        # 明细账本内「本次调用在任务内的序号」（第2层留痕，2026-10-08）
+        self._tool_seq = 0
         # P2: scratchpad path — written once on first tool call
         self._scratchpad_path: Optional[Path] = None
         # Custom-model tool fallbacks — merged into guard_warnings by harness run()
@@ -624,6 +734,7 @@ class AgentRunner:
         # P1: reset tool call counters at the start of each run
         self._tool_call_counts.clear()
         self._tool_limit_hits.clear()
+        self._tool_seq = 0
         self._scratchpad_path = None
         llm_config = spec.llm.to_llm_config_dict()
 
@@ -780,14 +891,23 @@ class AgentRunner:
         ]
         return "\n".join(out)
 
-    async def _log_tool_call(self, agent: str, tool_name: str, args: dict, result: str):
-        """P2: append one JSONL line to the scratchpad file (non-fatal)."""
+    async def _log_tool_call(self, agent: str, tool_name: str, args: dict, result: str,
+                             *, ledger: bool = True):
+        """P2: append one JSONL line to the scratchpad file (non-fatal).
+
+        ledger=True 时同时写第二层明细账本 data/tool_ledger/<task_id>.jsonl：
+        时间戳 / task_id / agent / 工具名 / 参数摘要 / 返回长度 / 结果短摘要 /
+        任务内序号，供 verify_tool_ledger 与 meta 机械对账。被拒的调用
+        （TOOL_LOOP_LIMIT）不是真实工具调用，以 ledger=False 只留 scratchpad，
+        保证账本条数与汇总计数严格相等。
+        """
+        ts = time.time()
         try:
             if self._scratchpad_path is None:
                 SCRATCHPAD_DIR.mkdir(parents=True, exist_ok=True)
                 self._scratchpad_path = SCRATCHPAD_DIR / f"{self.task_id}.jsonl"
             entry = json.dumps({
-                "ts": time.time(),
+                "ts": ts,
                 "agent": agent or "unknown",
                 "tool": tool_name,
                 "args": args,
@@ -798,6 +918,29 @@ class AgentRunner:
                 f.write(entry + "\n")
         except Exception:
             pass  # never let scratchpad failure block research
+
+        if not ledger:
+            return
+        try:
+            path = ledger_path_for(self.task_id)
+            if path is None:
+                return
+            TOOL_LEDGER_DIR.mkdir(parents=True, exist_ok=True)
+            self._tool_seq += 1
+            record = {
+                "seq": self._tool_seq,
+                "ts": ts,
+                "task_id": self.task_id,
+                "agent": agent or "unknown",
+                "tool": tool_name,
+                "args_summary": _summarize_args(args),
+                "result_len": len(result or ""),
+                "result_preview": (result or "")[:LEDGER_PREVIEW_CHARS],
+            }
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except Exception:
+            pass  # 明细缺失由 verify_tool_ledger 对账暴露，绝不阻断研究
 
     def _tool_executor(self, agent: Optional[str] = None, max_same_tool_calls: int = MAX_SAME_TOOL_CALLS):
         """P1: function-calling tool executor with soft loop limits.
@@ -829,8 +972,10 @@ class AgentRunner:
                     "message": f"已调用 {name} {current} 次，达到上限 {max_same_tool_calls} 次。"
                                f"请基于已有数据直接输出结论，不要再调用此工具。",
                 }, ensure_ascii=False)
-                # Log the limit hit to scratchpad
-                await runner._log_tool_call(agent_key, f"{name}__LIMIT_HIT", {}, limit_msg)
+                # Log the limit hit to scratchpad (not the detail ledger —
+                # a rejected call is not an executed tool call, so it must not
+                # inflate ledger_count vs the summary total).
+                await runner._log_tool_call(agent_key, f"{name}__LIMIT_HIT", {}, limit_msg, ledger=False)
                 return limit_msg
 
             # Execute the actual tool
@@ -1410,7 +1555,7 @@ class AgentRunner:
 
         # 空值兜底（2026-10-11）：混合思考模型可能把整段输出落在 reasoning 字段，
         # 而 chat_stream 只读 content ⇒ 综合结果为空串。没有这条判据时，空串会被
-        # 原样拼进报告、任务照样标成功（实测多份历史报告），属于静默失败。
+        # 原样拼进报告、任务照样标成功（实测 4 份历史报告），属于静默失败。
         synthesis, _empty_warn = degrade_empty_synthesis(synthesis)
         if _empty_warn is not None:
             logger.error("Team Lead synthesis returned empty content — 报告降级为仅附录")
